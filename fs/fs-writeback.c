@@ -1960,6 +1960,7 @@ static long writeback_sb_inodes(struct super_block *sb,
 {
 	struct writeback_control wbc = {
 		.sync_mode		= work->sync_mode,
+		.reason			= work->reason,
 		.tagged_writepages	= work->tagged_writepages,
 		.for_kupdate		= work->for_kupdate,
 		.for_background		= work->for_background,
