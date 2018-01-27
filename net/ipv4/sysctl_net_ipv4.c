@@ -527,6 +527,33 @@ static void proc_fib_multipath_hash_set_seed(struct net *net, u32 user_seed)
 
 #endif
 
+static int
+min_rto_compat_proc_dointvec_minmax(const struct ctl_table *table, int write,
+				    void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct net *net = container_of(table->data, struct net,
+				       ipv4.sysctl_tcp_rto_min_us);
+	struct ctl_table tbl;
+	int rto_min_ms;
+	int ret;
+
+	rto_min_ms = net->ipv4.sysctl_tcp_rto_min_us / 1000;
+
+	tbl = *table;
+	tbl.data = &rto_min_ms;
+
+	ret = proc_douintvec_minmax(&tbl, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+	if (write) {
+		pr_warn_once("write to deprecated sysctl %s by %s, please use tcp_rto_min_us!\n",
+			     table->procname, current->comm);
+		net->ipv4.sysctl_tcp_rto_min_us = rto_min_ms * 1000;
+	}
+
+	return 0;
+}
+
 static struct ctl_table ipv4_table[] = {
 	{
 		.procname	= "tcp_max_orphans",
@@ -1564,6 +1591,14 @@ static struct ctl_table ipv4_net_table[] = {
 		.proc_handler	= proc_dou8vec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO,
+	},
+	{
+		.procname	= "tcp_min_rto_ms",
+		.data		= &init_net.ipv4.sysctl_tcp_rto_min_us,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= min_rto_compat_proc_dointvec_minmax,
+		.extra1		= SYSCTL_ONE,
 	},
 	{
 		.procname       = "tcp_plb_enabled",
