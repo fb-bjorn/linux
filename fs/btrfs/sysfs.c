@@ -847,7 +847,6 @@ static ssize_t btrfs_size_classes_show(struct kobject *kobj,
 			       none, small, medium, large);
 }
 
-#ifdef CONFIG_BTRFS_DEBUG
 /*
  * Request chunk allocation with current chunk size.
  */
@@ -890,8 +889,6 @@ static ssize_t btrfs_force_chunk_alloc_store(struct kobject *kobj,
 	return -ENOSPC;
 }
 BTRFS_ATTR_W(space_info, force_chunk_alloc, btrfs_force_chunk_alloc_store);
-
-#endif
 
 SPACE_INFO_ATTR(flags);
 SPACE_INFO_ATTR(total_bytes);
@@ -1039,9 +1036,7 @@ static struct attribute *space_info_attrs[] = {
 	BTRFS_ATTR_PTR(space_info, reclaim_bytes),
 	BTRFS_ATTR_PTR(space_info, reclaim_errors),
 	BTRFS_ATTR_PTR(space_info, periodic_reclaim),
-#ifdef CONFIG_BTRFS_DEBUG
 	BTRFS_ATTR_PTR(space_info, force_chunk_alloc),
-#endif
 	NULL,
 };
 ATTRIBUTE_GROUPS(space_info);
