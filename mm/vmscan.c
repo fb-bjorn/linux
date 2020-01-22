@@ -451,6 +451,8 @@ static int reclaimer_offset(struct scan_control *sc)
 
 	if (current_is_kswapd())
 		return 0;
+	if (current_is_cswapd())
+		return 0;
 	if (current_is_khugepaged())
 		return PGSTEAL_KHUGEPAGED - PGSTEAL_KSWAPD;
 	if (sc->proactive)

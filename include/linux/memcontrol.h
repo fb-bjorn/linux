@@ -898,6 +898,8 @@ static inline void mem_cgroup_handle_over_high(gfp_t gfp_mask)
 		__mem_cgroup_handle_over_high(gfp_mask);
 }
 
+bool current_is_cswapd(void);
+
 unsigned long mem_cgroup_get_max(struct mem_cgroup *memcg);
 
 void mem_cgroup_print_oom_context(struct mem_cgroup *memcg,
@@ -1332,6 +1334,11 @@ mem_cgroup_print_oom_meminfo(struct mem_cgroup *memcg)
 
 static inline void mem_cgroup_handle_over_high(gfp_t gfp_mask)
 {
+}
+
+static inline bool current_is_cswapd(void)
+{
+	return false;
 }
 
 static inline struct mem_cgroup *mem_cgroup_get_oom_group(

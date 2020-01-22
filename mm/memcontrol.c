@@ -2329,10 +2329,24 @@ static unsigned long reclaim_high(struct mem_cgroup *memcg,
 
 static void high_work_func(struct work_struct *work)
 {
+	unsigned long high, usage;
 	struct mem_cgroup *memcg;
 
 	memcg = container_of(work, struct mem_cgroup, high_work);
-	reclaim_high(memcg, MEMCG_CHARGE_BATCH, GFP_KERNEL);
+
+	high = READ_ONCE(memcg->memory.high);
+	usage = page_counter_read(&memcg->memory);
+
+	if (usage <= high)
+		return;
+
+	set_worker_desc("cswapd/%llx", cgroup_id(memcg->css.cgroup));
+	reclaim_high(memcg, usage - high, GFP_KERNEL);
+}
+
+bool current_is_cswapd(void)
+{
+	return current_work_func() == high_work_func;
 }
 
 /*
@@ -2490,6 +2504,22 @@ void __mem_cgroup_handle_over_high(gfp_t gfp_mask)
 	memcg = get_mem_cgroup_from_mm(current->mm);
 	current->memcg_nr_pages_over_high = 0;
 
+	/*
+	 * META: Upstream runs direct reclaim right away since we know
+	 * we're in excess of memory.high; then it checks whether the
+	 * remaining excess puts the cgroup into throttling territory
+	 * - we don't throttle for small remaining excesses.
+	 *
+	 * Since at Meta we have an async reclaimer, check for the
+	 * throttling threshold first, THEN do direct reclaim ONLY if
+	 * we would actually throttle. This way we use the throttling
+	 * threshold as a grace buffer for async reclaim, and only
+	 * enter direct reclaim if the async worker cannot keep up.
+	 *
+	 * This is comparable to the watermarking we do for kswapd to
+	 * avoid unnecessary direct reclaim invocations.
+	 */
+
 retry_reclaim:
 	/*
 	 * Bail if the task is already exiting. Unlike memory.max,
@@ -2501,19 +2531,6 @@ retry_reclaim:
 	 */
 	if (task_is_dying())
 		goto out;
-
-	/*
-	 * The allocating task should reclaim at least the batch size, but for
-	 * subsequent retries we only want to do what's necessary to prevent oom
-	 * or breaching resource isolation.
-	 *
-	 * This is distinct from memory.max or page allocator behaviour because
-	 * memory.high is currently batched, whereas memory.max and the page
-	 * allocator run every time an allocation is made.
-	 */
-	nr_reclaimed = reclaim_high(memcg,
-				    in_retry ? SWAP_CLUSTER_MAX : nr_pages,
-				    gfp_mask);
 
 	/*
 	 * memory.high is breached and reclaim is unable to keep up. Throttle
@@ -2540,6 +2557,19 @@ retry_reclaim:
 	 */
 	if (penalty_jiffies <= HZ / 100)
 		goto out;
+
+	/*
+	 * The allocating task should reclaim at least the batch size, but for
+	 * subsequent retries we only want to do what's necessary to prevent oom
+	 * or breaching resource isolation.
+	 *
+	 * This is distinct from memory.max or page allocator behaviour because
+	 * memory.high is currently batched, whereas memory.max and the page
+	 * allocator run every time an allocation is made.
+	 */
+	nr_reclaimed = reclaim_high(memcg,
+				    in_retry ? SWAP_CLUSTER_MAX : nr_pages,
+				    gfp_mask);
 
 	/*
 	 * If reclaim is making forward progress but we're still over
@@ -2724,14 +2754,20 @@ done_restock:
 		swap_high = page_counter_read(&memcg->swap) >
 			READ_ONCE(memcg->swap.high);
 
+		/*
+		 * META: Kick off the async reclaimer, which should be
+		 * doing most of the work to avoid latency in the
+		 * workload. But also check in on its progress before
+		 * resuming to userspace, in case we need to do direct
+		 * reclaim, or even throttle the allocating thread if
+		 * async reclaim cannot keep up with allocation demand.
+		 */
+		if (mem_high)
+			queue_work(system_unbound_wq, &memcg->high_work);
+
 		/* Don't bother a random interrupted task */
-		if (!in_task()) {
-			if (mem_high) {
-				schedule_work(&memcg->high_work);
-				break;
-			}
-			continue;
-		}
+		if (!in_task())
+			break;
 
 		if (mem_high || swap_high) {
 			/*

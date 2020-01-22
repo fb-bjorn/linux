@@ -6185,6 +6185,13 @@ struct work_struct *current_work(void)
 }
 EXPORT_SYMBOL(current_work);
 
+work_func_t current_work_func(void)
+{
+	struct worker *worker = current_wq_worker();
+
+	return worker ? worker->current_func : NULL;
+}
+
 /**
  * current_is_workqueue_rescuer - is %current workqueue rescuer?
  *

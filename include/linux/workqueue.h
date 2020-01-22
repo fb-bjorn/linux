@@ -659,6 +659,7 @@ extern void workqueue_set_max_active(struct workqueue_struct *wq,
 extern void workqueue_set_min_active(struct workqueue_struct *wq,
 				     int min_active);
 extern struct work_struct *current_work(void);
+extern work_func_t current_work_func(void);
 extern bool current_is_workqueue_rescuer(void);
 extern bool workqueue_congested(int cpu, struct workqueue_struct *wq);
 extern unsigned int work_busy(struct work_struct *work);
