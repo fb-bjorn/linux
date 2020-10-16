@@ -3071,7 +3071,8 @@ static void ioc_pd_stat(struct blkg_policy_data *pd, struct seq_file *s)
 
 	seq_printf(s, " cost.usage=%llu", iocg->last_stat.usage_us);
 
-	if (blkcg_debug_stats)
+	/* FB: always enable iocost debug stats for monitoring */
+	if (true || blkcg_debug_stats)
 		seq_printf(s, " cost.wait=%llu cost.indebt=%llu cost.indelay=%llu",
 			iocg->last_stat.wait_us,
 			iocg->last_stat.indebt_us,
