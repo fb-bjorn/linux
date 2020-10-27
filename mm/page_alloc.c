@@ -267,7 +267,41 @@ const char * const migratetype_names[MIGRATE_TYPES] = {
 
 int min_free_kbytes = 1024;
 int user_min_free_kbytes = -1;
-static int watermark_boost_factor __read_mostly = 15000;
+/*
+ * FB:
+ *
+ * Watermark boosting increases reclaim pressure on zones where we
+ * observe undesirable allocation placement, such as unmovable
+ * allocations landing in movable page blocks. The goal is to stem a
+ * trend of long-term fragmentation that is hard or impossible to fix.
+ *
+ * However, this mechanism has caused several problems in our
+ * production environment:
+ *
+ * 1. It can tie up kswapd in zones with poor reclaim efficiency. This
+ *    burns CPU and causes a sharp increase in direct reclaim rates,
+ *    as the allocating threads now have to pick up the slack. This is
+ *    bad for allocation latencies. This may be fixable with a
+ *    priority scheme that has kswapd always serve user allocations
+ *    first, and relegate fragmentation fights to idle periods.
+ *
+ * 2. It can cause premature reclaim and memory pressure on NUMA
+ *    nodes. Usually, kswapd is woken up when all nodes are full. But
+ *    with watermark boosting, we can wake kswapd on one node while
+ *    there is still plenty of memory available in others. This ends
+ *    up trashing the workingset on the full node and causes refaults
+ *    and pressure. Our NUMA distances are short enough that falling
+ *    back to other nodes earlier would be preferable than trying to
+ *    fight local fragmentation.
+ *
+ * Overall, the trade-off does not seem worth it to us. We may revisit
+ * this if we observe problems with long-term fragmentation - look out
+ * for higher-order allocation success rates (THP fallbacks etc.) with
+ * uptime. Although for THP we'll probably want stricter guarantees to
+ * protect movable blocks than the allocator's best effort grouping
+ * anyway (things like CMA).
+ */
+static int watermark_boost_factor __read_mostly;
 static int watermark_scale_factor = 10;
 int defrag_mode;
 
