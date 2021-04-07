@@ -29,6 +29,8 @@ LDFLAGS_purgatory.ro := -r $(PURGATORY_LDFLAGS)
 LDFLAGS_purgatory.chk := $(PURGATORY_LDFLAGS)
 targets += purgatory.ro purgatory.chk
 
+PGO_PROFILE	:= n
+
 # These are adjustments to the compiler flags used for objects that
 # make up the standalone purgatory.ro
 

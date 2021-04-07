@@ -60,6 +60,7 @@ KBUILD_CFLAGS := $(filter-out $(CC_FLAGS_LTO), $(KBUILD_CFLAGS))
 # The .data section would be renamed to .data.efistub, therefore, remove
 # `-fdata-sections` flag from KBUILD_CFLAGS_KERNEL
 KBUILD_CFLAGS_KERNEL := $(filter-out -fdata-sections, $(KBUILD_CFLAGS_KERNEL))
+PGO_PROFILE			:= n
 
 KBUILD_AFLAGS			:= $(KBUILD_CFLAGS) -D__ASSEMBLY__
 
