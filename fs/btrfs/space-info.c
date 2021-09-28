@@ -642,9 +642,9 @@ static void dump_global_block_rsv(struct btrfs_fs_info *fs_info)
 	DUMP_BLOCK_RSV(fs_info, delayed_refs_rsv);
 }
 
-static void __btrfs_dump_space_info(const struct btrfs_space_info *info)
+static void __btrfs_dump_space_info(struct btrfs_space_info *info)
 {
-	const struct btrfs_fs_info *fs_info = info->fs_info;
+	struct btrfs_fs_info *fs_info = info->fs_info;
 	const char *flag_str = btrfs_space_info_type_str(info);
 	lockdep_assert_held(&info->lock);
 
@@ -655,10 +655,12 @@ static void __btrfs_dump_space_info(const struct btrfs_space_info *info)
 		   (s64)(info->total_bytes - btrfs_space_info_used(info, true)),
 		   info->full ? "" : "not ");
 	btrfs_info(fs_info,
-"space_info total=%llu, used=%llu, pinned=%llu, reserved=%llu, may_use=%llu, readonly=%llu zone_unusable=%llu",
+		"space_info total=%llu, used=%llu, pinned=%llu, reserved=%llu, may_use=%llu, readonly=%llu zone_unusable=%llu delalloc=%llu ordered=%llu",
 		info->total_bytes, info->bytes_used, info->bytes_pinned,
 		info->bytes_reserved, info->bytes_may_use,
-		info->bytes_readonly, info->bytes_zone_unusable);
+		info->bytes_readonly, info->bytes_zone_unusable,
+		percpu_counter_sum_positive(&fs_info->delalloc_bytes),
+		percpu_counter_sum_positive(&fs_info->ordered_bytes));
 }
 
 void btrfs_dump_space_info(struct btrfs_space_info *info, u64 bytes,
@@ -1148,6 +1150,16 @@ static bool maybe_fail_all_tickets(struct btrfs_space_info *space_info)
 	const int abort_error = BTRFS_FS_ERROR(fs_info);
 
 	trace_btrfs_fail_all_tickets(fs_info, space_info);
+
+	if (space_info->flags & BTRFS_BLOCK_GROUP_METADATA) {
+		static DEFINE_RATELIMIT_STATE(_rs,
+					      DEFAULT_RATELIMIT_INTERVAL * 10, 1);
+		if (__ratelimit(&_rs)) {
+			btrfs_err(fs_info,
+				  "reserve metadata bytes failed, possible early enospc");
+			__btrfs_dump_space_info(space_info);
+		}
+	}
 
 	if (btrfs_test_opt(fs_info, ENOSPC_DEBUG)) {
 		btrfs_info(fs_info, "cannot satisfy tickets, dumping space info");
