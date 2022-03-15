@@ -2021,8 +2021,8 @@ static int btrfs_reclaim_block_group(struct btrfs_block_group *bg, int *reclaime
 	ret = btrfs_relocate_chunk(fs_info, bg->start, false);
 	if (ret) {
 		btrfs_dec_block_group_ro(bg);
-		btrfs_err(fs_info, "error relocating chunk %llu",
-			  bg->start);
+		btrfs_info(fs_info, "error relocating chunk %llu %d",
+			  bg->start, ret);
 		used = 0;
 		reserved = 0;
 		spin_lock(&space_info->lock);
