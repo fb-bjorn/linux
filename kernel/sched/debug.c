@@ -170,6 +170,7 @@ static const struct file_operations sched_feat_fops = {
 	.release	= single_release,
 };
 
+#include <linux/sysctl.h>
 static ssize_t sched_scaling_write(struct file *filp, const char __user *ubuf,
 				   size_t cnt, loff_t *ppos)
 {
