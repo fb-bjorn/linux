@@ -36,7 +36,6 @@ static int llc_config = 3;
 static bool pe_print_mode;
 static bool ddr_bypass;
 static bool pcie_console;
-static bool emulation_boot_timeouts;
 static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
 static int pe_idcache_disable;
 static int ecc_region_size_mb;
@@ -63,10 +62,6 @@ MODULE_PARM_DESC(pcie_console, "Enable Zephyr console on PCIe UART");
 module_param(ddr_bypass, bool, 0444);
 MODULE_PARM_DESC(ddr_bypass,
 		 "Bypassing DDR initialization through boot parameter");
-
-module_param(emulation_boot_timeouts, bool, 0444);
-MODULE_PARM_DESC(emulation_boot_timeouts,
-		 "Use (extra long) emulation bootflow timeouts");
 
 module_param(m7_hb_period_ms, int, 0644);
 MODULE_PARM_DESC(
@@ -95,6 +90,24 @@ enum freya_boot_mode {
 	FREYA_BOOT_PROVISION,
 };
 
+enum hw_type {
+	HW_TYPE_ASIC = 0,
+	HW_TYPE_EMU,
+	HW_TYPE_SIM,
+	HW_TYPE_EMU_LONG = 4,
+	HW_TYPE_UNK
+};
+
+struct boot_timeouts {
+	uint32_t rdy_for_img_xfer_ms;
+	uint32_t img_received_ms;
+	uint32_t boot1_load_ms;
+	uint32_t boot1_ready_ms;
+	uint32_t ccp_load_ms;
+	uint32_t wait_for_ccp_boot_retries;
+	uint32_t polling_period_ms;
+};
+
 struct fbia_priv_data {
 	uint64_t cxram_sideband_ofs;
 };
@@ -102,6 +115,7 @@ struct fbia_priv_data {
 struct freya_priv {
 	const struct fbia_priv_data *data;
 	enum freya_boot_mode boot_mode;
+	const struct boot_timeouts *boot_timeouts;
 	/* Protects against concurrent secure debug unlocks */
 	struct mutex download_mtx;
 
@@ -554,8 +568,10 @@ static inline int freya_wait_for_status(struct fba_device *fba_dev,
 					uint32_t value,
 					unsigned long timeout_ms)
 {
+	struct freya_priv *priv = fba_dev->impl_priv;
 	unsigned long timeout = jiffies + msecs_to_jiffies(timeout_ms);
 	uint32_t rd_val = freya_read_cxram_sb(fba_dev, offset);
+	uint32_t i = 1;
 
 	while ((rd_val & mask) != value) {
 		/* Bail early if we're unbinding. */
@@ -565,8 +581,11 @@ static inline int freya_wait_for_status(struct fba_device *fba_dev,
 		if (time_after(jiffies, timeout))
 			return -ETIMEDOUT;
 
-		cpu_relax();
-		cond_resched();
+		fba_dev_info(fba_dev, "%s: Waiting for value %u try %d.",
+			     __func__, value, i++);
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout(msecs_to_jiffies(
+			priv->boot_timeouts->polling_period_ms));
 		rd_val = freya_read_cxram_sb(fba_dev, offset);
 	}
 
@@ -676,8 +695,7 @@ static int freya_download_image(struct fba_device *fba_dev,
 	// Setting the initiate download bit from host
 	cxram_sideband_setbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
 	fba_dev_info(fba_dev, "Initiate download");
-	timeout = emulation_boot_timeouts ? EMULATION_DEFAULT_TIMEOUT :
-						  RDY_FOR_IMG_XFER_TIMEOUT_MS;
+	timeout = priv->boot_timeouts->rdy_for_img_xfer_ms;
 
 	// Waiting for the device to respond that it is ready for image transfer
 	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
@@ -707,8 +725,7 @@ static int freya_download_image(struct fba_device *fba_dev,
 	// Signal to the device that the image transfer is done
 	cxram_sideband_setbit(fba_dev, TRANSFER_DONE, SB_FW_UPDATE_OFS);
 	fba_dev_info(fba_dev, "Device is notified that transfer is done");
-	timeout = emulation_boot_timeouts ? EMULATION_DEFAULT_TIMEOUT :
-						  IMAGE_RECEIVED_TIMEOUT_MS;
+	timeout = priv->boot_timeouts->img_received_ms;
 
 	// Waiting for the device to acknowledge the transfer
 	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
@@ -799,6 +816,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 {
 	int ret;
 	unsigned long timeout;
+	struct freya_priv *priv = fba_dev->impl_priv;
 
 	// Assume CCP FW is loaded if PCIe Boot is not enabled
 	if (!fba_dev->pcie_boot_en)
@@ -817,8 +835,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 		freya_write_cxram_sb(fba_dev, 0, SB_LPDDR_ECC_CONFIG_OFS);
 	}
 
-	timeout = emulation_boot_timeouts ? EMULATION_DEFAULT_TIMEOUT :
-						  BOOT1_LOAD_TIMEOUT_MS;
+	timeout = priv->boot_timeouts->boot1_load_ms;
 
 	/*
 	 * The DDR Initialized bit may not be cleared by the device until after boot1 has
@@ -840,8 +857,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 		     fba_dev->boot1_filename);
 
 	if (!ddr_bypass) {
-		timeout = emulation_boot_timeouts ? EMULATION_DEFAULT_TIMEOUT :
-							  BOOT1_READY_TIMEOUT_MS;
+		timeout = priv->boot_timeouts->boot1_ready_ms;
 
 		ret = freya_wait_for_status(fba_dev, SB_BOOT_STATUS2_OFS,
 					    BOOT1_COMPLETE_MASK,
@@ -908,6 +924,7 @@ static int freya_load_ccp(struct fba_device *fba_dev)
 {
 	int ret;
 	unsigned long timeout;
+	struct freya_priv *priv = fba_dev->impl_priv;
 
 	// Assume CCP FW is loaded if PCIe Boot is not enabled
 	if (!fba_dev->pcie_boot_en)
@@ -916,8 +933,7 @@ static int freya_load_ccp(struct fba_device *fba_dev)
 	//Clear the mailbox before we start loading/booting ccp
 	set_mailbox(fba_dev, SAIL_RDY, 0);
 
-	timeout = emulation_boot_timeouts ? EMULATION_DEFAULT_TIMEOUT :
-						  CCP_LOAD_TIMEOUT_MS;
+	timeout = priv->boot_timeouts->ccp_load_ms;
 
 	ret = freya_boot(fba_dev, LOCATION_RISCV, fba_dev->boot2_filename,
 			 timeout);
@@ -932,13 +948,13 @@ static int freya_boot_ccp(struct fba_device *fba_dev)
 {
 	int rc;
 	int retry_limit;
+	struct freya_priv *priv = fba_dev->impl_priv;
 
 	/*Assume APP FW is booted if PCIe Boot is not enabled*/
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
-	retry_limit = emulation_boot_timeouts ? EMULATION_CCP_BOOT_RETRIES :
-						      WAIT_FOR_CCP_BOOT_RETRIES;
+	retry_limit = priv->boot_timeouts->wait_for_ccp_boot_retries;
 
 	rc = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC, retry_limit);
 	if (rc < 0)
@@ -1247,6 +1263,46 @@ static int freya_init_priv(struct fba_device *fba_dev,
 	return 0;
 }
 
+static const struct boot_timeouts asic_boot_timeouts = {
+	.rdy_for_img_xfer_ms = RDY_FOR_IMG_XFER_TIMEOUT_MS,
+	.img_received_ms = IMAGE_RECEIVED_TIMEOUT_MS,
+	.boot1_load_ms = BOOT1_LOAD_TIMEOUT_MS,
+	.boot1_ready_ms = BOOT1_READY_TIMEOUT_MS,
+	.ccp_load_ms = CCP_LOAD_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = WAIT_FOR_CCP_BOOT_RETRIES,
+	.polling_period_ms = ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts emu_boot_timeouts = {
+	.rdy_for_img_xfer_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = EMU_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts sim_boot_timeouts = {
+	.rdy_for_img_xfer_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = SIM_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts emu_long_boot_timeouts = {
+	.rdy_for_img_xfer_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = EMU_LONG_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
 static const struct fbia_priv_data freya_data = {
 	.cxram_sideband_ofs = FREYA_CXRAM_SIZE - SIDEBAND_SIZE,
 };
@@ -1268,6 +1324,7 @@ static int freya_init(struct fba_device *fba_dev)
 	priv->cxram_upgrade_ofs =
 		SRAM_UPGRADE_OFS(FREYA_CXRAM_BASE, FREYA_CXRAM_SIZE);
 	priv->cxram_upgrade_sz = SRAM_UPGRADE_MEM_SIZE;
+	priv->boot_timeouts = &asic_boot_timeouts;
 
 	return 0;
 }
@@ -1276,6 +1333,7 @@ static int artemis_init(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv;
 	int rc;
+	uint32_t hw_type;
 
 	rc = freya_init_priv(fba_dev, &artemis_data);
 	if (rc != 0)
@@ -1287,7 +1345,36 @@ static int artemis_init(struct fba_device *fba_dev)
 		ARTEMIS_CXRAM_BASE;
 	priv->cxram_upgrade_sz =
 		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
+	hw_type = FIELD_GET(HW_TYPE_MASK,
+			    (freya_read_cxram_sb(fba_dev, SB_CIP_CFG1_OFS)));
 
+	switch (hw_type) {
+	case HW_TYPE_ASIC:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is ASIC");
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	case HW_TYPE_EMU:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is Emulation");
+		priv->boot_timeouts = &emu_boot_timeouts;
+		break;
+	case HW_TYPE_SIM:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is Simulation");
+		priv->boot_timeouts = &sim_boot_timeouts;
+		break;
+	case HW_TYPE_EMU_LONG:
+		fba_dev_info(fba_dev,
+			     "Artemis Hardware Type is Emulation (Long)");
+		priv->boot_timeouts = &emu_long_boot_timeouts;
+		break;
+	case HW_TYPE_UNK:
+	default:
+		fba_dev_err(
+			fba_dev,
+			"Unknown Hardware Type %d, setting timeouts to ASIC by default",
+			hw_type);
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	}
 	return 0;
 }
 
