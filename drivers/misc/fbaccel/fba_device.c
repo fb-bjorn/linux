@@ -261,6 +261,7 @@ static void fba_device_stop(struct fba_device *fba_dev)
 	mutex_unlock(&fba_dev->ctx_mtx);
 
 	fba_channel_stop_heartbeats(fba_dev);
+	fba_poller_stop(fba_dev->m7_health_poller);
 
 	/*
 	 * At this point there should be no work in channels.  Finish tearing
@@ -1025,6 +1026,9 @@ static int fba_device_exit(struct fba_device *fba_dev)
 		if (fba_dev->cfg->impl_ops->reset_controller)
 			(void)fba_dev->cfg->impl_ops->reset_controller(fba_dev);
 	}
+
+	fba_poller_stop(fba_dev->m7_health_poller);
+	kfree(fba_dev->m7_health_poller);
 
 	fba_mon_exit(&fba_dev->mon);
 

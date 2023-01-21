@@ -103,6 +103,7 @@
 #define BOOT1_LOAD_TIMEOUT_MS 1000
 #define BOOT1_READY_TIMEOUT_MS 10000
 #define CCP_LOAD_TIMEOUT_MS 1000
+#define M7_HEARTBEAT_TIMEOUT_MS 100
 
 #define MBIST_EXEC_TIMEOUT_MS (0x7FFFFFF)
 
@@ -170,6 +171,12 @@ enum image_location {
 
 #define M7_MBOX_DMA_COMPLETION_ENTRY (M7_MBOX_GROUP_START + 11)
 #define DMA_COMPLETION 1
+
+#define M7_HEARTBEAT_CTRL_ENTRY (M7_MBOX_GROUP_START + 19)
+#define M7_WATCHDOG 1
+
+#define M7_HEARTBEAT_STATUS_ENTRY (M7_MBOX_GROUP_START + 20)
+#define M7_HEALTHY 0x80000000
 
 // Number of total entries
 // Byte stride between mailbox entries

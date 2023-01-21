@@ -401,10 +401,32 @@ static int16_t get_ready_status(struct fba_device *dev, void *user_data,
 	return 0;
 }
 
+static int16_t get_m7_health(struct fba_device *dev, void *user_data, void *buf,
+			     size_t buf_size)
+{
+	int16_t err = 0;
+	char *m7_health;
+
+	if (dev->cfg->impl_ops->boot_health_check != NULL) {
+		m7_health = dev->cfg->impl_ops->boot_health_check(dev);
+		if (m7_health) {
+			if (buf_size < sizeof(m7_health)) {
+				fba_dev_err(dev, "%s: Invalid buf size",
+					    __func__);
+				return -EFAULT;
+			}
+			snprintf(buf, buf_size, "%s", m7_health);
+		}
+	}
+	return err;
+}
+
 static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 	MON_STR("driver_version", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 		get_driver_version),
 	MON_STR("pci_addr", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL, get_pci_addr),
+	MON_STR("m7_health", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
+		get_m7_health),
 	MON_STR("pcie_class_id", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 		get_pci_class),
 	MON_STR("pcie_device_id", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,

@@ -37,6 +37,7 @@ static bool pe_print_mode;
 static bool ddr_bypass;
 static bool pcie_console;
 static bool emulation_boot_timeouts;
+static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
 static int pe_idcache_disable;
 static int ecc_region_size_mb;
 
@@ -62,6 +63,11 @@ MODULE_PARM_DESC(ddr_bypass,
 module_param(emulation_boot_timeouts, bool, 0444);
 MODULE_PARM_DESC(emulation_boot_timeouts,
 		 "Use (extra long) emulation bootflow timeouts");
+
+module_param(m7_hb_period_ms, int, 0644);
+MODULE_PARM_DESC(
+	m7_hb_period_ms,
+	"SAIL m7 heartbeat polling period in milliseconds (default: 60000). Set to 0 to disable.");
 
 module_param(pe_idcache_disable, int, 0644);
 MODULE_PARM_DESC(
@@ -111,6 +117,109 @@ static void freya_write_cxram_sb(struct fba_device *dev, uint32_t val,
 	uint64_t offset = priv->data->cxram_sideband_ofs + sb_offset;
 
 	fba_write_bar(dev, val, BAR_CXRAM, offset);
+}
+
+static void freya_m7_set_hb_mon_period(void *obj)
+{
+	struct fba_device *fba_dev = obj;
+
+	if (!fba_dev->pcie_boot_en)
+		return;
+	if (m7_hb_period_ms == 0) {
+		// Go back to default polling period, disable the
+		// monitor from sending the heartbeat
+		fba_dev->m7_health_poller->period_ms = M7_HEARTBEAT_PERIOD_MS;
+		if (fba_dev->m7_health_poller->enabled)
+			fba_dev_err(fba_dev,
+				    "HB now disabled for M7 controller");
+		fba_dev->m7_health_poller->enabled = false;
+	} else {
+		fba_dev->m7_health_poller->period_ms = m7_hb_period_ms;
+		if (!fba_dev->m7_health_poller->enabled)
+			fba_dev_info(
+				fba_dev,
+				"HB now enabled for M7 controller on dev with polling period of %d ms",
+				m7_hb_period_ms);
+		fba_dev->m7_health_poller->enabled = true;
+	}
+}
+
+// The overall design document for M7 heartbeat/watchdog:
+// Driver would poll on M7 health every m7_hb_period_ms
+//		1- Driver writes to M7_HEARTBEAT_CTRL_ENTRY mailbox to trigger an
+//			interrupt on M7
+//		2- M7 Handler of that interrupts checks the health of all the M7
+//			threads and writes to M7_HEARTBEAT_STATUS_ENTRY mailbox
+//		3- Driver sleeps for M7_HEARTBEAT_TIMEOUT_MS to check the
+//			M7_HEARTBEAT_STATUS_ENTRY mailbox
+//		4- Driver sets m7_health monitoring key based on mailbox value:
+//			-  0:
+//					M7 was outright hang and it couldn't update the mailbox
+//			- M7_HEALTHY:
+//					M7 was healthy and updated the mailbox with the M7_HEALTHY
+//					value
+//			- Thread bit mask:
+//					Some of the M7 threads were unhealthy
+static bool freya_m7_hb_poll(void *obj)
+{
+	struct fba_device *fba_dev = obj;
+	uint32_t m7_status;
+
+	if (!fba_dev->pcie_boot_en)
+		return true;
+	// Reset M7_HEARTBEAT_STATUS_ENTRY mailbox
+	set_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY, 0);
+	// Triggering heartbeat interrupt to M7
+	set_mailbox(fba_dev, M7_HEARTBEAT_CTRL_ENTRY, M7_WATCHDOG);
+	// Wait for M7 to signal it's health
+	msleep(M7_HEARTBEAT_TIMEOUT_MS);
+
+	// Read M7 status
+	m7_status = get_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY);
+	if (m7_status == M7_HEALTHY) {
+		if (fba_dev->m7_health != HEALTHY) {
+			if (fba_dev->m7_health != UNINITIALIZED) {
+				fba_dev_info(
+					fba_dev,
+					"%s: M7 status is healthy and previous state was %d",
+					__func__, fba_dev->m7_health);
+			}
+			fba_dev->m7_health = HEALTHY;
+		}
+
+	} else if (m7_status == 0) {
+		if (fba_dev->m7_health != UNHEALTHY) {
+			fba_dev->m7_health = UNHEALTHY;
+			atomic_set(&fba_dev->reset_ok, false);
+			fba_dev_err(fba_dev,
+				    "%s: M7 is unresponsive to interrupts",
+				    __func__);
+		}
+	} else {
+		if (fba_dev->m7_health != UNHEALTHY) {
+			fba_dev->m7_health = UNHEALTHY;
+			atomic_set(&fba_dev->reset_ok, false);
+			fba_dev_err(fba_dev,
+				    "%s: M7 timed out, thread bitmask is 0x%x",
+				    __func__, m7_status);
+		}
+	}
+	return true;
+}
+
+static char *freya_m7_health(struct fba_device *fba_dev)
+{
+	switch (fba_dev->m7_health) {
+	case HEALTHY:
+		return "HEALTHY";
+	case UNHEALTHY:
+		return "UNHEALTHY";
+	case UNINITIALIZED:
+		return "UNINITIALIZED";
+	}
+	fba_dev_err(fba_dev, "%s: Invalid M7 state 0x%x", __func__,
+		    fba_dev->m7_health);
+	return "UNEXPECTED";
 }
 
 static void store_boot_args(struct fba_device *fba_dev)
@@ -541,6 +650,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 		/* Reset requires PCI quirk to be in effect. */
 		atomic_set(&fba_dev->reset_ok, true);
 	}
+	fba_poller_start(fba_dev->m7_health_poller);
 
 	return ret;
 }
@@ -815,10 +925,23 @@ static int freya_set_boot_mode(struct fba_device *dev, const char *mode)
 	return -EINVAL;
 }
 
+static int freya_poller_init(struct fba_device *fba_dev)
+{
+	fba_dev->m7_health_poller =
+		kzalloc(sizeof(struct fba_poller), GFP_KERNEL);
+	if (fba_dev->m7_health_poller == NULL)
+		return -ENOMEM;
+
+	fba_poller_init(fba_dev->m7_health_poller, fba_dev, freya_m7_hb_poll,
+			freya_m7_set_hb_mon_period);
+	return 0;
+}
+
 static int freya_init_priv(struct fba_device *fba_dev,
 			   const struct fbia_priv_data *data)
 {
 	struct freya_priv *priv;
+	int rc;
 
 	priv = kzalloc(sizeof(struct freya_priv), GFP_KERNEL);
 	if (priv == NULL)
@@ -827,6 +950,12 @@ static int freya_init_priv(struct fba_device *fba_dev,
 	priv->data = data;
 	fba_dev->impl_priv = priv;
 
+	rc = freya_poller_init(fba_dev);
+	if (rc != 0) {
+		fba_dev_err(fba_dev, "freya_poller_init() failed with %d", rc);
+		kfree(fba_dev->impl_priv);
+		return rc;
+	}
 	mutex_init(&priv->download_mtx);
 
 	return 0;
@@ -895,6 +1024,7 @@ static const struct fba_impl_ops freya_impl_ops = {
 	.set_boot_mode = freya_set_boot_mode,
 	.load_firmware = freya_load_firmware,
 	.reset_controller = freya_reset_controllers,
+	.boot_health_check = freya_m7_health,
 };
 
 static const struct fba_impl_ops artemis_impl_ops = {
@@ -908,6 +1038,7 @@ static const struct fba_impl_ops artemis_impl_ops = {
 	.set_boot_mode = freya_set_boot_mode,
 	.load_firmware = freya_load_firmware,
 	.reset_controller = freya_reset_controllers,
+	.boot_health_check = freya_m7_health,
 };
 
 const struct fba_cfg freya_cfg = {

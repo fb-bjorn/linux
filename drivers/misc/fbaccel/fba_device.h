@@ -55,6 +55,15 @@ struct fba_device;
 struct fba_impl_ops;
 struct fba_job;
 
+// Default M7 Heartbeat period
+#define M7_HEARTBEAT_PERIOD_MS 60000
+
+enum m7_health {
+	UNINITIALIZED = 0,
+	HEALTHY = 1,
+	UNHEALTHY = 2,
+};
+
 // Limit counters used track usage by job and current counts, or limits
 // by context and channel.
 struct fba_limits {
@@ -178,6 +187,9 @@ struct fba_impl_ops {
 	int (*load_firmware)(struct fba_device *dev);
 	// Reset CCP and SCP
 	int (*reset_controller)(struct fba_device *dev);
+	// This is a product specific method to check the health of
+	// boot controller.
+	char *(*boot_health_check)(struct fba_device *dev);
 };
 
 #include "fba_channel.h"
@@ -248,6 +260,9 @@ struct fba_device {
 
 	struct mutex ctx_mtx; // Mutex to protect ctx_list
 	struct list_head ctx_list; // Contexts on this device.
+
+	struct fba_poller *m7_health_poller;
+	enum m7_health m7_health;
 
 	// Monitor Work Queue thread.
 	struct workqueue_struct *monitor_thread;
