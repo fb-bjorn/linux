@@ -29,4 +29,9 @@ static DEFINE_IDA(freya_ida);
 const struct fba_cfg freya_cfg = {
 	.name = FREYA_DRV_NAME,
 	.devnode_ida = &freya_ida,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_stride = HOST_IPC_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.host_sq_wc_bar = HOST_SQ_BAR,
 };

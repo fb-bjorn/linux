@@ -31,6 +31,8 @@
 
 #define FBACCEL_VERSION "0.34.0"
 
+#define BAR_CNT 6
+
 struct fba_device;
 
 // Per-application configuration parameters
@@ -38,10 +40,23 @@ struct fba_cfg {
 	// Driver name prefix
 	const char *name;
 	struct ida *devnode_ida;
+
+	// Mailbox access params
+	int host_ipc_bar;
+	int host_ipc_stride;
+	uint64_t host_ipc_offset;
+
+	// Starting index of doorbell mailboxes
+	int db_mbox_base;
+
+	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
+	int host_sq_wc_bar;
 };
 
 extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg tenjin_cfg;
+
+#include "fba_util.h"
 
 /*
  * FBA Device Object
@@ -62,7 +77,10 @@ struct fba_device {
 	// Device-specific implementation details
 	const struct fba_cfg *cfg;
 
+	void __iomem *bars[BAR_CNT];
+
 	atomic_t has_failed;
+	bool exiting;
 	struct completion abort_done;
 };
 
@@ -71,6 +89,15 @@ void fba_device_put(struct fba_device *fba_dev);
 
 /* Called to quiesce device on fatal error */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason);
+
+//
+// State functions
+//
+enum sail_regs;
+int fba_wait_for_state(struct fba_device *dev, enum sail_regs reg,
+		       uint32_t state, uint32_t num_retries);
+int fba_wait_for_state_nobail(struct fba_device *dev, enum sail_regs reg,
+			      uint32_t state, uint32_t num_retries);
 
 #define fba_dev_err(fba_dev, fmt, ...)                                         \
 	dev_err(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,           \

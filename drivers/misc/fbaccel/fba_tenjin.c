@@ -24,4 +24,9 @@ static DEFINE_IDA(tenjin_ida);
 const struct fba_cfg tenjin_cfg = {
 	.name = DRV_NAME,
 	.devnode_ida = &tenjin_ida,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_stride = HOST_IPC_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.host_sq_wc_bar = -1,
 };

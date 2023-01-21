@@ -32,6 +32,47 @@ static void fba_device_unregister(struct fba_device *fba_dev)
 	mutex_unlock(&fba_devices_mtx);
 }
 
+static int __fba_wait_for_state(struct fba_device *dev, uint32_t reg,
+				uint32_t state, uint32_t num_retries,
+				bool bail_early)
+{
+	uint32_t val;
+	int i;
+	int tries = num_retries;
+
+	if (tries < 1)
+		tries = 1;
+
+	for (i = 0; i < tries; i++) {
+		/* Bail early if we're unbinding. */
+		if (bail_early && READ_ONCE(dev->exiting))
+			return -ETIMEDOUT;
+
+		fba_dev_info(dev, "Scan state %d try %d.", reg, i);
+		val = get_mailbox(dev, reg);
+		if (val == state)
+			return 0;
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		// TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		// emulation can be slow.
+		schedule_timeout(HZ);
+	}
+	fba_dev_err(dev, "Failed state %d = %x.", reg, val);
+	return -ETIMEDOUT;
+}
+
+int fba_wait_for_state(struct fba_device *dev, uint32_t reg, uint32_t state,
+		       uint32_t num_retries)
+{
+	return __fba_wait_for_state(dev, reg, state, num_retries, true);
+}
+
+int fba_wait_for_state_nobail(struct fba_device *dev, uint32_t reg,
+			      uint32_t state, uint32_t num_retries)
+{
+	return __fba_wait_for_state(dev, reg, state, num_retries, false);
+}
+
 /* Abort operation of device, called upon detection of fatal error. */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 {
@@ -85,6 +126,13 @@ void fba_device_put(struct fba_device *fba_dev)
 static void fba_pci_exit(struct fba_device *fba_dev)
 {
 	struct pci_dev *pdev = fba_dev->pdev;
+	int i;
+
+	/* Unmap whichever bars we successfully mapped. */
+	for (i = 0; i < BAR_CNT; i++) {
+		if (fba_dev->bars[i])
+			pci_iounmap(pdev, fba_dev->bars[i]);
+	}
 
 	pci_disable_pcie_error_reporting(pdev);
 	pci_clear_master(pdev);
@@ -97,7 +145,7 @@ static void fba_pci_exit(struct fba_device *fba_dev)
 static int fba_pci_init(struct fba_device *fba_dev)
 {
 	struct pci_dev *pdev = fba_dev->pdev;
-	int rc;
+	int rc, i;
 
 	rc = pci_enable_device(pdev);
 	if (rc) {
@@ -134,8 +182,29 @@ static int fba_pci_init(struct fba_device *fba_dev)
 		goto err_disable_reporting;
 	}
 
+	for (i = 0; i < BAR_CNT; i++) {
+		if ((pci_resource_flags(pdev, i) & IORESOURCE_MEM) == 0) {
+			/* skip over unused BARs to avoid log noise */
+			continue;
+		}
+
+		if (i == fba_dev->cfg->host_sq_wc_bar)
+			fba_dev->bars[i] = pci_ioremap_wc_bar(pdev, i);
+		else
+			fba_dev->bars[i] = pci_ioremap_bar(pdev, i);
+
+		if (fba_dev->bars[i] == NULL) {
+			fba_dev_err(fba_dev, "Failed to map BAR %d.", i);
+			rc = -ENOSPC;
+			goto err_unmap_bars;
+		}
+	}
+
 	return 0;
 
+err_unmap_bars:
+	while (i-- > 0)
+		pci_iounmap(pdev, fba_dev->bars[i]);
 err_disable_reporting:
 	pci_disable_pcie_error_reporting(pdev);
 	pci_clear_master(pdev);
@@ -188,6 +257,8 @@ static int fba_device_init(struct fba_device *fba_dev)
 		goto err_free_id;
 
 	// Driver is now available for IOCTL communication.
+	fba_dev_info(fba_dev, "Done connecting BARs.");
+
 	fba_dev->dev = device_create(fba_class, &fba_dev->pdev->dev,
 				     MKDEV(MAJOR(fba_devt), fba_dev->minor),
 				     NULL, "%s", fba_dev->name);
@@ -208,6 +279,8 @@ err_put_device:
 
 static int fba_device_exit(struct fba_device *fba_dev)
 {
+	WRITE_ONCE(fba_dev->exiting, true);
+
 	fba_device_unregister(fba_dev);
 
 	fba_pci_exit(fba_dev);
