@@ -59,6 +59,9 @@ struct fba_cfg {
 
 	// Implementation-defined operations
 	const struct fba_impl_ops *impl_ops;
+
+	/* Special boot mode type. */
+	const char *boot_mode;
 };
 
 extern const struct fba_cfg freya_cfg;
@@ -70,6 +73,18 @@ struct fba_impl_ops {
 	/* Implementation defined exit */
 	void (*impl_exit)(struct fba_device *dev);
 
+	// Boot APIs
+	// Get device-specific boot mode
+	const char *(*get_boot_mode)(struct fba_device *dev);
+	// Set device-specific boot mode
+	int (*set_boot_mode)(struct fba_device *dev, const char *mode);
+	// Decide whether to load signed or unsigned firmware
+	bool (*is_secure_boot)(struct fba_device *dev);
+	// Get firmware default boot1 and boot2 filenames
+	void (*get_fw_filenames)(struct fba_device *dev, const char **boot1,
+				 const char **boot2);
+	// Load firmware
+	int (*load_firmware)(struct fba_device *dev);
 	// Reset CCP and SCP
 	int (*reset_controller)(struct fba_device *dev);
 };
@@ -99,8 +114,13 @@ struct fba_device {
 	void __iomem *bars[BAR_CNT];
 
 	atomic_t has_failed;
+	atomic_t reset_ok;
 	bool exiting;
 	struct completion abort_done;
+	bool pcie_boot_en;
+	atomic_t waiting_for_load;
+	char boot1_filename[NAME_MAX + 1];
+	char boot2_filename[NAME_MAX + 1];
 
 	// Number of retries for state update check
 	int num_retries;

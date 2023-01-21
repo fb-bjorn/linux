@@ -11,6 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
+#include <linux/async.h>
 #include <linux/version.h>
 
 #include "fba_device.h"
@@ -22,6 +23,161 @@ static dev_t fba_devt;
 static struct class *fba_class;
 static DEFINE_MUTEX(fba_devices_mtx);
 static struct fba_device *fba_devices[FBA_MAX_DEVS];
+
+static bool auto_load = true;
+module_param(auto_load, bool, 0664);
+MODULE_PARM_DESC(auto_load, "If true, automatically load firmware on probe");
+
+static bool pcie_boot_en = true;
+module_param(pcie_boot_en, bool, 0664);
+MODULE_PARM_DESC(pcie_boot_en, "Bootflow enablement boot parameter");
+
+static void fba_async_probe(void *data, async_cookie_t cookie);
+
+static ssize_t boot_file_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (strcmp(attr->attr.name, "boot1_filename") == 0)
+		return sysfs_emit(buf, "%s\n", fba_dev->boot1_filename);
+	else
+		return sysfs_emit(buf, "%s\n", fba_dev->boot2_filename);
+}
+
+static int set_bootfile_name(struct fba_device *fba_dev, char *dst,
+			     const char *src, size_t len)
+{
+	if (len > NAME_MAX || len <= 0) {
+		fba_dev_err(fba_dev, "Bootfile not updated, check length: %zu",
+			    len);
+		return -EINVAL;
+	}
+
+	strscpy(dst, src, NAME_MAX + 1);
+	if (dst[len - 1] == '\n')
+		dst[len - 1] = '\0';
+
+	return len;
+}
+
+static ssize_t boot_file_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+	char *dst;
+	int ret;
+
+	if (strcmp(attr->attr.name, "boot1_filename") == 0)
+		dst = fba_dev->boot1_filename;
+	else
+		dst = fba_dev->boot2_filename;
+
+	ret = set_bootfile_name(fba_dev, dst, buf, count);
+	if (ret > 0)
+		fba_dev_info(fba_dev, "%s updated to %s", attr->attr.name, dst);
+
+	return ret;
+}
+
+static DEVICE_ATTR(boot1_filename, 0644, boot_file_show, boot_file_store);
+static DEVICE_ATTR(boot2_filename, 0644, boot_file_show, boot_file_store);
+
+static ssize_t boot_mode_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (fba_dev->cfg->impl_ops->get_boot_mode != NULL) {
+		const char *boot_mode =
+			fba_dev->cfg->impl_ops->get_boot_mode(fba_dev);
+		return sysfs_emit(buf, "%s\n", boot_mode);
+	}
+
+	return sysfs_emit(buf, "normal\n");
+}
+
+static ssize_t boot_mode_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+	int err;
+
+	buf = skip_spaces(buf);
+
+	/* Use device private method if we have one */
+	if (fba_dev->cfg->impl_ops->set_boot_mode != NULL) {
+		err = fba_dev->cfg->impl_ops->set_boot_mode(fba_dev, buf);
+		return (err == 0) ? count : err;
+	}
+
+	/* Otherwise accept only "normal" setting */
+	if (strncmp(buf, "normal", 6) == 0)
+		return count;
+	else
+		return -EINVAL;
+}
+
+static DEVICE_ATTR_RW(boot_mode);
+
+/* Triggers firmware load upon write (any value.) */
+static ssize_t load_firmware_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (atomic_cmpxchg(&fba_dev->waiting_for_load, true, false) != true) {
+		/* Not waiting for load */
+		return -EINVAL;
+	}
+
+	async_schedule(fba_async_probe, fba_dev);
+	/* Block until firmware load completes, making scripting simpler. */
+	async_synchronize_full();
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(load_firmware);
+
+static ssize_t secure_boot_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (fba_dev->cfg->impl_ops->is_secure_boot != NULL) {
+		if (fba_dev->cfg->impl_ops->is_secure_boot(fba_dev))
+			return sysfs_emit(buf, "secure\n");
+	}
+
+	return sysfs_emit(buf, "nonsecure\n");
+}
+
+static DEVICE_ATTR_RO(secure_boot);
+
+static ssize_t reset_ok_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	return sysfs_emit(buf, "%d\n", atomic_read(&fba_dev->reset_ok));
+}
+
+static DEVICE_ATTR_RO(reset_ok);
+
+static struct attribute *fba_device_attrs[] = {
+	&dev_attr_boot1_filename.attr,
+	&dev_attr_boot2_filename.attr,
+	&dev_attr_boot_mode.attr,
+	&dev_attr_load_firmware.attr,
+	&dev_attr_reset_ok.attr,
+	&dev_attr_secure_boot.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(fba_device);
 
 static void fba_device_unregister(struct fba_device *fba_dev)
 {
@@ -216,6 +372,49 @@ err_disable_device:
 	return rc;
 }
 
+/* Detect secure boot and initialize firmware filenames */
+static void fba_init_fw_filenames(struct fba_device *fba_dev)
+{
+	const char *boot1, *boot2;
+
+	fba_dev->cfg->impl_ops->get_fw_filenames(fba_dev, &boot1, &boot2);
+	strscpy(fba_dev->boot1_filename, boot1,
+		sizeof(fba_dev->boot1_filename));
+	strscpy(fba_dev->boot2_filename, boot2,
+		sizeof(fba_dev->boot2_filename));
+
+	fba_dev_info(fba_dev, "boot1_filename set to %s\n",
+		     fba_dev->boot1_filename);
+	fba_dev_info(fba_dev, "boot2_filename set to %s\n",
+		     fba_dev->boot2_filename);
+}
+
+/* Load firmware asynchronously (and in parallel) */
+static void fba_async_probe(void *data, async_cookie_t cookie)
+{
+	struct fba_device *fba_dev = data;
+	int rc;
+
+	if (!fba_dev->pcie_boot_en) {
+		rc = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+					fba_dev->num_retries);
+		if (rc != 0)
+			return;
+	} else {
+		rc = fba_dev->cfg->impl_ops->load_firmware(fba_dev);
+		if (rc != 0) {
+			/*
+			 * Mark as failed so attempts to use the device return EIO
+			 * instead of EBUSY.
+			 */
+			fba_device_abort(fba_dev, "firmware load failed");
+			return;
+		}
+	}
+
+	fba_dev_info(fba_dev, "Done setting up device, ready for use.");
+}
+
 static int fba_device_init(struct fba_device *fba_dev)
 {
 	int i, rc;
@@ -264,6 +463,13 @@ static int fba_device_init(struct fba_device *fba_dev)
 		if (rc != 0)
 			goto err_pci_exit;
 	}
+
+	fba_init_fw_filenames(fba_dev);
+
+	if (auto_load)
+		async_schedule(fba_async_probe, fba_dev);
+	else
+		atomic_set(&fba_dev->waiting_for_load, true);
 
 	fba_dev->dev = device_create(fba_class, &fba_dev->pdev->dev,
 				     MKDEV(MAJOR(fba_devt), fba_dev->minor),
@@ -318,6 +524,8 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->pdev = pdev;
 	dev->cfg = (const struct fba_cfg *)ent->driver_data;
 
+	dev->pcie_boot_en = pcie_boot_en;
+
 	dev->num_retries = MAX_RETRIES;
 
 	return fba_device_init(dev);
@@ -328,6 +536,9 @@ static void fbaccel_remove(struct pci_dev *pdev)
 	struct fba_device *dev;
 
 	dev_info(&pdev->dev, "Remove.");
+
+	/* Wait for any FW load in progress to complete */
+	async_synchronize_full();
 
 	dev = pci_get_drvdata(pdev);
 	fba_device_exit(dev);
@@ -361,6 +572,7 @@ static int __init fbaccel_driver_init(void)
 	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
 	if (IS_ERR(fba_class))
 		return PTR_ERR(fba_class);
+	fba_class->dev_groups = fba_device_groups;
 
 	ret = alloc_chrdev_region(&fba_devt, 0, FBA_MAX_DEVS, KBUILD_MODNAME);
 	if (ret < 0)
@@ -387,6 +599,9 @@ static int __init fbaccel_init(void)
 		return ret;
 
 	ret = pci_register_driver(&fbaccel_driver);
+
+	/* Block until firmware load completes, making scripting simpler. */
+	async_synchronize_full();
 
 	return ret;
 }
