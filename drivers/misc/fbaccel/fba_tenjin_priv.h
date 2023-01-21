@@ -13,6 +13,11 @@
 // Number of entries per group.
 #define HW_MBOX_GROUP_SIZE 32
 
+// PCIe UART mailbox group offset and length
+#define UART_MBOX_GROUP_OFFS 24
+
+#define TENJIN_UART_MBOX_OFFSET (UART_MBOX_GROUP_OFFS * HW_MBOX_GROUP_SIZE)
+
 #define CCP_COREDUMP_MBOX_GROUP_OFFS 30
 #define CCP_COREDUMP_MBOX_ID (CCP_COREDUMP_MBOX_GROUP_OFFS * HW_MBOX_GROUP_SIZE)
 
@@ -57,6 +62,10 @@
 #define COREDUMP_M7_SIZE (16 * 1024)
 #define COREDUMP_CCP_SIZE (64 * 1024)
 #define RISCV_BOOT_ARGS_REGION_SIZE 4096
+// Use low vector numbers for fixed functionality
+// The rest of the vectors are designated for completion queues
+#define UART_TX_MSIX_VECTOR 2
+#define UART_RX_MSIX_VECTOR 3
 
 #define TENJIN_DEF_BOOT1_FILENAME_UNSIGNED "tenjin-boot1-ecc.bin.unsigned"
 #define TENJIN_DEF_BOOT1_FILENAME_SIGNED "tenjin-boot1-ecc.bin.signed"

@@ -54,6 +54,7 @@ struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
 struct fba_job;
+struct fba_uart_dev;
 
 // Default M7 Heartbeat period
 #define M7_HEARTBEAT_PERIOD_MS 60000
@@ -92,6 +93,11 @@ struct fba_cfg {
 
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
+
+	// UART configuration
+	int uart_mbox_base;
+	int uart_msi_irq_rx; // Downstream MSI-X IRQ
+	int uart_msi_irq_tx; // Upstream MSI_X IRQ
 
 	// P2P BAR
 	int p2p_bar;
@@ -309,6 +315,9 @@ struct fba_device {
 	bool ccp_wdt_failed;
 
 	struct fba_mon mon;
+
+	// UART sub-device
+	struct fba_uart_dev *uart_dev;
 
 	// Admin channel command timeout value in ms
 	uint32_t admin_cmd_timeout_ms;

@@ -16,6 +16,7 @@ fbaccel-y += fba_resource.o
 fbaccel-y += fba_shared.o
 fbaccel-y += fba_tenjin.o
 fbaccel-y += fba_trace.o
+fbaccel-y += fba_uart.o
 fbaccel-y += fba_util.o
 
 # define_trace.h needs to know how to find our header

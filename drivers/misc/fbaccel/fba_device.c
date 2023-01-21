@@ -16,6 +16,7 @@
 
 #include "fba_device.h"
 #include "fba_admin.h"
+#include "fba_uart.h"
 
 #define FBA_MAX_DEVS 32
 
@@ -235,8 +236,18 @@ struct fba_device *fba_device_lookup(unsigned int minor)
 	return fba_dev;
 }
 
+static void fba_unregister_subdevs(struct fba_device *fba_dev)
+{
+	if (fba_dev->uart_dev != NULL) {
+		fba_uart_unregister(fba_dev->uart_dev);
+		fba_dev->uart_dev = NULL;
+	}
+}
+
 static void fba_device_unregister(struct fba_device *fba_dev)
 {
+	fba_unregister_subdevs(fba_dev);
+
 	mutex_lock(&fba_devices_mtx);
 	fba_devices[fba_dev->minor] = NULL;
 	device_destroy(fba_class, MKDEV(MAJOR(fba_devt), fba_dev->minor));
@@ -382,6 +393,19 @@ static int fba_device_msix_init(struct fba_device *fba_dev)
 static void fba_device_msix_exit(struct fba_device *fba_dev)
 {
 	pci_free_irq_vectors(fba_dev->pdev);
+}
+
+/* Register UART sub-device */
+static void fba_device_uart_register(struct fba_device *fba_dev)
+{
+	fba_dev->uart_dev = fba_uart_register(
+		fba_dev, fba_dev->dev, fba_dev->minor, fba_dev->cfg->name,
+		fba_dev->id, fba_dev->cfg->uart_mbox_base,
+		fba_dev->cfg->uart_msi_irq_rx, fba_dev->cfg->uart_msi_irq_tx);
+	if (IS_ERR(fba_dev->uart_dev)) {
+		/* Null so we don't try to unregister an ERR_PTR later on */
+		fba_dev->uart_dev = NULL;
+	}
 }
 
 static void fba_device_fw_setup_ptrs(struct fba_device *dev)
@@ -592,6 +616,7 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 
 	if (fba_dev->cfg->impl_ops->coredump_exit != NULL)
 		fba_dev->cfg->impl_ops->coredump_exit(fba_dev);
+	fba_unregister_subdevs(fba_dev);
 
 	for (i = 0; i < fba_dev->channel_total; i++)
 		fba_channel_exit(fba_get_channel(fba_dev, i));
@@ -668,6 +693,8 @@ static int fba_device_fw_init(struct fba_device *dev)
 	rc = fba_device_enable_sail(dev);
 	if (rc)
 		goto err_channel_exit;
+
+	fba_device_uart_register(dev);
 
 	// Setup Resources
 	rc = fba_resource_init(dev);
@@ -1174,6 +1201,20 @@ static struct pci_driver fbaccel_driver = {
 	.remove = fbaccel_remove,
 };
 
+static int __init fba_subdevice_driver_init(void)
+{
+	int ret;
+
+	ret = fba_uart_driver_init();
+
+	return ret;
+}
+
+static void fba_subdevice_driver_exit(void)
+{
+	fba_uart_driver_exit();
+}
+
 static int __init fbaccel_driver_init(void)
 {
 	int ret;
@@ -1192,8 +1233,14 @@ static int __init fbaccel_driver_init(void)
 	if (ret < 0)
 		goto err_free_chrdev;
 
+	ret = fba_subdevice_driver_init();
+	if (ret < 0)
+		goto err_del_cdev;
+
 	return ret;
 
+err_del_cdev:
+	cdev_del(&fba_cdev);
 err_free_chrdev:
 	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
 err_class_destroy:
@@ -1203,6 +1250,7 @@ err_class_destroy:
 
 static void __exit fbaccel_driver_exit(void)
 {
+	fba_subdevice_driver_exit();
 	cdev_del(&fba_cdev);
 	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
 	class_destroy(fba_class);

@@ -148,6 +148,10 @@ enum image_location {
 #define CPP_MBOX_GROUP_OFFS 0
 #define CCP_MBOX_GROUP_COUNT 31
 
+// PCIe UART mailbox group offset and length
+#define UART_MBOX_GROUP_OFFS 30
+#define UART_MBOX_GROUP_COUNT 1
+
 // M7 mailbox group offset and length
 #define M7_MBOX_GROUP_OFFS 31
 #define M7_MBOX_GROUP_COUNT 1
@@ -193,6 +197,9 @@ enum image_location {
 // Doorbell mailbox offset
 #define DB_MAILBOX_BASE HW_MBOX_GROUP_SIZE
 
+#define FREYA_UART_BAR 1
+#define FREYA_UART_MBOX_OFFSET (UART_MBOX_GROUP_OFFS * HW_MBOX_GROUP_SIZE)
+
 #define HOST_SQ_BAR 2
 
 #define DDR_BAR 4
@@ -209,6 +216,8 @@ enum image_location {
 
 // Use low vector numbers for fixed functionality
 // The rest of the vectors are designated for completion queues
+#define UART_TX_MSIX_VECTOR 2
+#define UART_RX_MSIX_VECTOR 3
 #define COREDUMP_MSIX_VECTOR 4
 
 #define FREYA_DEF_BOOT1_FILENAME "boot1.hbin"

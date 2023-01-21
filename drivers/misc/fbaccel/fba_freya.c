@@ -57,6 +57,9 @@ module_param(pe_print_mode, bool, 0444);
 MODULE_PARM_DESC(pe_print_mode,
 		 "PE lossless print mode enablement through boot parameter");
 
+module_param(pcie_console, bool, 0444);
+MODULE_PARM_DESC(pcie_console, "Enable Zephyr console on PCIe UART");
+
 module_param(ddr_bypass, bool, 0444);
 MODULE_PARM_DESC(ddr_bypass,
 		 "Bypassing DDR initialization through boot parameter");
@@ -1347,6 +1350,9 @@ const struct fba_cfg freya_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
 	.p2p_bar = P2P_BAR,
 	.impl_ops = &freya_impl_ops,
 	.ctx_limits = {
@@ -1363,6 +1369,9 @@ const struct fba_cfg artemis_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
 	.p2p_bar = P2P_BAR,
 	.impl_ops = &artemis_impl_ops,
 	.ctx_limits = {
