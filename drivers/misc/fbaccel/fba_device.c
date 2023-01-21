@@ -16,6 +16,7 @@
 
 #include "fba_device.h"
 #include "fba_admin.h"
+#include "fba_log.h"
 #include "fba_uart.h"
 #include "fba_usoc.h"
 
@@ -40,6 +41,11 @@ bool test_force_prp;
 module_param(test_force_prp, bool, 0664);
 MODULE_PARM_DESC(test_force_prp,
 		 "If true, force PRP list even when buffer is contiguous");
+
+static bool disable_logger;
+module_param(disable_logger, bool, 0444);
+MODULE_PARM_DESC(disable_logger,
+		 "If true, disable out-of-band firmware logging");
 
 static void fba_async_probe(void *data, async_cookie_t cookie);
 
@@ -247,6 +253,11 @@ static void fba_unregister_subdevs(struct fba_device *fba_dev)
 	if (fba_dev->uart_dev != NULL) {
 		fba_uart_unregister(fba_dev->uart_dev);
 		fba_dev->uart_dev = NULL;
+	}
+
+	if (fba_dev->logger_dev != NULL) {
+		fba_logger_unregister(fba_dev->logger_dev);
+		fba_dev->logger_dev = NULL;
 	}
 }
 
@@ -733,6 +744,11 @@ static int fba_device_fw_init(struct fba_device *dev)
 
 	/* Any error logged within fba_device_usoc_init already, but continue if it fails */
 	(void)fba_device_usoc_init(dev);
+	if (!disable_logger)
+		dev->logger_dev = fba_logger_register(dev);
+
+	if (IS_ERR(dev->logger_dev))
+		dev->logger_dev = NULL;
 
 	// Setup Resources
 	rc = fba_resource_init(dev);
@@ -1251,8 +1267,14 @@ static int __init fba_subdevice_driver_init(void)
 	if (ret != 0)
 		goto err_uart_exit;
 
+	ret = fba_logger_driver_init();
+	if (ret != 0)
+		goto err_usoc_exit;
+
 	return ret;
 
+err_usoc_exit:
+	fba_usoc_driver_exit();
 err_uart_exit:
 	fba_uart_driver_exit();
 	return ret;
@@ -1262,6 +1284,7 @@ static void fba_subdevice_driver_exit(void)
 {
 	fba_usoc_driver_exit();
 	fba_uart_driver_exit();
+	fba_logger_driver_exit();
 }
 
 static int __init fbaccel_driver_init(void)

@@ -42,6 +42,8 @@
 #define MAX_RETRIES 50
 #define MIN_RETRIES 5
 
+#define MAX_LOGGER_SRCS 2
+
 // MAX number of channels
 // This will be reduced to the number of advertised channels by the device
 // and the number of MSIX interrupts available
@@ -70,6 +72,14 @@ enum m7_health {
 // by context and channel.
 struct fba_limits {
 	uint32_t sub_cnt;
+};
+
+// Device specific logger buffer information
+struct logger_params {
+	uint64_t off_mbox;
+	uint64_t size_mbox;
+	int msix_int;
+	char name[32];
 };
 
 // Per-application configuration parameters
@@ -105,6 +115,11 @@ struct fba_cfg {
 	int uart_mbox_base;
 	int uart_msi_irq_rx; // Downstream MSI-X IRQ
 	int uart_msi_irq_tx; // Upstream MSI_X IRQ
+
+	// Logger configuration
+	struct logger_params logger_params[MAX_LOGGER_SRCS];
+	int num_logger_srcs;
+	int logger_bar_num;
 
 	// P2P BAR
 	int p2p_bar;
@@ -327,6 +342,8 @@ struct fba_device {
 	struct fba_usoc_dev *usoc_dev;
 	// UART sub-device
 	struct fba_uart_dev *uart_dev;
+	// Logger sub-device
+	struct fba_logger_dev *logger_dev;
 
 	// Admin channel command timeout value in ms
 	uint32_t admin_cmd_timeout_ms;

@@ -182,6 +182,13 @@ enum image_location {
 #define M7_HEARTBEAT_STATUS_ENTRY (M7_MBOX_GROUP_START + 20)
 #define M7_HEALTHY 0x80000000
 
+#define M7_LOGBUF_SIZE_MBOX (M7_MBOX_GROUP_START + 21)
+#define M7_LOGBUF_OFFSET_MBOX (M7_MBOX_GROUP_START + 22)
+
+#define LOGBUF_MBOX_GROUP_START ((CPP_MBOX_GROUP_OFFS + 3) * HW_MBOX_GROUP_SIZE)
+#define CCP_LOGBUF_SIZE_MBOX (LOGBUF_MBOX_GROUP_START + 1)
+#define CCP_LOGBUF_OFFSET_MBOX (LOGBUF_MBOX_GROUP_START + 2)
+
 // Number of total entries
 // Byte stride between mailbox entries
 #define HW_MBOX_ENTRY_STRIDE 8
@@ -224,6 +231,8 @@ enum image_location {
 #define UART_TX_MSIX_VECTOR 2
 #define UART_RX_MSIX_VECTOR 3
 #define COREDUMP_MSIX_VECTOR 4
+#define CCP_LOGGER_MSIX_VECTOR 5
+#define M7_LOGGER_MSIX_VECTOR 6
 
 #define FREYA_DEF_BOOT1_FILENAME "boot1.hbin"
 #define FREYA_DEF_BOOT2_FILENAME "ccp.hbin"
@@ -304,6 +313,8 @@ struct fbia_coredump_info {
 // CXRAM offset for storing core dump region info
 #define CXRAM_CORE_DUMP_REGION_INFO_OFFSET                                     \
 	(CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET + 0x4)
+
+#define FREYA_LOGGER_SRCS 2
 
 // Offset for boot arguments in CXRAM.
 #define CXRAM_BOOT_ARGS_OFFSET 0x8000

@@ -1358,6 +1358,22 @@ const struct fba_cfg freya_cfg = {
 	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
 	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
 	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+	},
+	.num_logger_srcs = FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
 	.impl_ops = &freya_impl_ops,
 	.ctx_limits = {
 		.sub_cnt = CONTEXT_SUB_CAP,
