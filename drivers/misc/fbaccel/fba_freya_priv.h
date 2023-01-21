@@ -198,6 +198,9 @@ enum image_location {
 #define FREYA_DEF_BOOT1_FILENAME "boot1.hbin"
 #define FREYA_DEF_BOOT2_FILENAME "ccp.hbin"
 
+#define ARTEMIS_DEF_BOOT1_FILENAME "artemis-boot1.hbin"
+#define ARTEMIS_DEF_BOOT2_FILENAME "artemis-ccp.hbin"
+
 /* From fbia/freya/freya_cxram.h: */
 
 // Freya boot parameter offset index in CXRAM

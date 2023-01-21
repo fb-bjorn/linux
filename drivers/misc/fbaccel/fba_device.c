@@ -546,12 +546,14 @@ static void fbaccel_remove(struct pci_dev *pdev)
 
 #define PCI_VENDOR_ID_FACEBOOK 0x1d9b
 #define PCI_DEVICE_ID_FACEBOOK_FREYA 0x0200
+#define PCI_DEVICE_ID_FACEBOOK_ARTEMIS 0x0201
 
 #define PCI_VENDOR_ID_BROADCOM 0x14e4
 #define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
 
 static const struct pci_device_id fbaccel_ids[] = {
 	{ PCI_DEVICE_DATA(FACEBOOK, FREYA, &freya_cfg) },
+	{ PCI_DEVICE_DATA(FACEBOOK, ARTEMIS, &artemis_cfg) },
 	{ PCI_DEVICE_DATA(BROADCOM, VIPER, &tenjin_cfg) },
 	{}
 };

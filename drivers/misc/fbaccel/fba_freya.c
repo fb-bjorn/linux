@@ -19,12 +19,15 @@
 #include <uapi/linux/limits.h>
 #define FREYA_CXRAM_BASE 0x20F00000
 #define FREYA_CXRAM_SIZE 0x100000
+#define ARTEMIS_CXRAM_BASE 0x20C00000
+#define ARTEMIS_CXRAM_SIZE 0x400000
 
 #include "fba_freya_priv.h"
 #include "fba_device.h"
 #include "fba_proto.h"
 
 #define FREYA_DRV_NAME "freya"
+#define ARTEMIS_DRV_NAME "artemis"
 
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(freya_ida);
@@ -679,6 +682,13 @@ static void freya_get_fw_filenames(struct fba_device *fba_dev,
 	*boot2 = FREYA_DEF_BOOT2_FILENAME;
 }
 
+static void artemis_get_fw_filenames(struct fba_device *fba_dev,
+				     const char **boot1, const char **boot2)
+{
+	*boot1 = ARTEMIS_DEF_BOOT1_FILENAME;
+	*boot2 = ARTEMIS_DEF_BOOT2_FILENAME;
+}
+
 static int freya_load_firmware(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv = fba_dev->impl_priv;
@@ -786,6 +796,10 @@ static const struct fbia_priv_data freya_data = {
 	.cxram_sideband_ofs = FREYA_CXRAM_SIZE - SIDEBAND_SIZE,
 };
 
+static const struct fbia_priv_data artemis_data = {
+	.cxram_sideband_ofs = ARTEMIS_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
 static int freya_init(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv;
@@ -799,6 +813,25 @@ static int freya_init(struct fba_device *fba_dev)
 	priv->cxram_upgrade_ofs =
 		SRAM_UPGRADE_OFS(FREYA_CXRAM_BASE, FREYA_CXRAM_SIZE);
 	priv->cxram_upgrade_sz = SRAM_UPGRADE_MEM_SIZE;
+
+	return 0;
+}
+
+static int artemis_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int rc;
+
+	rc = freya_init_priv(fba_dev, &artemis_data);
+	if (rc != 0)
+		return rc;
+
+	priv = fba_dev->impl_priv;
+	priv->cxram_upgrade_ofs =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_START_OFS) -
+		ARTEMIS_CXRAM_BASE;
+	priv->cxram_upgrade_sz =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
 
 	return 0;
 }
@@ -822,6 +855,17 @@ static const struct fba_impl_ops freya_impl_ops = {
 	.reset_controller = freya_reset_controllers,
 };
 
+static const struct fba_impl_ops artemis_impl_ops = {
+	.impl_init = artemis_init,
+	.impl_exit = freya_exit,
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = artemis_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+};
+
 const struct fba_cfg freya_cfg = {
 	.name = FREYA_DRV_NAME,
 	.devnode_ida = &freya_ida,
@@ -831,4 +875,15 @@ const struct fba_cfg freya_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.host_sq_wc_bar = HOST_SQ_BAR,
 	.impl_ops = &freya_impl_ops,
+};
+
+const struct fba_cfg artemis_cfg = {
+	.name = ARTEMIS_DRV_NAME,
+	.devnode_ida = &freya_ida,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_stride = HOST_IPC_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.impl_ops = &artemis_impl_ops,
 };

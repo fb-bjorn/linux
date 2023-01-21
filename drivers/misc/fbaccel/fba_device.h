@@ -65,6 +65,7 @@ struct fba_cfg {
 };
 
 extern const struct fba_cfg freya_cfg;
+extern const struct fba_cfg artemis_cfg;
 extern const struct fba_cfg tenjin_cfg;
 
 struct fba_impl_ops {
