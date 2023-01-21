@@ -68,6 +68,18 @@ extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg artemis_cfg;
 extern const struct fba_cfg tenjin_cfg;
 
+// Contains information on shared memory areas.  If addr is non-zero
+// points to host allocated dma coherent.  If addr is zero, points to
+// to device memory via a device BAR.
+struct fba_shared {
+	union {
+		void *data;
+		void __iomem *iodata;
+	};
+	dma_addr_t addr;
+	size_t size;
+};
+
 struct fba_impl_ops {
 	/* Implementation defined init */
 	int (*impl_init)(struct fba_device *dev);
@@ -90,6 +102,7 @@ struct fba_impl_ops {
 	int (*reset_controller)(struct fba_device *dev);
 };
 
+#include "fba_shared.h"
 #include "fba_util.h"
 
 /*
@@ -111,6 +124,11 @@ struct fba_device {
 	// Device-specific implementation details
 	const struct fba_cfg *cfg;
 	void *impl_priv;
+
+	struct mutex area_mutex; // Protects access to following
+	struct fba_shared scratch_area; // Scratch Area.
+	struct fba_shared status_area; // Status Area.
+	struct fba_shared debug_area; // Debug Area.
 
 	void __iomem *bars[BAR_CNT];
 

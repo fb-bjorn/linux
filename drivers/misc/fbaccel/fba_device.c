@@ -372,6 +372,55 @@ err_disable_device:
 	return rc;
 }
 
+/* Free shared memory used to communicate with device */
+static void fba_shared_area_exit(struct fba_device *fba_dev)
+{
+	mutex_lock(&fba_dev->area_mutex);
+	fba_shared_free(fba_dev, &fba_dev->status_area);
+	fba_shared_free(fba_dev, &fba_dev->scratch_area);
+	fba_shared_free(fba_dev, &fba_dev->debug_area);
+	mutex_unlock(&fba_dev->area_mutex);
+}
+
+/* Initialize shared memory used to communicate with device */
+static int fba_shared_area_init(struct fba_device *fba_dev)
+{
+	int rc;
+
+	// Add a dma_alloc_coherent() to provide some mapped in DMA space.
+	// We already do something like that in fba_resource to get back
+	// info words and resource data.  We could just have a generic
+	// block allocate here for use by the driver, and add an IOCTL to
+	// read/write into it from user space.
+
+	// Debug Area pages.
+	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->debug_area,
+				       SAIL_DEBUG_SIZE);
+	if (rc)
+		return rc;
+
+	// Temp Area pages.
+	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
+				       SAIL_SCRATCH_SIZE);
+	if (rc)
+		goto err_free_debug;
+
+	// Allocate Host Status pages.
+	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
+				       SAIL_STATUS_SIZE);
+	if (rc)
+		goto err_free_scratch;
+
+	return rc;
+
+err_free_scratch:
+	fba_shared_free(fba_dev, &fba_dev->scratch_area);
+err_free_debug:
+	fba_shared_free(fba_dev, &fba_dev->debug_area);
+
+	return rc;
+}
+
 /* Detect secure boot and initialize firmware filenames */
 static void fba_init_fw_filenames(struct fba_device *fba_dev)
 {
@@ -420,6 +469,7 @@ static int fba_device_init(struct fba_device *fba_dev)
 	int i, rc;
 
 	kref_init(&fba_dev->ref);
+	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
 
 	rc = -ENOSPC;
@@ -455,13 +505,17 @@ static int fba_device_init(struct fba_device *fba_dev)
 	if (rc)
 		goto err_free_id;
 
+	rc = fba_shared_area_init(fba_dev);
+	if (rc)
+		goto err_pci_exit;
+
 	// Driver is now available for IOCTL communication.
 	fba_dev_info(fba_dev, "Done connecting BARs.");
 
 	if (fba_dev->cfg->impl_ops->impl_init != NULL) {
 		rc = fba_dev->cfg->impl_ops->impl_init(fba_dev);
 		if (rc != 0)
-			goto err_pci_exit;
+			goto err_shared_area_exit;
 	}
 
 	fba_init_fw_filenames(fba_dev);
@@ -477,6 +531,8 @@ static int fba_device_init(struct fba_device *fba_dev)
 
 	return 0;
 
+err_shared_area_exit:
+	fba_shared_area_exit(fba_dev);
 err_pci_exit:
 	fba_pci_exit(fba_dev);
 err_free_id:
@@ -505,6 +561,7 @@ static int fba_device_exit(struct fba_device *fba_dev)
 			(void)fba_dev->cfg->impl_ops->reset_controller(fba_dev);
 	}
 
+	fba_shared_area_exit(fba_dev);
 	fba_pci_exit(fba_dev);
 
 	fba_device_put(fba_dev);
