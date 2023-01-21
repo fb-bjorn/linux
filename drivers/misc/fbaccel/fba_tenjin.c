@@ -15,7 +15,6 @@
 
 #include "fba_device.h"
 #include "fba_tenjin_priv.h"
-#include "fba_proto.h"
 
 static int retry_count = -1;
 // FW boot args string
@@ -544,6 +543,7 @@ const struct fba_cfg tenjin_cfg = {
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = -1,
 	.impl_ops = &tenjin_impl_ops,
 };

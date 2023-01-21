@@ -24,7 +24,6 @@
 
 #include "fba_freya_priv.h"
 #include "fba_device.h"
-#include "fba_proto.h"
 
 #define FREYA_DRV_NAME "freya"
 #define ARTEMIS_DRV_NAME "artemis"
@@ -873,6 +872,7 @@ const struct fba_cfg freya_cfg = {
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
 	.impl_ops = &freya_impl_ops,
 };
@@ -884,6 +884,7 @@ const struct fba_cfg artemis_cfg = {
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
 	.impl_ops = &artemis_impl_ops,
 };

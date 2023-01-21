@@ -102,3 +102,35 @@ void fba_write_bar(struct fba_device *dev, uint32_t val, uint32_t bar,
 {
 	iowrite32(val, fba_util_get_bar_ptr(dev, bar, offset));
 }
+
+int fba_util_inc_usage(struct fba_device *dev, const struct fba_limits *max,
+		       struct fba_limits *src, uint32_t sub_cnt)
+{
+	struct fba_limits tmp = *src;
+
+	// Add in values of src job to curent values.
+	tmp.sub_cnt += sub_cnt;
+
+	// Check if we exceed cmp limits.
+	if (tmp.sub_cnt > max->sub_cnt) {
+		fba_dev_err(
+			dev,
+			"Outstanding submissions exceeded (submitted:%d, max:%d).",
+			tmp.sub_cnt, max->sub_cnt);
+		return -EAGAIN;
+	}
+	*src = tmp;
+	return 0;
+}
+
+void fba_util_dec_usage(struct fba_device *dev, struct fba_limits *src,
+			uint32_t sub_cnt)
+{
+	if (src->sub_cnt < sub_cnt) {
+		fba_dev_err(dev, "%s: src->sub_cnt=%u sub_cnt=%u", __func__,
+			    src->sub_cnt, sub_cnt);
+	}
+	WARN_ON_ONCE(src->sub_cnt < sub_cnt);
+
+	src->sub_cnt -= sub_cnt;
+}

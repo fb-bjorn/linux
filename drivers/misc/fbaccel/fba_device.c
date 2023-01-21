@@ -15,7 +15,6 @@
 #include <linux/version.h>
 
 #include "fba_device.h"
-#include "fba_proto.h"
 
 #define FBA_MAX_DEVS 32
 
@@ -179,6 +178,11 @@ static struct attribute *fba_device_attrs[] = {
 };
 ATTRIBUTE_GROUPS(fba_device);
 
+struct fba_channel *fba_get_channel(struct fba_device *dev, int i)
+{
+	return &dev->channels[i];
+}
+
 static void fba_device_unregister(struct fba_device *fba_dev)
 {
 	mutex_lock(&fba_devices_mtx);
@@ -186,6 +190,42 @@ static void fba_device_unregister(struct fba_device *fba_dev)
 	device_destroy(fba_class, MKDEV(MAJOR(fba_devt), fba_dev->minor));
 	ida_free(fba_dev->cfg->devnode_ida, fba_dev->id);
 	mutex_unlock(&fba_devices_mtx);
+}
+
+/* Stop new work from being submitted to the device. */
+static void fba_device_stop(struct fba_device *fba_dev)
+{
+	int i;
+
+	/*
+	 * At this point there should be no work in channels.  Finish tearing
+	 * down channels.
+	 */
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_shutdown(fba_get_channel(fba_dev, i));
+}
+
+static int fba_device_alloc_queue(struct fba_device *dev,
+				  struct fba_shared *area,
+				  uint32_t host_queue_mask,
+				  enum sail_regs sail_q, size_t q_size,
+				  uint32_t bdes)
+{
+	int rc;
+
+	if (bdes & host_queue_mask) {
+		rc = fba_shared_alloc_coherent(dev, area, q_size);
+		if (rc)
+			return rc;
+
+		set_mailbox64(dev, sail_q, area->addr);
+	} else {
+		uint64_t bir = get_mailbox64(dev, sail_q);
+
+		fba_shared_alloc_iomem(dev, area, BIR_TO_BAR(bir),
+				       BIR_TO_OFFSET(bir), q_size);
+	}
+	return 0;
 }
 
 static int __fba_wait_for_state(struct fba_device *dev, uint32_t reg,
@@ -229,9 +269,172 @@ int fba_wait_for_state_nobail(struct fba_device *dev, uint32_t reg,
 	return __fba_wait_for_state(dev, reg, state, num_retries, false);
 }
 
+static int fba_wait_for_status(struct fba_device *dev, uint64_t offset,
+			       uint32_t state, uint32_t num_retries)
+{
+	uint32_t val;
+	int i;
+	int tries = num_retries;
+
+	if (tries < 1)
+		tries = 1;
+
+	for (i = 0; i < tries; i++) {
+		fba_dev_info(dev, "Wait for status ready, try %d.", i);
+		fba_shared_memcpy_from(&dev->status_area, offset, &val,
+				       sizeof(uint32_t));
+		if (val == state)
+			return 0;
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		// TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		// emulation can be slow.
+		schedule_timeout(HZ);
+	}
+	fba_dev_err(dev, "Failed status ready = %x.", val);
+	return -ETIMEDOUT;
+}
+
+static int fba_device_msix_init(struct fba_device *fba_dev)
+{
+	struct pci_dev *pdev = fba_dev->pdev;
+	int rc, msix_cnt;
+
+	msix_cnt = CHANNEL_MSIX_VECTOR_BASE + fba_dev->channel_total;
+	rc = pci_alloc_irq_vectors(pdev, msix_cnt, msix_cnt, PCI_IRQ_MSIX);
+	if (rc < 0 || rc != msix_cnt) {
+		fba_dev_err(fba_dev, "Failed to allocate IRQ vectors.");
+		if (rc >= 0) {
+			rc = -ENOSPC;
+			pci_free_irq_vectors(pdev);
+		}
+		return rc;
+	}
+
+	return 0;
+}
+
+static void fba_device_msix_exit(struct fba_device *fba_dev)
+{
+	pci_free_irq_vectors(fba_dev->pdev);
+}
+
+static void fba_device_fw_setup_ptrs(struct fba_device *dev)
+{
+	uint32_t hdes = SAIL_HDES_DEFINE(dev->cfg->scratch_page_cnt, 0);
+
+	set_mailbox64(dev, SAIL_SCAL, dev->scratch_area.addr);
+	set_mailbox64(dev, SAIL_STAL, dev->status_area.addr);
+
+	set_mailbox(dev, SAIL_HDES, hdes);
+}
+
+/* Set up channels once firmware is ready */
+static int fba_device_fw_channel_init(struct fba_device *dev)
+{
+	struct fba_queue_info sqinfo, cqinfo;
+	uint32_t bdes = get_mailbox(dev, SAIL_BDES);
+	uint32_t cdes = get_mailbox(dev, SAIL_CDES);
+	uint32_t pkt_size = get_mailbox(dev, SAIL_PKT_SIZE);
+	size_t q_size;
+	int rc, i;
+
+	dev->channel_cnt = SAIL_CDES_CNUM(cdes);
+	if (dev->channel_cnt > MAX_CHANNELS)
+		dev->channel_cnt = MAX_CHANNELS;
+	if (dev->channel_cnt <= SAIL_CHANNEL_EXE) {
+		fba_dev_err(
+			dev,
+			"Device did not advertise enough channels. (advertised=%u, min=%u)",
+			dev->channel_cnt, SAIL_CHANNEL_EXE + 1);
+		return -EINVAL;
+	}
+
+	dev->channel_total = dev->channel_cnt;
+	if (dev->channel_total > MAX_CHANNELS) {
+		fba_dev_warn(
+			dev,
+			"Limiting channels to max supported.  (advertised=%u, MAX_CHANNELS=%u)",
+			dev->channel_total, MAX_CHANNELS);
+		dev->channel_total = MAX_CHANNELS;
+	}
+
+	fba_dev_dbg(dev, "using channels = %d.", dev->channel_cnt);
+
+	dev->channel_entries = SAIL_CDES_PQEC(cdes);
+
+	dev->channel_max_packet_size = SAIL_PKT_SIZE_MAX(pkt_size);
+
+	dev->chan_limits.sub_cnt = dev->channel_entries;
+
+	// Allocate enough space for all submission queues.
+	q_size = SAIL_SQ_BYTES(cdes);
+	rc = fba_device_alloc_queue(dev, &dev->sqs_area, SAIL_BDES_HSQ,
+				    SAIL_SQAL, q_size, bdes);
+	if (rc)
+		return rc;
+
+	// Allocate enough space for all completion queues.
+	q_size = SAIL_CQ_BYTES(cdes);
+	rc = fba_device_alloc_queue(dev, &dev->cqs_area, SAIL_BDES_HCQ,
+				    SAIL_CQAL, q_size, bdes);
+	if (rc)
+		goto err_free_sq;
+
+	cqinfo.size = dev->channel_entries * SAIL_CDES_CQES(cdes);
+	sqinfo.size = dev->channel_entries * SAIL_CDES_SQES(cdes);
+
+	cqinfo.area = &dev->cqs_area;
+	sqinfo.area = &dev->sqs_area;
+
+	cqinfo.offset = 0;
+	sqinfo.offset = 0;
+
+	/* Allocate MSIX vectors now that we know the number of channels */
+	rc = fba_device_msix_init(dev);
+	if (rc != 0)
+		goto err_free_cq;
+
+	/* Initialize channels */
+	for (i = 0; i < dev->channel_total; i++) {
+		struct fba_limits *limits;
+		uint64_t max_subs;
+
+		cqinfo.size = dev->channel_entries * SAIL_CDES_CQES(cdes);
+		sqinfo.size = dev->channel_entries * SAIL_CDES_SQES(cdes);
+		limits = &dev->chan_limits;
+		max_subs = dev->channel_max_packet_size;
+
+		rc = fba_channel_init(dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
+				      &sqinfo, &cqinfo, limits, max_subs);
+		if (rc)
+			goto err_exit_channels;
+
+		sqinfo.offset += sqinfo.size;
+		cqinfo.offset += cqinfo.size;
+	}
+
+	fba_device_fw_setup_ptrs(dev);
+
+	return 0;
+
+err_exit_channels:
+	while (i-- > 0)
+		fba_channel_exit(fba_get_channel(dev, i));
+
+err_free_cq:
+	fba_shared_free(dev, &dev->cqs_area);
+
+err_free_sq:
+	fba_shared_free(dev, &dev->sqs_area);
+
+	return rc;
+}
+
 /* Abort operation of device, called upon detection of fatal error. */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 {
+	int i;
+
 	if (atomic_cmpxchg(&fba_dev->has_failed, false, true) != false) {
 		/*
 		 * We've lost a race with another thread triggering abort.
@@ -252,8 +455,107 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 	pci_disable_device(fba_dev->pdev);
 	pci_wait_for_pending_transaction(fba_dev->pdev);
 
+	/* Mark channels as stopped and fail any outstanding work */
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_shutdown(fba_get_channel(fba_dev, i));
+
 	/* Wake up anyone waiting for abort to complete */
 	complete_all(&fba_dev->abort_done);
+}
+
+static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
+{
+	int i, rc = 0;
+
+	if (!atomic_read(&fba_dev->has_failed)) {
+		// disable sail through mailbox registers
+		set_mailbox(fba_dev, SAIL_CTRL, SAIL_DISABLED);
+		/* Use _nobail so we do actually wait for state change. */
+		rc = fba_wait_for_state_nobail(fba_dev, SAIL_STAT,
+					       SAIL_DISABLED,
+					       fba_dev->num_retries);
+		if (rc) {
+			fba_device_abort(fba_dev, "disable device failed");
+			fba_dev_err(fba_dev, "Failed to disable device.");
+		}
+	} else {
+		fba_dev_err(fba_dev, "Device failed, skipping disable.");
+	}
+
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_exit(fba_get_channel(fba_dev, i));
+
+	fba_device_msix_exit(fba_dev);
+
+	fba_shared_free(fba_dev, &fba_dev->cqs_area);
+	fba_shared_free(fba_dev, &fba_dev->sqs_area);
+
+	return rc;
+}
+
+static int fba_device_enable_sail(struct fba_device *dev)
+{
+	int rc;
+
+	/*
+	 * Once we trigger enable of SAIL, we have to avoid touching the device
+	 * until it has finished setting up IATU mappings (due to HW
+	 * limitations.)  The device will perform a write to host memory to let
+	 * us know it is safe to proceed.
+	 */
+	set_mailbox(dev, SAIL_CTRL, SAIL_ENABLED);
+	rc = fba_wait_for_status(dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				 dev->num_retries);
+	if (rc) {
+		fba_dev_err(dev, "Failed waiting for status memory signature.");
+		return rc;
+	}
+	// Resetting the ACK signal
+	fba_shared_memset(&dev->status_area, IATU_CONFIG_OFS, 0,
+			  sizeof(uint32_t));
+
+	rc = fba_wait_for_state(dev, SAIL_STAT, SAIL_ENABLED, dev->num_retries);
+	if (rc)
+		fba_dev_err(dev, "Failed waiting for state %d.", SAIL_STAT);
+
+	return rc;
+}
+
+/* Finish device setup once firmware is ready. */
+static int fba_device_fw_init(struct fba_device *dev)
+{
+	int rc;
+
+	rc = fba_device_fw_channel_init(dev);
+	if (rc)
+		return rc;
+
+	rc = fba_device_enable_sail(dev);
+	if (rc)
+		goto err_channel_exit;
+
+	return 0;
+
+err_channel_exit:
+	fba_device_fw_channel_exit(dev);
+
+	return rc;
+}
+
+/* Tear down firmware-related device state */
+static int fba_device_fw_exit(struct fba_device *fba_dev)
+{
+	int rc;
+
+	/*
+	 * Wait for any outstanding work to complete, so that we can safely
+	 * tear down channels.
+	 */
+	fba_device_stop(fba_dev);
+
+	rc = fba_device_fw_channel_exit(fba_dev);
+
+	return rc;
 }
 
 static void fba_device_free(struct kref *kref)
@@ -261,6 +563,8 @@ static void fba_device_free(struct kref *kref)
 	struct fba_device *fba_dev = container_of(kref, struct fba_device, ref);
 
 	/* Free things that might be referenced by lingering user contexts */
+	ida_destroy(&fba_dev->channel_ids);
+	destroy_workqueue(fba_dev->msix_wq);
 	kfree(fba_dev->name);
 
 	kfree(fba_dev);
@@ -461,6 +765,11 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 		}
 	}
 
+	rc = fba_device_fw_init(fba_dev);
+	if (rc != 0) {
+		fba_dev_err(fba_dev, "Failed to enable device.");
+		return;
+	}
 	fba_dev_info(fba_dev, "Done setting up device, ready for use.");
 }
 
@@ -471,6 +780,8 @@ static int fba_device_init(struct fba_device *fba_dev)
 	kref_init(&fba_dev->ref);
 	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
+
+	ida_init(&fba_dev->channel_ids);
 
 	rc = -ENOSPC;
 	mutex_lock(&fba_devices_mtx);
@@ -501,9 +812,16 @@ static int fba_device_init(struct fba_device *fba_dev)
 		goto err_free_id;
 	}
 
+	fba_dev->msix_wq = alloc_workqueue(fba_dev->name, 0, 0);
+	if (!fba_dev->msix_wq) {
+		fba_dev_err(fba_dev, "Failed to create workqueue thread.");
+		rc = -ENOMEM;
+		goto err_free_id;
+	}
+
 	rc = fba_pci_init(fba_dev);
 	if (rc)
-		goto err_free_id;
+		goto err_free_wq;
 
 	rc = fba_shared_area_init(fba_dev);
 	if (rc)
@@ -535,6 +853,8 @@ err_shared_area_exit:
 	fba_shared_area_exit(fba_dev);
 err_pci_exit:
 	fba_pci_exit(fba_dev);
+err_free_wq:
+	destroy_workqueue(fba_dev->msix_wq);
 err_free_id:
 	ida_free(fba_dev->cfg->devnode_ida, fba_dev->id);
 err_free_minor:
@@ -549,12 +869,20 @@ err_put_device:
 
 static int fba_device_exit(struct fba_device *fba_dev)
 {
+	int rc;
+
 	WRITE_ONCE(fba_dev->exiting, true);
 
 	fba_device_unregister(fba_dev);
 
 	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
 		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
+
+	rc = fba_device_fw_exit(fba_dev);
+	if (rc != 0) {
+		fba_dev_err(fba_dev,
+			    "Error in deactivating the device. Continue");
+	}
 
 	if (!atomic_read(&fba_dev->has_failed)) {
 		if (fba_dev->cfg->impl_ops->reset_controller)

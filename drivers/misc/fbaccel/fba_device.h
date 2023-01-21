@@ -31,14 +31,28 @@
 
 #define FBACCEL_VERSION "0.34.0"
 
+#define CHANNEL_MSIX_VECTOR_BASE 8
+
 #define BAR_CNT 6
 
 // Retry count while waiting for device to change state
 #define MAX_RETRIES 50
 #define MIN_RETRIES 5
 
+// MAX number of channels
+// This will be reduced to the number of advertised channels by the device
+// and the number of MSIX interrupts available
+#define MAX_CHANNELS 128
+
+struct fba_channel;
 struct fba_device;
 struct fba_impl_ops;
+
+// Limit counters used track usage by job and current counts, or limits
+// by context and channel.
+struct fba_limits {
+	uint32_t sub_cnt;
+};
 
 // Per-application configuration parameters
 struct fba_cfg {
@@ -53,6 +67,9 @@ struct fba_cfg {
 
 	// Starting index of doorbell mailboxes
 	int db_mbox_base;
+
+	// Number of scratch pages to allocate
+	int scratch_page_cnt;
 
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
@@ -102,6 +119,7 @@ struct fba_impl_ops {
 	int (*reset_controller)(struct fba_device *dev);
 };
 
+#include "fba_channel.h"
 #include "fba_shared.h"
 #include "fba_util.h"
 
@@ -125,12 +143,27 @@ struct fba_device {
 	const struct fba_cfg *cfg;
 	void *impl_priv;
 
+	// TEMP DMA data used by Testing and Admin for Info Words, Resources.
+	struct fba_shared cqs_area; // Area for all Completion Qs.
+	struct fba_shared sqs_area; // Area for all Submission Qs.
+
 	struct mutex area_mutex; // Protects access to following
 	struct fba_shared scratch_area; // Scratch Area.
 	struct fba_shared status_area; // Status Area.
 	struct fba_shared debug_area; // Debug Area.
 
+	// Usage limits.
+	struct fba_limits chan_limits;
+
 	void __iomem *bars[BAR_CNT];
+	uint32_t channel_cnt;
+	uint32_t channel_entries;
+	uint32_t channel_max_packet_size;
+	struct fba_channel channels[MAX_CHANNELS];
+	uint32_t channel_total;
+	struct ida channel_ids;
+
+	struct workqueue_struct *msix_wq; // queue for msix triggered work
 
 	atomic_t has_failed;
 	atomic_t reset_ok;
@@ -148,13 +181,15 @@ struct fba_device {
 struct fba_device *fba_device_get(struct fba_device *fba_dev);
 void fba_device_put(struct fba_device *fba_dev);
 
+// Get a sail channel
+struct fba_channel *fba_get_channel(struct fba_device *dev, int sail_channel);
+
 /* Called to quiesce device on fatal error */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason);
 
 //
 // State functions
 //
-enum sail_regs;
 int fba_wait_for_state(struct fba_device *dev, enum sail_regs reg,
 		       uint32_t state, uint32_t num_retries);
 int fba_wait_for_state_nobail(struct fba_device *dev, enum sail_regs reg,
