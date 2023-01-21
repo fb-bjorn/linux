@@ -103,6 +103,8 @@ static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
 	struct fba_job *job = NULL;
 	int rc;
 
+	trace_fba_post_cmd(fba_dev->name, post_req->count, post_req->user_data);
+
 	// Allocate the job.
 	job = fba_job_alloc(ctx, post_req->subs, post_req->count,
 			    post_req->user_data);
@@ -114,6 +116,7 @@ static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
 		if (rc != 0)
 			goto err_put_job;
 	}
+	fba_job_trace_post(fba_dev->name, job);
 
 	rc = fba_ctx_submit_job(ctx, job);
 	if (rc < 0) {

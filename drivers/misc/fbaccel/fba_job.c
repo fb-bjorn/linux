@@ -152,6 +152,8 @@ void fba_job_complete(struct fba_job *job)
 	struct fba_device *dev = job->dev;
 	uint16_t cmd_id = job->req.cmp.command_id;
 	uint32_t sub_cnt = job->req.sub_cnt;
+	size_t alloc_cnt = job->alloc_cnt;
+	void *user_job_key = job->user_job_key;
 
 	int ctx_id = fba_ctx_get_id(ctx);
 
@@ -166,6 +168,7 @@ void fba_job_complete(struct fba_job *job)
 	if (job->callback)
 		job->callback(JOB_COMPLETE, job->callback_data);
 
+	trace_fba_job_done(dev->name, job, user_job_key, sub_cnt, alloc_cnt);
 	fba_dev_dbg(dev, "Job %04Xh Completed. ctx ID %d items: %d", cmd_id,
 		    ctx_id, sub_cnt);
 

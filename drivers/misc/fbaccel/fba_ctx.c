@@ -525,6 +525,7 @@ int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res, void *job_key)
 
 	res->cmp = match->req.cmp;
 	res->user_id = match->user_data;
+	fba_job_trace_read_results(fba_dev->name, match);
 	fba_job_put(match);
 
 	return 0;

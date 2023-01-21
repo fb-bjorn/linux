@@ -272,6 +272,8 @@ int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 		if (!rc)
 			rc = -EIO;
 	}
+	trace_fba_time_sync(fba_dev->name, sub.time_spec.tv_sec,
+			    sub.time_spec.tv_nsec);
 
 	return rc;
 }

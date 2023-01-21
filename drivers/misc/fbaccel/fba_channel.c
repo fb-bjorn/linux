@@ -183,6 +183,17 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 	fba_channel_set_squeue_tail(dev, chan->chan_id, tail);
 	spin_unlock(&chan->lock);
 
+	trace_fba_channel_post(dev->name, chan->chan_id, req->cmd_id,
+			       req->sub_cnt);
+	if (trace_fba_channel_post_sub_enabled()) {
+		int i;
+
+		for (i = 0; i < req->sub_cnt; i++)
+			trace_fba_channel_post_sub(dev->name, chan->chan_id,
+						   req->cmd_id,
+						   req->subs[i].header.opcode);
+	}
+
 	fba_dev_dbg(
 		dev,
 		"Added %d items for packet %d to channel %d tail=%d head=%d.",
@@ -478,6 +489,9 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 		rv = get_completion(chan, &cmp);
 		if (rv < 0)
 			break;
+
+		trace_fba_channel_done(dev->name, chan->chan_id, cmp.command_id,
+				       rv);
 
 		cqueue_head = rv;
 		ncmp++;

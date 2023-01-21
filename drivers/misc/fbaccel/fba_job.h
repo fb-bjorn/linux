@@ -3,6 +3,7 @@
 #pragma once
 
 #include "fba_proto.h"
+#include "fba_trace.h"
 
 /*
  * FBA Job
@@ -89,6 +90,31 @@ void fba_job_set_job_key(struct fba_job *job, void *job_key);
 
 // Get user provided job key
 void *fba_job_get_job_key(struct fba_job *job);
+
+/*
+ * Tracing helpers.  These live here so that consumers outside of fba_job.c can
+ * generate trace events including internal job state, but still have the
+ * tracepoint dynamically patched out when disabled.
+ */
+static inline void fba_job_trace_post(const char *name, struct fba_job *job)
+{
+	trace_fba_job_post(name, job, job->user_job_key, job->req.sub_cnt,
+			   job->alloc_cnt);
+}
+
+static inline void fba_job_trace_admin_post(const char *name,
+					    struct fba_job *job)
+{
+	trace_fba_job_admin_post(name, job, job->user_job_key, job->req.sub_cnt,
+				 job->alloc_cnt);
+}
+
+static inline void fba_job_trace_read_results(const char *name,
+					      struct fba_job *job)
+{
+	trace_fba_job_read_results(name, job, job->user_job_key,
+				   job->req.sub_cnt, job->alloc_cnt);
+}
 
 // Add an alloc to the job
 void fba_job_add_alloc(struct fba_job *job, struct fba_alloc *alloc);
