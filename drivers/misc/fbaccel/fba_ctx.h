@@ -45,6 +45,9 @@ int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc);
 /* remove alloc with specified id from context. */
 int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id);
 
+/* Find and reference an alloc by the given id */
+struct fba_alloc *fba_ctx_find_alloc(struct fba_ctx *ctx, int id);
+
 /* Get id associated with ctx */
 int fba_ctx_get_id(struct fba_ctx *ctx);
 

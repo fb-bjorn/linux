@@ -279,6 +279,8 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason);
 extern const struct file_operations fba_fops;
 
 // Allocation/RID Convertion Opertations
+struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
+				    uint64_t size, uint64_t *val);
 struct fba_alloc *fba_alloc_get(struct fba_alloc *alloc);
 void fba_alloc_put(struct fba_alloc *alloc);
 struct fba_alloc *fba_alloc_new(struct fba_resource *res, uint64_t addr,

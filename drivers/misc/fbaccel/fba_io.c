@@ -116,6 +116,98 @@ static long fba_ioctl_get_details(struct fba_device *dev,
 	return 0;
 }
 
+static long __fba_ioctl_access_dma(struct fba_device *fba_dev,
+				   struct dma_access_ioctl *dma_req)
+{
+	uint8_t *ptr;
+
+	ptr = (uint8_t *)fba_dev->debug_area.data;
+	if (dma_req->offset >= SAIL_DEBUG_SIZE)
+		return -EINVAL;
+	if (dma_req->len > SAIL_DEBUG_SIZE - dma_req->offset)
+		return -EINVAL;
+
+	ptr += dma_req->offset;
+	if (dma_req->type == FBA_ACCESS_READ) {
+		if (copy_to_user(dma_req->data, ptr, dma_req->len))
+			return -EFAULT;
+	} else {
+		if (copy_from_user(ptr, dma_req->data, dma_req->len))
+			return -EFAULT;
+	}
+	dma_req->addr = fba_dev->debug_area.addr;
+
+	return 0;
+}
+
+static long fba_ioctl_access_dma(struct fba_device *fba_dev,
+				 struct dma_access_ioctl *dma_req)
+{
+	long rc;
+
+	mutex_lock(&fba_dev->area_mutex);
+	if (!fba_shared_is_valid(&fba_dev->debug_area)) {
+		rc = -EIO;
+		goto out_unlock;
+	}
+	rc = __fba_ioctl_access_dma(fba_dev, dma_req);
+
+out_unlock:
+	mutex_unlock(&fba_dev->area_mutex);
+
+	return rc;
+}
+
+static long __fba_ioctl_access_scratch(struct fba_ctx *ctx,
+				       struct scratch_access_ioctl *scratch_req)
+{
+	void __user *user = scratch_req->data;
+	struct fba_alloc *alloc;
+	uint64_t scratch;
+	void *scratch_va;
+	long rc;
+
+	// Ref RID and return address as 64b value;
+	alloc = fba_alloc_convert(ctx, scratch_req->rid, scratch_req->len,
+				  &scratch);
+	if (IS_ERR(alloc))
+		return PTR_ERR(alloc);
+
+	// Convert from DMA addr to VA
+	scratch_va = fba_alloc_map_to_va(alloc, scratch);
+
+	if (scratch_req->type == FBA_ACCESS_READ)
+		rc = copy_to_user(user, scratch_va, scratch_req->len);
+	else
+		rc = copy_from_user(scratch_va, user, scratch_req->len);
+	if (rc)
+		rc = -EFAULT;
+
+	// Release the alloc
+	fba_alloc_put(alloc);
+
+	return rc;
+}
+
+static long fba_ioctl_access_scratch(struct fba_ctx *ctx,
+				     struct scratch_access_ioctl *scratch_req)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	long rc;
+
+	mutex_lock(&fba_dev->area_mutex);
+	if (!fba_shared_is_valid(&fba_dev->scratch_area)) {
+		rc = -EIO;
+		goto out_unlock;
+	}
+	rc = __fba_ioctl_access_scratch(ctx, scratch_req);
+
+out_unlock:
+	mutex_unlock(&fba_dev->area_mutex);
+
+	return rc;
+}
+
 static long fba_ioctl_get_limit_params(struct fba_device *dev,
 				       struct fba_limit_params_ioctl *params)
 {
@@ -195,6 +287,26 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		rc = fba_ctx_open(ctx);
 
 		return rc;
+	case FBA_IOCTL_ACCESS_DMA: {
+		struct dma_access_ioctl dma_req;
+
+		if (copy_from_user(&dma_req, data, sizeof(dma_req)))
+			return -EFAULT;
+		rc = fba_ioctl_access_dma(dev, &dma_req);
+		if (rc != 0)
+			return rc;
+		if (copy_to_user(data, &dma_req, sizeof(dma_req)))
+			return -EFAULT;
+
+		return 0;
+	}
+	case FBA_IOCTL_ACCESS_SCRATCH: {
+		struct scratch_access_ioctl scratch_req;
+
+		if (copy_from_user(&scratch_req, data, sizeof(scratch_req)))
+			return -EFAULT;
+		return fba_ioctl_access_scratch(ctx, &scratch_req);
+	}
 	case FBA_IOCTL_GET_LIMIT_PARAMS: {
 		struct fba_limit_params_ioctl limit_params_req;
 

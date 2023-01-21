@@ -253,6 +253,20 @@ int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id)
 	return rc;
 }
 
+/* Find and reference an alloc by the given id */
+struct fba_alloc *fba_ctx_find_alloc(struct fba_ctx *ctx, int id)
+{
+	struct fba_alloc *alloc;
+
+	mutex_lock(&ctx->allocs_mutex);
+	alloc = idr_find(&ctx->allocs_idr, id);
+	if (alloc != NULL)
+		fba_alloc_get(alloc);
+	mutex_unlock(&ctx->allocs_mutex);
+
+	return alloc;
+}
+
 /* Get id associated with ctx, only valid if in FBA_CTX_OPEN state */
 int fba_ctx_get_id(struct fba_ctx *ctx)
 {

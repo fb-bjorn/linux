@@ -41,6 +41,25 @@ struct res_alloc_ioctl {
 	uint64_t start; // Returned START
 };
 
+#define FBA_ACCESS_READ 0
+#define FBA_ACCESS_WRITE 1
+
+struct scratch_access_ioctl {
+	void __user *data; // Read destination, or write source.
+	uint64_t rid; // RID of the scratch area.
+	uint32_t len; // Length of the transfer.
+	uint32_t type; // Read or write.
+};
+
+// IOCTL struct to read or write data into DMA buffer.
+struct dma_access_ioctl {
+	void __user *data; // Read destination, or write source
+	uint64_t offset; // Word-aligned byte offset into dma area.
+	uint32_t len; // Number of bytes to read/write
+	uint8_t type; // Read or write command (FBA_ACCESS_xxx)
+	uint64_t addr; // Read-only physical address of DMA buffer.
+};
+
 // IOCTL struct to update and report driver state.
 struct set_state_ioctl {
 	uint32_t oldstate; // Read only old state value.
@@ -135,6 +154,20 @@ struct payload_exec_ioctl {
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_RESOURCE_FREE _IOWR('f', 3, uint64_t)
 
+// Read or write DMA mapped area
+//
+// Reads from or writes into generic driver DMA mapped area.  The actual
+// physical address of the DMA area is returned in the IOCTL.  A transfer
+// size of zero allows using this to query for the physical address.
+//
+// RETURNS:
+//   0 - Success. Read or write completed.
+//   -EINVAL - Bad input params (unaligned offset or length, out of range bar).
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   -EACCES - Unable to read struct fba_access from userspace.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_ACCESS_DMA _IOWR('f', 8, struct dma_access_ioctl)
+
 // Set driver state.
 //
 // DOWN -> PRESENT -> CONNECTED -> ACTIVE.
@@ -158,6 +191,16 @@ struct payload_exec_ioctl {
 //   0 - Success.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_GET_DETAILS _IOR('f', 10, struct get_details_ioctl)
+
+// Read or write 32-bit words at the given driver bar index and offset.
+//
+// RETURNS:
+//   0 - Success. Read or write completed.
+//   -EINVAL - Bad input params (unaligned offset or length, out of range bar).
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   -EACCES - Unable to read struct fba_access from userspace.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_ACCESS_SCRATCH _IOW('f', 11, struct scratch_access_ioctl)
 
 // Unlock Secure Debug capabilities
 //
