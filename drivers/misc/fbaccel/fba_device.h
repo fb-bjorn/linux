@@ -49,6 +49,7 @@
 struct fba_alloc;
 struct fba_ctx;
 struct fba_channel;
+struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
 
@@ -115,6 +116,38 @@ struct fba_shared {
 	};
 	dma_addr_t addr;
 	size_t size;
+};
+
+/* Stores the node info in the DMA PRP linked list chain. */
+struct fba_dma_prp_node {
+	dma_addr_t *prp;
+	dma_addr_t paddr;
+	struct list_head list;
+};
+
+/*
+ * FBA DMA Object
+ *
+ * An object representing a single DMA transaction.  Tracks pinning of physical
+ * pages, mapping them to DMA space, the PRP containing physical addresses.
+ */
+struct fba_dma {
+	struct list_head item; // This DMA node in the Job.
+	union {
+		void *user_data; // Pointer to user space data.
+		dma_addr_t user_addr; // Unsigned int to user space data.
+	};
+	size_t size; // Size of payload.
+	int flags; // DMA Direction.
+	int get_cnt; // Number of pages we have locked.
+	int map_cnt; // Number of pages we have DMA mapped.
+	struct page **pages; // Array of page structure pointers.
+	union {
+		dma_addr_t prp_addr; // Physical Address of PRP List.
+		dma_addr_t dma_addr; // Physical Address of buffer
+	};
+	struct list_head prp_list_head;
+	struct sg_table sg;
 };
 
 struct fba_impl_ops {
@@ -220,6 +253,9 @@ struct fba_device {
 	int num_retries;
 };
 
+/* Module parameter for forcing PRP list usage */
+extern bool test_force_prp;
+
 struct fba_device *fba_device_get(struct fba_device *fba_dev);
 void fba_device_put(struct fba_device *fba_dev);
 struct fba_device *fba_device_lookup(unsigned int minor);
@@ -247,6 +283,11 @@ uint64_t fba_alloc_get_addr(struct fba_alloc *alloc);
 
 /* Map the provided addr (in resource space) to its virtual address offset. */
 void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr);
+
+// DMA Operations
+struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
+			    int dir, bool force_prp);
+void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma);
 
 //
 // State functions

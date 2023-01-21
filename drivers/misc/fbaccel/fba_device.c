@@ -33,6 +33,12 @@ static bool pcie_boot_en = true;
 module_param(pcie_boot_en, bool, 0664);
 MODULE_PARM_DESC(pcie_boot_en, "Bootflow enablement boot parameter");
 
+/* Module parameter for forcing PRP list usage */
+bool test_force_prp;
+module_param(test_force_prp, bool, 0664);
+MODULE_PARM_DESC(test_force_prp,
+		 "If true, force PRP list even when buffer is contiguous");
+
 static void fba_async_probe(void *data, async_cookie_t cookie);
 
 static ssize_t boot_file_show(struct device *dev, struct device_attribute *attr,
