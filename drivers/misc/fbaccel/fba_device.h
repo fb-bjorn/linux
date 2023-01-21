@@ -40,6 +40,7 @@ struct fba_cfg {
 	struct ida *devnode_ida;
 };
 
+extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg tenjin_cfg;
 
 /*
