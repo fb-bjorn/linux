@@ -46,6 +46,7 @@
 // and the number of MSIX interrupts available
 #define MAX_CHANNELS 128
 
+struct fba_alloc;
 struct fba_ctx;
 struct fba_channel;
 struct fba_device;
@@ -87,6 +88,22 @@ struct fba_cfg {
 extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg artemis_cfg;
 extern const struct fba_cfg tenjin_cfg;
+
+/*
+ * FBA Alloc
+ *
+ * An alloc is a usage of part (or whole) of a resource (e.g. DRAM).
+ * The alloc and the resource portion it consumed
+ * are both freed when there are no refereces to the alloc.
+ */
+struct fba_alloc {
+	struct fba_resource *resource; // alloc is from this resource
+	uint64_t addr;
+	uint64_t size;
+	struct kref ref; // reference count
+	struct mutex dma_buf_mutex;
+	struct list_head dma_buf_list;
+};
 
 // Contains information on shared memory areas.  If addr is non-zero
 // points to host allocated dma coherent.  If addr is zero, points to
@@ -220,6 +237,16 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason);
 
 // File Operations
 extern const struct file_operations fba_fops;
+
+// Allocation/RID Convertion Opertations
+struct fba_alloc *fba_alloc_get(struct fba_alloc *alloc);
+void fba_alloc_put(struct fba_alloc *alloc);
+struct fba_alloc *fba_alloc_new(struct fba_resource *res, uint64_t addr,
+				uint64_t size);
+uint64_t fba_alloc_get_addr(struct fba_alloc *alloc);
+
+/* Map the provided addr (in resource space) to its virtual address offset. */
+void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr);
 
 //
 // State functions

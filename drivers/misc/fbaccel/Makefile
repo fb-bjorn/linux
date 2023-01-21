@@ -1,6 +1,7 @@
 obj-$(CONFIG_FBACCEL) = fbaccel.o
 
 fbaccel-y := fba_admin.o
+fbaccel-y += fba_alloc.o
 fbaccel-y += fba_channel.o
 fbaccel-y += fba_ctx.o
 fbaccel-y += fba_device.o
