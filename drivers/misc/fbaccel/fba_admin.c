@@ -104,3 +104,26 @@ int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 
 	return rc;
 }
+
+int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
+{
+	struct fba_submission sub = {
+		.header = { .opcode = ADMIN_TIME_SET },
+	};
+	uint16_t status;
+	int32_t rem;
+	int rc;
+
+	sub.time_spec.tv_sec = div_s64_rem(time, NSEC_PER_SEC, &rem);
+	sub.time_spec.tv_nsec = rem;
+
+	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (rc || status) {
+		fba_dev_err(fba_dev, "ADMIN_TIME_SET failed rc=%d status=%d",
+			    rc, status);
+		if (!rc)
+			rc = -EIO;
+	}
+
+	return rc;
+}

@@ -627,8 +627,16 @@ static int fba_device_fw_init(struct fba_device *dev)
 
 	fba_device_fw_setup_platform(dev);
 
+	rc = fba_admin_time_set(dev, ktime_get_real());
+	if (rc) {
+		fba_dev_err(dev, "Failed to set device time.");
+		goto err_resource_exit;
+	}
+
 	return 0;
 
+err_resource_exit:
+	fba_resource_exit(dev);
 err_channel_exit:
 	fba_device_fw_channel_exit(dev);
 
