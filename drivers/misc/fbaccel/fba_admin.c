@@ -105,6 +105,75 @@ int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 	return rc;
 }
 
+int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
+			      void *dst, uint32_t size)
+{
+	struct fba_submission sub = {};
+	uint16_t status;
+	struct device *dev = &fba_dev->pdev->dev;
+	dma_addr_t pa_dma;
+	void *va_dma;
+	int err = 0;
+
+	va_dma = dma_alloc_coherent(dev, size, &pa_dma, GFP_KERNEL);
+	if (va_dma == NULL)
+		return -ENOMEM;
+
+	sub.header.opcode = opcode;
+	sub.va_dma.host_addr = pa_dma;
+	sub.va_dma.flags_size = size;
+
+	err = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+
+	if (err == 0) {
+		memcpy(dst, va_dma, size);
+	} else {
+		fba_dev_err(
+			fba_dev,
+			"%s: opcode %d failed to read from device: dst=%p size=%u err=%d.",
+			__func__, opcode, dst, size, err);
+	}
+
+	dma_free_coherent(dev, size, va_dma, pa_dma);
+
+	return err;
+}
+
+int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
+			    void *dst, uint32_t size)
+{
+	struct fba_submission sub = {
+		.header = { .opcode = opcode },
+		.va_dma = { .flags_size = size | AT_DMA_OPSZ |
+				      AT_DMA_TO_DEVICE, },
+	};
+	struct device *dev = &fba_dev->pdev->dev;
+	uint16_t status;
+	void *va_dma;
+	dma_addr_t host_addr;
+	int err;
+
+	va_dma = dma_alloc_coherent(dev, size, &host_addr, GFP_KERNEL);
+	if (va_dma == NULL)
+		return -ENOMEM;
+	sub.va_dma.host_addr = host_addr;
+
+	memcpy(va_dma, dst, size);
+
+	err = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+
+	if (err != 0) {
+		fba_dev_err(
+			fba_dev,
+			"%s: opcode %d failed to write to device: dst=%p size=%u err=%d.",
+			__func__, opcode, dst, size, err);
+	}
+
+	dma_free_coherent(dev, size, va_dma, host_addr);
+
+	return err;
+}
+
 int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 {
 	struct fba_submission sub = {
