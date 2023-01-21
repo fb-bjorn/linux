@@ -235,11 +235,15 @@ struct fba_device {
 
 	// Usage limits.
 	struct fba_limits chan_limits;
+	struct fba_limits streaming_chan_limits;
 
 	void __iomem *bars[BAR_CNT];
 	uint32_t channel_cnt;
 	uint32_t channel_entries;
 	uint32_t channel_max_packet_size;
+	uint32_t streaming_channel_cnt;
+	uint32_t streaming_channel_entries;
+	uint32_t streaming_channel_max_packet_size;
 	struct fba_channel channels[MAX_CHANNELS];
 	uint32_t channel_total;
 	struct ida channel_ids;
@@ -305,6 +309,8 @@ struct fba_device *fba_device_lookup(unsigned int minor);
 
 // Get a sail channel
 struct fba_channel *fba_get_channel(struct fba_device *dev, int sail_channel);
+struct fba_channel *fba_allocate_streaming_channel(struct fba_device *dev);
+void fba_free_streaming_channel(struct fba_channel *chan);
 
 // Device Operations
 void fba_device_add_ctx(struct fba_device *fba_dev, struct list_head *entry);

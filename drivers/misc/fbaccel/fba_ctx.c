@@ -50,6 +50,9 @@ struct fba_ctx {
 	struct list_head cmp_list;
 	// Completion used to signal idle
 	struct completion ctx_idle;
+
+	// Back pointer to parent ctx that owns the streaming ctx
+	struct fba_ctx *parent_ctx;
 };
 
 static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
@@ -70,7 +73,7 @@ static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
 }
 
 // Allocate per-file context.
-struct fba_ctx *fba_ctx_alloc(struct fba_device *dev)
+struct fba_ctx *fba_ctx_alloc(struct fba_device *dev, struct fba_ctx *parent)
 {
 	struct fba_ctx *ctx;
 	struct fba_channel *chan;
@@ -86,7 +89,11 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *dev)
 	 */
 	ctx->dev = dev;
 
-	chan = fba_get_channel(dev, SAIL_CHANNEL_EXE);
+	if (parent)
+		chan = fba_allocate_streaming_channel(dev);
+	else
+		chan = fba_get_channel(dev, SAIL_CHANNEL_EXE);
+
 	if (chan == NULL) {
 		fba_dev_err(dev, "Failed to allocate channel.");
 		kfree(ctx);
@@ -94,6 +101,9 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *dev)
 	}
 
 	fba_dev_dbg(dev, "Allocated channel.");
+
+	if (parent)
+		ctx->parent_ctx = fba_ctx_get(parent);
 
 	fba_ctx_init(dev, ctx, chan);
 
@@ -104,8 +114,8 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *dev)
 }
 
 /*
- * Destroy the refcounted fba_ctx, which gets released when the context
- * has been closed by the opening application.
+ * Destroy the refcounted fba_ctx, which gets released when the context and any
+ * children (streaming contexts) have been closed by the opening application.
  */
 static void fba_ctx_free(struct kref *ref)
 {
@@ -120,6 +130,11 @@ static void fba_ctx_free(struct kref *ref)
 		fba_alloc_put(alloc);
 	idr_destroy(&ctx->allocs_idr);
 	mutex_destroy(&ctx->allocs_mutex);
+
+	if (ctx->parent_ctx) {
+		fba_free_streaming_channel(ctx->chan);
+		fba_ctx_put(ctx->parent_ctx);
+	}
 
 	fba_device_put(dev);
 
@@ -227,6 +242,12 @@ void fba_ctx_put(struct fba_ctx *ctx)
 struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx)
 {
 	return ctx->dev;
+}
+
+/* Get parent context (or NULL if no parent.) */
+struct fba_ctx *fba_ctx_get_parent(struct fba_ctx *ctx)
+{
+	return ctx->parent_ctx;
 }
 
 /* Add alloc to context, and return unique id (or -ENOSPC if limit reached.) */

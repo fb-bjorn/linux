@@ -40,8 +40,8 @@ struct fba_queue {
  *
  * Currently channels come in three flavors, an admin channel for general
  * control path operations, a shared channel with out-of-order completions,
- * and (in a future diff) a set of "streaming" channels with in-order
- * completion guarantees.
+ * and (where needed by application) a set of "streaming" channels with
+ * in-order completion guarantees.
  */
 struct fba_channel {
 	struct work_struct work;

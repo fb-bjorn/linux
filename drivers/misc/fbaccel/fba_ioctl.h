@@ -125,7 +125,7 @@ struct get_details_ioctl {
 	uint32_t admin_cq_fill_watermark; // AdminQ CQ fill watermark.
 	uint32_t exe_sq_fill_watermark; // ExeQ SQ fill watermark.
 	uint32_t exe_cq_fill_watermark; // ExeQ CQ fill watermark.
-	uint32_t reserved;
+	uint32_t streaming_channel_cnt; // Number of streaming channels
 };
 
 // IOCTL struct to read items or groups definitions into data.
@@ -152,11 +152,18 @@ struct mon_data_ioctl {
 	int16_t __user *errors;
 };
 
+//IOCTL for creating streaming context
+struct stream_ioctl {
+	int64_t flags; // Same as flags used in open(2)
+	uint64_t fd; // Created streaming file descriptor
+};
+
 // Enumeration for channel_type in fba_limit_params_ioctl
 #define FBA_CHANNEL_TYPE_CONCURRENT 0U
+#define FBA_CHANNEL_TYPE_STREAMING 1U
 
 struct fba_limit_params_ioctl {
-	uint32_t channel_type; // Channel type to query
+	uint32_t channel_type; // Channel type to query (generic or streaming)
 	uint32_t max_channels; // Total number of supported channels
 	uint32_t max_entries_per_context; // Max number of entries per context
 	uint32_t max_entries_per_packet; // Max allowed entries per packet
@@ -329,6 +336,15 @@ struct payload_exec_ioctl {
 //   0 - Success.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_MON_DATA _IOR('f', 18, struct mon_data_ioctl)
+
+// Create a streaming context
+//
+// Creates a streaming context for posting streaming requests
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_STREAM_CREATE _IOR('f', 19, struct stream_ioctl)
 
 // Unlock Secure Debug capabilities
 //

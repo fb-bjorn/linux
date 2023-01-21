@@ -25,7 +25,7 @@ struct fba_job;
 struct fba_job_result;
 
 // Allocate and initialize a dynamic context object.
-struct fba_ctx *fba_ctx_alloc(struct fba_device *dev);
+struct fba_ctx *fba_ctx_alloc(struct fba_device *dev, struct fba_ctx *parent);
 
 // Send open admin message and promote the state to allow FW transactions.
 int fba_ctx_open(struct fba_ctx *ctx);
@@ -41,6 +41,9 @@ bool fba_ctx_is_open(struct fba_ctx *ctx);
 
 /* Get device associated with ctx. */
 struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx);
+
+/* Get parent context (or NULL if no parent.) */
+struct fba_ctx *fba_ctx_get_parent(struct fba_ctx *ctx);
 
 /* Add alloc to context, and return unique id (or -ENOSPC if limit reached.) */
 int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc);

@@ -388,6 +388,42 @@ out_unlock:
 	return rc;
 }
 
+static long fba_ioctl_stream_create(struct fba_device *dev,
+				    struct fba_ctx *parent,
+				    struct stream_ioctl *stream_req)
+{
+	struct fba_ctx *ctx;
+	long ret;
+
+	ctx = fba_ctx_alloc(fba_device_get(dev), parent);
+	if (IS_ERR(ctx)) {
+		fba_dev_err(dev, "Failed to allocate streaming context.");
+		fba_device_put(dev);
+		return PTR_ERR(ctx);
+	}
+
+	ret = fba_ctx_open(ctx);
+	if (ret < 0) {
+		fba_dev_err(dev, "Failed to open streaming context.");
+		goto err_close_ctx;
+	}
+
+	ret = anon_inode_getfd("freya_streaming", &fba_fops, ctx,
+			       stream_req->flags);
+	if (ret < 0) {
+		fba_dev_err(dev, "Failed to create streaming inode: %ld.", ret);
+		goto err_close_ctx;
+	}
+
+	stream_req->fd = ret;
+	return 0;
+
+err_close_ctx:
+	fba_ctx_close(ctx);
+	fba_ctx_put(ctx);
+	return ret;
+}
+
 static long fba_ioctl_get_limit_params(struct fba_device *dev,
 				       struct fba_limit_params_ioctl *params)
 {
@@ -397,6 +433,13 @@ static long fba_ioctl_get_limit_params(struct fba_device *dev,
 		params->max_channels = dev->channel_cnt - SAIL_CHANNEL_EXE;
 		params->max_entries_per_packet = dev->channel_max_packet_size;
 		break;
+
+	case FBA_CHANNEL_TYPE_STREAMING:
+		params->max_channels = dev->streaming_channel_cnt;
+		params->max_entries_per_packet =
+			dev->streaming_channel_max_packet_size;
+		break;
+
 	default:
 		return -EINVAL;
 	}
@@ -554,12 +597,18 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	void __user *data = (void __user *)arg;
 	struct fba_ctx *ctx = fp->private_data;
+	struct fba_ctx *streaming_ctx, *parent_ctx;
 	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
 	long rc;
 
 	// All IOCTLS take a struct *, so ensure it's non-zero.
 	if (data == NULL)
 		return -EINVAL;
+
+	streaming_ctx = ctx;
+	parent_ctx = fba_ctx_get_parent(ctx);
+	if (parent_ctx)
+		ctx = parent_ctx;
 
 	switch (cmd) {
 	case FBA_IOCTL_RESOURCE_INFO: {
@@ -604,13 +653,13 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_POST_ID: {
 		struct post_ioctl post_req;
 
-		if (!fba_ctx_is_open(ctx))
+		if (!fba_ctx_is_open(streaming_ctx))
 			return -EACCES;
 
 		if (copy_from_user(&post_req, data, sizeof(post_req)))
 			return -EFAULT;
 
-		rc = fba_ioctl_post_id(ctx, &post_req);
+		rc = fba_ioctl_post_id(streaming_ctx, &post_req);
 		return rc;
 	}
 	case FBA_IOCTL_READ_ID: {
@@ -619,7 +668,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&read_req, data, sizeof(read_req)))
 			return -EFAULT;
 
-		rc = fba_ioctl_read_results(ctx, read_req.eventfd,
+		rc = fba_ioctl_read_results(streaming_ctx, read_req.eventfd,
 					    read_req.results, read_req.count);
 		return rc;
 	}
@@ -668,6 +717,22 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&scratch_req, data, sizeof(scratch_req)))
 			return -EFAULT;
 		return fba_ioctl_access_scratch(ctx, &scratch_req);
+	}
+	case FBA_IOCTL_STREAM_CREATE: {
+		struct stream_ioctl stream_req;
+
+		if (copy_from_user(&stream_req, data,
+				   sizeof(struct stream_ioctl)))
+			return -EFAULT;
+
+		rc = fba_ioctl_stream_create(dev, ctx, &stream_req);
+		if (rc == 0) {
+			if (copy_to_user(data, &stream_req,
+					 sizeof(struct stream_ioctl))) {
+				return -EFAULT;
+			}
+		}
+		return rc;
 	}
 	case FBA_IOCTL_GET_LIMIT_PARAMS: {
 		struct fba_limit_params_ioctl limit_params_req;
@@ -732,7 +797,7 @@ static int fba_open(struct inode *node, struct file *fp)
 
 	fba_dev_dbg(fba_dev, "Open.");
 
-	ctx = fba_ctx_alloc(fba_dev);
+	ctx = fba_ctx_alloc(fba_dev, NULL /* parent */);
 	if (IS_ERR(ctx)) {
 		fba_dev_err(fba_dev, "Failed to allocate context.");
 		fba_device_put(fba_dev);

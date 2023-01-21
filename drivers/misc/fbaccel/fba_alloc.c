@@ -76,6 +76,10 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 	if (rid == 0)
 		return NULL;
 
+	/* Use parent context for streaming contexts */
+	if (fba_ctx_get_parent(ctx))
+		ctx = fba_ctx_get_parent(ctx);
+
 	alloc = fba_ctx_find_alloc(ctx, id);
 	if (alloc == NULL) {
 		fba_dev_err(fba_dev,

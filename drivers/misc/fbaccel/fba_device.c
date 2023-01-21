@@ -400,6 +400,7 @@ static int fba_device_fw_channel_init(struct fba_device *dev)
 	struct fba_queue_info sqinfo, cqinfo;
 	uint32_t bdes = get_mailbox(dev, SAIL_BDES);
 	uint32_t cdes = get_mailbox(dev, SAIL_CDES);
+	uint32_t strm = get_mailbox(dev, SAIL_STRM);
 	uint32_t pkt_size = get_mailbox(dev, SAIL_PKT_SIZE);
 	size_t q_size;
 	int rc, i;
@@ -415,32 +416,44 @@ static int fba_device_fw_channel_init(struct fba_device *dev)
 		return -EINVAL;
 	}
 
-	dev->channel_total = dev->channel_cnt;
+	dev->streaming_channel_cnt = SAIL_STRM_CNUM(strm);
+	dev->channel_total = dev->channel_cnt + dev->streaming_channel_cnt;
 	if (dev->channel_total > MAX_CHANNELS) {
 		fba_dev_warn(
 			dev,
 			"Limiting channels to max supported.  (advertised=%u, MAX_CHANNELS=%u)",
 			dev->channel_total, MAX_CHANNELS);
+		dev->streaming_channel_cnt = MAX_CHANNELS - dev->channel_cnt;
 		dev->channel_total = MAX_CHANNELS;
 	}
 
-	fba_dev_dbg(dev, "using channels = %d.", dev->channel_cnt);
+	fba_dev_dbg(dev, "using channels = %d, streaming_channels = %d.",
+		    dev->channel_cnt, dev->streaming_channel_cnt);
 
 	dev->channel_entries = SAIL_CDES_PQEC(cdes);
+	dev->streaming_channel_entries = SAIL_STRM_PQEC(strm);
 
 	dev->channel_max_packet_size = SAIL_PKT_SIZE_MAX(pkt_size);
+	dev->streaming_channel_max_packet_size =
+		SAIL_PKT_STREAMING_SIZE_MAX(pkt_size);
 
 	dev->chan_limits.sub_cnt = dev->channel_entries;
 
+	dev->streaming_chan_limits.sub_cnt = dev->streaming_channel_entries;
+
 	// Allocate enough space for all submission queues.
-	q_size = SAIL_SQ_BYTES(cdes);
+	q_size = SAIL_SQ_BYTES(cdes) + dev->streaming_channel_cnt *
+					       dev->streaming_channel_entries *
+					       SAIL_CDES_SQES(cdes);
 	rc = fba_device_alloc_queue(dev, &dev->sqs_area, SAIL_BDES_HSQ,
 				    SAIL_SQAL, q_size, bdes);
 	if (rc)
 		return rc;
 
 	// Allocate enough space for all completion queues.
-	q_size = SAIL_CQ_BYTES(cdes);
+	q_size = SAIL_CQ_BYTES(cdes) + dev->streaming_channel_cnt *
+					       dev->streaming_channel_entries *
+					       SAIL_CDES_CQES(cdes);
 	rc = fba_device_alloc_queue(dev, &dev->cqs_area, SAIL_BDES_HCQ,
 				    SAIL_CQAL, q_size, bdes);
 	if (rc)
@@ -465,10 +478,21 @@ static int fba_device_fw_channel_init(struct fba_device *dev)
 		struct fba_limits *limits;
 		uint64_t max_subs;
 
-		cqinfo.size = dev->channel_entries * SAIL_CDES_CQES(cdes);
-		sqinfo.size = dev->channel_entries * SAIL_CDES_SQES(cdes);
-		limits = &dev->chan_limits;
-		max_subs = dev->channel_max_packet_size;
+		if (i < dev->channel_cnt) {
+			cqinfo.size =
+				dev->channel_entries * SAIL_CDES_CQES(cdes);
+			sqinfo.size =
+				dev->channel_entries * SAIL_CDES_SQES(cdes);
+			limits = &dev->chan_limits;
+			max_subs = dev->channel_max_packet_size;
+		} else {
+			cqinfo.size = dev->streaming_channel_entries *
+				      SAIL_CDES_CQES(cdes);
+			sqinfo.size = dev->streaming_channel_entries *
+				      SAIL_CDES_SQES(cdes);
+			limits = &dev->streaming_chan_limits;
+			max_subs = dev->streaming_channel_max_packet_size;
+		}
 
 		rc = fba_channel_init(dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
 				      &sqinfo, &cqinfo, limits, max_subs);
@@ -1038,6 +1062,25 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	fba_device_put(fba_dev);
 
 	return 0;
+}
+
+struct fba_channel *fba_allocate_streaming_channel(struct fba_device *dev)
+{
+	int chan_id;
+	struct fba_channel *chan = NULL;
+
+	chan_id = ida_alloc_range(
+		&dev->channel_ids, dev->channel_cnt,
+		dev->channel_cnt + dev->streaming_channel_cnt - 1, GFP_KERNEL);
+	if (chan_id >= 0)
+		chan = fba_get_channel(dev, chan_id);
+
+	return chan;
+}
+
+void fba_free_streaming_channel(struct fba_channel *chan)
+{
+	ida_free(&chan->dev->channel_ids, chan->chan_id);
 }
 
 static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
