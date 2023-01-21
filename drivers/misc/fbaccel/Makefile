@@ -4,6 +4,7 @@ fbaccel-y := fba_admin.o
 fbaccel-y += fba_channel.o
 fbaccel-y += fba_device.o
 fbaccel-y += fba_freya.o
+fbaccel-y += fba_resource.o
 fbaccel-y += fba_shared.o
 fbaccel-y += fba_tenjin.o
 fbaccel-y += fba_util.o

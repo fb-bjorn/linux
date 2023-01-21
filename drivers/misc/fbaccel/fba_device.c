@@ -494,6 +494,11 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 	return rc;
 }
 
+static uint32_t get_admin_command_timeout(struct fba_device *dev)
+{
+	return get_mailbox(dev, SAIL_ADMIN_CMD_TIMEOUT);
+}
+
 static int fba_device_enable_sail(struct fba_device *dev)
 {
 	int rc;
@@ -522,6 +527,25 @@ static int fba_device_enable_sail(struct fba_device *dev)
 	return rc;
 }
 
+/* Setup some defaults once we know platform type */
+static void fba_device_fw_setup_platform(struct fba_device *dev)
+{
+	if (dev->platform_type == PLATFORM_SILICON)
+		dev->num_retries = MIN_RETRIES;
+	else
+		dev->num_retries = MAX_RETRIES;
+
+	dev->admin_cmd_timeout_ms = get_admin_command_timeout(dev);
+	if (!dev->admin_cmd_timeout_ms) {
+		if (dev->platform_type == PLATFORM_SILICON)
+			dev->admin_cmd_timeout_ms =
+				SAIL_ADMIN_CMD_MIN_TIMEOUT_MS;
+		else
+			dev->admin_cmd_timeout_ms =
+				SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+	}
+}
+
 /* Finish device setup once firmware is ready. */
 static int fba_device_fw_init(struct fba_device *dev)
 {
@@ -534,6 +558,15 @@ static int fba_device_fw_init(struct fba_device *dev)
 	rc = fba_device_enable_sail(dev);
 	if (rc)
 		goto err_channel_exit;
+
+	// Setup Resources
+	rc = fba_resource_init(dev);
+	if (rc) {
+		fba_dev_err(dev, "Failed to init resources.");
+		goto err_channel_exit;
+	}
+
+	fba_device_fw_setup_platform(dev);
 
 	return 0;
 
@@ -553,6 +586,8 @@ static int fba_device_fw_exit(struct fba_device *fba_dev)
 	 * tear down channels.
 	 */
 	fba_device_stop(fba_dev);
+
+	fba_resource_exit(fba_dev);
 
 	rc = fba_device_fw_channel_exit(fba_dev);
 
@@ -779,6 +814,7 @@ static int fba_device_init(struct fba_device *fba_dev)
 	int i, rc;
 
 	kref_init(&fba_dev->ref);
+	spin_lock_init(&fba_dev->resources_lock);
 	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
 

@@ -120,6 +120,7 @@ struct fba_impl_ops {
 };
 
 #include "fba_channel.h"
+#include "fba_resource.h"
 #include "fba_shared.h"
 #include "fba_util.h"
 
@@ -162,6 +163,19 @@ struct fba_device {
 	struct fba_channel channels[MAX_CHANNELS];
 	uint32_t channel_total;
 	struct ida channel_ids;
+
+	// Application Specific INFO and Resources
+	uint64_t *info_data; // Pointer to device INFO WORDS.
+	uint64_t info_cnt; // Number of INFO words.
+	uint64_t resource_cnt; // Number of FW resources.
+	uint64_t max_dma_segment_size; // Max DMA segment size
+	uint64_t platform_type; // Device platform type
+	struct fba_resource **resources; // Pointer to resouces.
+	spinlock_t resources_lock; // Lock protecting access to resources
+
+	// Context ID == 0 is reserved for the admin context.
+	// Vend IDs in the range [1, n_ctxs] (inclusive).
+	unsigned int n_ctxs;
 
 	struct workqueue_struct *msix_wq; // queue for msix triggered work
 
