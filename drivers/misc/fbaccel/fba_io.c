@@ -113,6 +113,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		return rc;
 	}
 	default:
+		/* Provide a hook for device-specific ioctl handling */
+		if (dev->cfg->impl_ops->priv_ioctl)
+			return dev->cfg->impl_ops->priv_ioctl(fp, cmd, arg);
 		return -EINVAL;
 	}
 	return 0;

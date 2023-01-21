@@ -46,6 +46,21 @@ struct fba_limit_params_ioctl {
 	uint32_t max_entries_per_packet; // Max allowed entries per packet
 };
 
+// IOCTL for running a payload executable binary
+struct payload_exec_ioctl {
+	int use_default_func;
+	int use_default_args;
+	uint32_t func;
+	uint32_t arg1;
+	uint32_t arg2;
+	uint32_t arg3;
+	const char __user *user_hbin_filename;
+	unsigned long exec_timeout;
+	uint64_t results_buf_size;
+	uint64_t __user *user_results_buf;
+	uint64_t __user *user_actual_results_size;
+};
+
 // Set driver state.
 //
 // DOWN -> PRESENT -> CONNECTED -> ACTIVE.
@@ -69,6 +84,26 @@ struct fba_limit_params_ioctl {
 //   0 - Success.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_GET_DETAILS _IOR('f', 10, struct get_details_ioctl)
+
+// Unlock Secure Debug capabilities
+//
+// Downloads binary with Secure Debug certificate chain to enable debugging
+// features on a provisioned device
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_SECURE_DBG_UNLOCK _IO('f', 20)
+
+// Load/run an executable payload HBIN
+//
+// Downloads & executes a payload executable HBIN. Results from the FW, if any,
+// are returned in an optional user provided buffer
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_PAYLOAD_EXEC _IOWR('f', 25, struct payload_exec_ioctl)
 
 // Return limit parameters
 //

@@ -626,6 +626,32 @@ static int freya_boot_ccp(struct fba_device *fba_dev)
 	return rc;
 }
 
+static int freya_secure_dbg_unlock(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	int ret;
+
+	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	mutex_lock(&priv->download_mtx);
+
+	ret = freya_download_image(fba_dev, LOCATION_MBIST,
+				   FREYA_DEF_SECURE_DBG_FILENAME,
+				   BOOT1_LOAD_TIMEOUT_MS);
+	if (ret < 0) {
+		fba_dev_err(fba_dev, "Secure Debug HBIN download failed.");
+	} else {
+		cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD,
+					SB_FW_UPDATE_OFS);
+		fba_dev_info(fba_dev, "Secure Debug HBIN loaded successfully.");
+	}
+
+	mutex_unlock(&priv->download_mtx);
+	return ret;
+}
+
 static int freya_provision(struct fba_device *fba_dev)
 {
 	int ret;
@@ -733,6 +759,21 @@ static int reset_ccp(struct fba_device *fba_dev)
 	rc = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
 				       STATUS_RESET_DONE, fba_dev->num_retries);
 	return rc;
+}
+
+static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
+{
+	struct fba_ctx *ctx = fp->private_data;
+	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+
+	switch (cmd) {
+	case FBA_IOCTL_SECURE_DBG_UNLOCK:
+		return freya_secure_dbg_unlock(dev);
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int freya_reset_controllers(struct fba_device *fba_dev)
@@ -846,6 +887,8 @@ static void freya_exit(struct fba_device *fba_dev)
 static const struct fba_impl_ops freya_impl_ops = {
 	.impl_init = freya_init,
 	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
 	.is_secure_boot = freya_is_secure_boot,
 	.get_fw_filenames = freya_get_fw_filenames,
 	.get_boot_mode = freya_get_boot_mode,
@@ -857,6 +900,8 @@ static const struct fba_impl_ops freya_impl_ops = {
 static const struct fba_impl_ops artemis_impl_ops = {
 	.impl_init = artemis_init,
 	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
 	.is_secure_boot = freya_is_secure_boot,
 	.get_fw_filenames = artemis_get_fw_filenames,
 	.get_boot_mode = freya_get_boot_mode,

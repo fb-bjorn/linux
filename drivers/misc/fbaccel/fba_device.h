@@ -155,6 +155,9 @@ struct fba_impl_ops {
 	int (*impl_init)(struct fba_device *dev);
 	/* Implementation defined exit */
 	void (*impl_exit)(struct fba_device *dev);
+	/* Implementations may extend ioctl API */
+	long (*priv_ioctl)(struct file *fp, unsigned int cmd,
+			   unsigned long arg);
 
 	// Boot APIs
 	// Get device-specific boot mode
