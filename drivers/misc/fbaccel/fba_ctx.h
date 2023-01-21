@@ -21,6 +21,9 @@
  * used by jobs will persist until those specific jobs complete.
  */
 
+struct fba_job;
+struct fba_job_result;
+
 // Allocate and initialize a dynamic context object.
 struct fba_ctx *fba_ctx_alloc(struct fba_device *dev);
 
@@ -54,6 +57,25 @@ int fba_ctx_get_id(struct fba_ctx *ctx);
 /* Helper to keep fba_device from needing to reach into ctx */
 struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item);
 
+/* Returns true if associated channel has space remaining */
+bool fba_ctx_has_space(struct fba_ctx *ctx);
+
+/* Returns max number of submission entries per job for this ctx */
+uint64_t fba_ctx_max_job_subs(struct fba_ctx *ctx);
+
+// Complete a job associated with this ctx.  Returns true if callback called.
+void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job);
+
+// Returns true if there are any completed jobs.
+bool fba_ctx_has_completions(struct fba_ctx *ctx);
+
+// Add a job and submit to the associated channel
+int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job);
+
+// Attempt to read one matching result from the context.
+int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res,
+		 void *job_key);
+
 // Increment reference count of a context
 struct fba_ctx *fba_ctx_get(struct fba_ctx *ctx);
 // Decrement reference count of a context.
@@ -64,3 +86,6 @@ int fba_ctx_post_admin(struct fba_ctx *ctx, struct fba_submission *sub,
 
 // Prevent new jobs from being submitted to associated channel.
 void fba_ctx_stop(struct fba_ctx *ctx);
+
+/* After ctx has been stopped, wait for all jobs to complete (or timeout) */
+void fba_ctx_wait_idle(struct fba_ctx *ctx);

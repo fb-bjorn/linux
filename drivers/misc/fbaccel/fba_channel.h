@@ -103,3 +103,6 @@ void fba_channel_shutdown(struct fba_channel *chan);
 void fba_channel_get_fill_watermarks(struct fba_channel *chan,
 				     uint32_t *sq_watermark,
 				     uint32_t *cq_watermark);
+
+// Default channel heartbeat period
+#define CHAN_HEARTBEAT_PERIOD_MS 60000

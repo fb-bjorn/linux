@@ -895,6 +895,8 @@ static int fba_device_init(struct fba_device *fba_dev)
 	ida_init(&fba_dev->ctx_ids);
 	ida_init(&fba_dev->channel_ids);
 
+	init_waitqueue_head(&fba_dev->read_q);
+	init_waitqueue_head(&fba_dev->write_q);
 	INIT_LIST_HEAD(&fba_dev->ctx_list);
 
 	rc = -ENOSPC;

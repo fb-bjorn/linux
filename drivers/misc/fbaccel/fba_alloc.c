@@ -99,6 +99,155 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 	return alloc;
 }
 
+// Convert to alloc and add to those tracked by job
+static int fba_alloc_convert_job(struct fba_job *job, uint64_t rid,
+				 uint64_t size, uint64_t *val)
+{
+	struct fba_alloc *alloc = fba_alloc_convert(job->ctx, rid, size, val);
+
+	if (IS_ERR(alloc))
+		return PTR_ERR(alloc);
+
+	fba_job_add_alloc(job, alloc);
+	return 0;
+}
+
+int fba_alloc_translate_setup(struct fba_device *dev, struct fba_job *job,
+			      size_t cnt)
+{
+	job->allocs = kcalloc(cnt * SUBMISSION_ENTRY_ARGS, sizeof(*job->allocs),
+			      GFP_KERNEL);
+	if (job->allocs == NULL)
+		return -ENOMEM;
+
+	return 0;
+}
+
+void fba_alloc_translate_teardown(struct fba_job *job)
+{
+	int i;
+
+	for (i = 0; i < job->alloc_cnt; i++) {
+		if (job->allocs[i])
+			fba_alloc_put(job->allocs[i]);
+	}
+
+	kfree(job->allocs);
+	job->allocs = NULL;
+	job->alloc_cnt = 0;
+}
+
+static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
+					       struct fba_job *job,
+					       uintptr_t buf_addr,
+					       uint64_t enc_size)
+
+{
+	size_t size = enc_size & AT_DMA_SIZE_MASK;
+	enum dma_data_direction dir;
+	uint64_t enc_dir;
+
+	enc_dir = (enc_size & (AT_DMA_TO_DEVICE | AT_DMA_FROM_DEVICE));
+	switch (enc_dir) {
+	case AT_DMA_TO_DEVICE:
+		dir = DMA_TO_DEVICE;
+		break;
+	case AT_DMA_FROM_DEVICE:
+		dir = DMA_FROM_DEVICE;
+		break;
+	case AT_DMA_TO_DEVICE | AT_DMA_FROM_DEVICE:
+		dir = DMA_BIDIRECTIONAL;
+		break;
+	default:
+		/* Cowardly refuse to map as DMA_NONE */
+		return ERR_PTR(-EINVAL);
+	}
+
+	return fba_job_dma_map(ctx, job, (void *)buf_addr, size, dir, true);
+}
+
+int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
+			    struct fba_submission *sub)
+{
+	int i, rc = 0;
+	uint64_t *iargs = sub->args;
+	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+
+	for (i = 0; i < SUBMISSION_ENTRY_ARGS; i++) {
+		uint64_t arg_type =
+			(sub->header.flags >> (i * AT_FIELD_BIT_WIDTH)) &
+			AT_FIELD_BIT_MASK;
+		uint64_t *ptr = &iargs[i];
+		uint64_t size;
+
+		switch (arg_type) {
+		case AT_RAW:
+			break;
+
+		case AT_RID:
+			rc = fba_alloc_convert_job(job, iargs[i], 0, ptr);
+			break;
+
+		case AT_RID_ARG32:
+			// ARG32 not available when last arg.
+			if (i == SUBMISSION_ENTRY_ARGS - 1)
+				return -EINVAL;
+
+			size = iargs[i + 1] & 0xFFFFFFFF;
+			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			break;
+
+		case AT_ARG32_RID:
+			// ARG32 not available when first arg.
+			if (i == 0)
+				return -EINVAL;
+			size = iargs[i - 1] >> 32;
+			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			break;
+
+		case AT_ARG64_RID:
+			// ARG64 not available when first arg.
+			if (i == 0)
+				return -EINVAL;
+			size = iargs[i - 1];
+			if ((size & AT_DMA_OPSZ))
+				size = size & AT_DMA_SIZE_MASK;
+			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			break;
+
+		case AT_VA_DMA64: {
+			struct fba_dma *dma;
+
+			// VA_DMA64 not available when last arg.
+			if (i == SUBMISSION_ENTRY_ARGS - 1)
+				return -EINVAL;
+
+			size = iargs[i + 1];
+			dma = fba_alloc_translate_dma(ctx, job, iargs[i], size);
+			if (IS_ERR(dma)) {
+				rc = PTR_ERR(dma);
+				break;
+			}
+			if (dma->map_cnt == 1 && !test_force_prp) {
+				*ptr = dma->dma_addr;
+				iargs[i + 1] |= AT_DMA_OPSZ;
+			} else {
+				*ptr = dma->prp_addr;
+				iargs[i + 1] |= AT_DMA_OPSZ | AT_DMA_PRP;
+			}
+			break;
+		}
+
+		default:
+			fba_dev_err(dev, "Unknown ARG type %d.", (int)arg_type);
+			return -EINVAL;
+		}
+		if (rc != 0)
+			break;
+	}
+	return rc;
+}
+
 /* Map the provided addr (in resource space) to its virtual address offset. */
 void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr)
 {

@@ -920,6 +920,9 @@ const struct fba_cfg freya_cfg = {
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
 	.impl_ops = &freya_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
 };
 
 const struct fba_cfg artemis_cfg = {
@@ -932,4 +935,7 @@ const struct fba_cfg artemis_cfg = {
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
 	.impl_ops = &artemis_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
 };

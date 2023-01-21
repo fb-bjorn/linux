@@ -546,4 +546,7 @@ const struct fba_cfg tenjin_cfg = {
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = -1,
 	.impl_ops = &tenjin_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
 };

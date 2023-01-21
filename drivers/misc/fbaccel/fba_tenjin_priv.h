@@ -42,6 +42,12 @@
 // Information about configuration of the communication between the
 // device and the host.
 
+//
+// Usage Caps
+//
+// Max number of `struct fba_submission` per Context.
+#define CONTEXT_SUB_CAP 4096
+
 #define COREDUMP_M7_SIZE (16 * 1024)
 #define COREDUMP_CCP_SIZE (64 * 1024)
 #define RISCV_BOOT_ARGS_REGION_SIZE 4096

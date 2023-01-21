@@ -67,6 +67,126 @@ static long fba_ioctl_bar_access(struct fba_device *fba_dev,
 	return -EINVAL;
 }
 
+static void fba_eventfd_cb(int completed, void *data)
+{
+	struct eventfd_ctx *ectx = (struct eventfd_ctx *)data;
+
+	// TODO: T84471228 check return value of eventfd_signal
+	if (completed)
+		eventfd_signal(ectx, 1);
+	eventfd_ctx_put(ectx);
+}
+
+static int fba_setup_eventfd_cb(struct fba_job *job, int eventfd)
+{
+	struct eventfd_ctx *ectx;
+
+	WARN_ON(eventfd < 0);
+
+	ectx = eventfd_ctx_fdget(eventfd);
+	if (IS_ERR(ectx)) {
+		fba_dev_err(job->dev, "Failed to get event context.");
+		return PTR_ERR(ectx);
+	}
+	fba_job_set_callback(job, fba_eventfd_cb, ectx);
+	fba_job_set_job_key(job, ectx);
+
+	return 0;
+}
+
+static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	struct fba_job *job = NULL;
+	int rc;
+
+	// Allocate the job.
+	job = fba_job_alloc(ctx, post_req->subs, post_req->count,
+			    post_req->user_data);
+	if (IS_ERR(job))
+		return PTR_ERR(job);
+
+	if (post_req->eventfd >= 0) {
+		rc = fba_setup_eventfd_cb(job, post_req->eventfd);
+		if (rc != 0)
+			goto err_put_job;
+	}
+
+	rc = fba_ctx_submit_job(ctx, job);
+	if (rc < 0) {
+		fba_dev_err(fba_dev, "Failed add to ctx, ERR=%d.", rc);
+		goto err_put_efd;
+	}
+
+	return rc;
+
+err_put_efd:
+	if (post_req->eventfd >= 0) {
+		struct eventfd_ctx *ectx = fba_job_get_job_key(job);
+
+		eventfd_ctx_put(ectx);
+	}
+err_put_job:
+	fba_job_release_resources(job);
+	fba_job_put(job);
+	return rc;
+}
+
+static_assert((sizeof(struct result_info) % sizeof(uint64_t)) == 0);
+
+static long fba_ioctl_read_results(struct fba_ctx *ctx, int eventfd,
+				   struct result_info __user *results,
+				   size_t count)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	struct eventfd_ctx *ectx = NULL;
+	int rc = 0;
+	int cnt = 0;
+
+	if ((results == NULL) || (count == 0))
+		return -EINVAL;
+
+	if (eventfd >= 0) {
+		ectx = eventfd_ctx_fdget(eventfd);
+		if (IS_ERR(ectx)) {
+			fba_dev_err(fba_dev, "Unable to get eventfd context.");
+			return PTR_ERR(ectx);
+		}
+	}
+
+	for (cnt = 0; cnt < count; cnt++) {
+		struct fba_job_result result;
+		struct result_info ri;
+
+		rc = fba_ctx_read(ctx, &result, ectx);
+		if (rc != 0) {
+			fba_dev_dbg(fba_dev,
+				    "Failed to read result from channel.");
+			goto out_put_ectx;
+		}
+
+		memset(&ri, 0, sizeof(ri));
+		ri.user_data = result.user_id;
+		ri.status = result.cmp.status;
+		ri.flags_index = result.cmp.flags;
+
+		rc = copy_to_user(&results[cnt], &ri, sizeof(ri));
+		if (rc) {
+			rc = -EFAULT;
+			break;
+		}
+	}
+
+out_put_ectx:
+	if (ectx)
+		eventfd_ctx_put(ectx);
+
+	if (cnt)
+		return cnt;
+
+	return rc;
+}
+
 static long fba_ioctl_resource_info(struct fba_device *fba_dev,
 				    struct resource_info __user *dest,
 				    size_t offs, size_t count)
@@ -276,6 +396,8 @@ static long fba_ioctl_get_limit_params(struct fba_device *dev,
 		return -EINVAL;
 	}
 
+	params->max_entries_per_context = dev->cfg->ctx_limits.sub_cnt;
+
 	return 0;
 }
 
@@ -328,6 +450,28 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&bar_req, data, sizeof(bar_req)))
 			return -EFAULT;
 		rc = fba_ioctl_bar_access(dev, &bar_req);
+		return rc;
+	}
+	case FBA_IOCTL_POST_ID: {
+		struct post_ioctl post_req;
+
+		if (!fba_ctx_is_open(ctx))
+			return -EACCES;
+
+		if (copy_from_user(&post_req, data, sizeof(post_req)))
+			return -EFAULT;
+
+		rc = fba_ioctl_post_id(ctx, &post_req);
+		return rc;
+	}
+	case FBA_IOCTL_READ_ID: {
+		struct read_ioctl read_req;
+
+		if (copy_from_user(&read_req, data, sizeof(read_req)))
+			return -EFAULT;
+
+		rc = fba_ioctl_read_results(ctx, read_req.eventfd,
+					    read_req.results, read_req.count);
 		return rc;
 	}
 	case FBA_IOCTL_GET_DETAILS: {
@@ -394,6 +538,24 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
+static __poll_t fba_poll(struct file *filp, struct poll_table_struct *wait)
+{
+	__poll_t mask = 0;
+	struct fba_ctx *ctx = filp->private_data;
+	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+
+	poll_wait(filp, &dev->read_q, wait);
+	poll_wait(filp, &dev->write_q, wait);
+
+	if (fba_ctx_has_completions(ctx))
+		mask |= EPOLLIN | EPOLLRDNORM;
+
+	if (fba_ctx_has_space(ctx))
+		mask |= EPOLLOUT | EPOLLWRNORM;
+
+	return mask;
+}
+
 static int fba_open(struct inode *node, struct file *fp)
 {
 	struct fba_ctx *ctx;
@@ -441,6 +603,7 @@ static int fba_release(struct inode *node, struct file *fp)
 const struct file_operations fba_fops = {
 	.owner = THIS_MODULE,
 	.unlocked_ioctl = fba_ioctl,
+	.poll = fba_poll,
 	.open = fba_open,
 	.release = fba_release,
 };

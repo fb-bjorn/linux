@@ -193,6 +193,9 @@ enum image_location {
 
 #define DRAM_ECC_REGION_GRANULARITY_MB (16)
 
+// Max number of `struct fba_submission` per context.
+#define CONTEXT_SUB_CAP 4096
+
 // Ultrasoc AXI Communicator
 
 #define FREYA_DEF_BOOT1_FILENAME "boot1.hbin"

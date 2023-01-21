@@ -488,6 +488,12 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 		spin_unlock(&chan->lock);
 		// Let the device know we've drained the completion queue.
 		fba_channel_set_cqueue_head(dev, chan->chan_id, cqueue_head);
+		// Signal to any process waiting on this read wait queue that
+		// there is data available to read from this device.
+		wake_up_interruptible(&dev->read_q);
+		// If there's space in the squeue then wake up any process waiting on this.
+		if (fba_channel_has_space(chan))
+			wake_up_interruptible(&dev->write_q);
 	}
 
 	return ncmp;

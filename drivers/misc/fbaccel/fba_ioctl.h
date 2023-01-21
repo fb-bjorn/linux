@@ -5,6 +5,19 @@
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
 
+// Description of a single result.
+//
+// High bit of flag indicates an error code.  If set, status field indicates
+// a completion status value, and the low 7 bits indicates the index of the
+// submission entry failed.  On success, the high bit of flags is clear and
+// the lower 7 bits of flag and all of status are application defined.
+struct result_info {
+	uint16_t status; // App defined, or CS code if high bit if flag set.
+	uint8_t flags_index; // App defined, or index of failed entry.
+	uint8_t reserved[5];
+	uint64_t user_data; // User data provided on post.
+};
+
 struct resource_info {
 	// Type of resources such as memory, computer etc.
 	uint16_t type;
@@ -59,6 +72,22 @@ struct scratch_access_ioctl {
 	uint32_t type; // Read or write.
 };
 
+// IOCTL struct to post one packet (array of submission entries) keyed by
+// eventfd.
+struct post_ioctl {
+	int eventfd; // The eventfd associated with this post.
+	const struct fba_submission __user *subs; // Array of submission entries.
+	size_t count; // Number of submission entries in the packet.
+	uint64_t user_data; // User data associated with packet.
+};
+
+// IOCTL struct to read one or more results keyed by eventfd.
+struct read_ioctl {
+	int eventfd; // The eventfd associated with this read.
+	size_t count; // Max number of results to drain.
+	struct result_info __user *results; // Array of results.
+};
+
 // IOCTL struct to read or write data into DMA buffer.
 struct dma_access_ioctl {
 	void __user *data; // Read destination, or write source
@@ -105,7 +134,7 @@ struct get_details_ioctl {
 struct fba_limit_params_ioctl {
 	uint32_t channel_type; // Channel type to query
 	uint32_t max_channels; // Total number of supported channels
-	uint32_t reserved;
+	uint32_t max_entries_per_context; // Max number of entries per context
 	uint32_t max_entries_per_packet; // Max allowed entries per packet
 };
 
@@ -171,6 +200,45 @@ struct payload_exec_ioctl {
 //   -EACCES - Unable to read struct fba_access from userspace.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_ACCESS_BAR _IOW('f', 5, struct bar_access_ioctl)
+
+// Post one or more packets to a submission queue.
+//
+// A non-blocking post of one or more packets onto the default channel.
+// On success, one or more packets are posted. On failure none posted.
+// Results for these packets can be retrieved by using the same eventfd
+// on the read function.  The associated eventfd if provided will be
+// incremeted once per completed packet.   Packet results may return
+// out of order, so a unique user data field should be provided to enable
+// the application to distinguish results.
+//
+// NOTE:
+//   On success, a seperate result per packet will be delievered, and should
+//   be drained to avoid exhausting per file context resources.
+//
+// RETURNS:
+//   +N - On success returns number of packets posted (in order).
+//   -EBADF - If a bad device FD was provided.
+//   -EINVAL - If a bad argument was provided.
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   -ENOMEM - If insufficent memory is available to track the packets.
+//   -EAGAIN - If insufficent space available in the queue.
+//   -EFAILED - For all other failure cases.
+#define FBA_IOCTL_POST_ID _IOW('f', 6, struct post_ioctl)
+
+// Read one or more results from the completion queue.
+//
+// A non-blocking read of one or more results from the default channel.
+// On success, a maximum of count results are copied into the result array.
+// Only results matching the provided eventfd will be returned.
+//
+// RETURNS:
+//   +N - On success returns number of results retrieved.
+//   -EBADF - If a bad device FD was provided.
+//   -EINVAL - If a bad argument was provided.
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   -EAGAIN - If no matching results are currently available.
+//   -EFAILED - For all other failure cases.
+#define FBA_IOCTL_READ_ID _IOW('f', 7, struct read_ioctl)
 
 // Read or write DMA mapped area
 //

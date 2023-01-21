@@ -52,6 +52,7 @@ struct fba_channel;
 struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
+struct fba_job;
 
 // Limit counters used track usage by job and current counts, or limits
 // by context and channel.
@@ -75,6 +76,9 @@ struct fba_cfg {
 
 	// Number of scratch pages to allocate
 	int scratch_page_cnt;
+
+	// Usage limits.
+	struct fba_limits ctx_limits;
 
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
@@ -177,6 +181,7 @@ struct fba_impl_ops {
 
 #include "fba_channel.h"
 #include "fba_ctx.h"
+#include "fba_job.h"
 #include "fba_resource.h"
 #include "fba_shared.h"
 #include "fba_util.h"
@@ -194,6 +199,8 @@ struct fba_device {
 	struct pci_dev *pdev;
 	struct kref ref;
 	const char *name; // Driver name
+	wait_queue_head_t read_q; // wait queue for read and write operations
+	wait_queue_head_t write_q; // wait queue for read and write operations
 	int minor;
 	int id;
 
@@ -279,6 +286,12 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason);
 extern const struct file_operations fba_fops;
 
 // Allocation/RID Convertion Opertations
+int fba_alloc_translate_setup(struct fba_device *dev, struct fba_job *job,
+			      size_t cnt);
+void fba_alloc_translate_teardown(struct fba_job *job);
+
+int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
+			    struct fba_submission *sub);
 struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 				    uint64_t size, uint64_t *val);
 struct fba_alloc *fba_alloc_get(struct fba_alloc *alloc);

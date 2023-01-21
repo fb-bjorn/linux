@@ -8,6 +8,7 @@ fbaccel-y += fba_device.o
 fbaccel-y += fba_dma.o
 fbaccel-y += fba_freya.o
 fbaccel-y += fba_io.o
+fbaccel-y += fba_job.o
 fbaccel-y += fba_resource.o
 fbaccel-y += fba_shared.o
 fbaccel-y += fba_tenjin.o

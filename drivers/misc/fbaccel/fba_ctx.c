@@ -38,10 +38,18 @@ struct fba_ctx {
 	// This context in the device context list.
 	struct list_head dev_item;
 
-	// Lock for state, usage
+	// Lock for state, usage, and job lists.
 	struct mutex ctx_mtx;
 	// Current state of this context.
 	enum fba_ctx_state ctx_state;
+	// Current usage of all added jobs for this context
+	struct fba_limits usage;
+	// Jobs submitted to device but not yet complete
+	struct list_head sub_list;
+	// Jobs completed by the device
+	struct list_head cmp_list;
+	// Completion used to signal idle
+	struct completion ctx_idle;
 };
 
 static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
@@ -53,6 +61,9 @@ static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
 	kref_init(&ctx->ref);
 	mutex_init(&ctx->ctx_mtx);
 	INIT_LIST_HEAD(&ctx->dev_item);
+	INIT_LIST_HEAD(&ctx->sub_list);
+	INIT_LIST_HEAD(&ctx->cmp_list);
+	init_completion(&ctx->ctx_idle);
 
 	mutex_init(&ctx->allocs_mutex);
 	idr_init(&ctx->allocs_idr);
@@ -111,6 +122,12 @@ static void fba_ctx_free(struct kref *ref)
 	mutex_destroy(&ctx->allocs_mutex);
 
 	fba_device_put(dev);
+
+	// Verify the ref & job/submission count logic is working.
+	// Verify that everything was removed from submitted/completed
+	WARN_ON(ctx->usage.sub_cnt != 0);
+	WARN_ON(!list_empty(&ctx->cmp_list));
+	WARN_ON(!list_empty(&ctx->sub_list));
 
 	mutex_destroy(&ctx->ctx_mtx);
 	kfree(ctx);
@@ -280,6 +297,62 @@ struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item)
 	return list_entry(item, struct fba_ctx, dev_item);
 }
 
+// Purge the cmp jobs
+static void fba_ctx_purge_cmp(struct fba_ctx *ctx)
+{
+	struct fba_job *job, *tmp;
+	struct fba_device *dev = ctx->dev;
+	int cnt = 0;
+	LIST_HEAD(jobs_to_delete);
+
+	mutex_lock(&ctx->ctx_mtx);
+	list_for_each_entry_safe(job, tmp, &ctx->cmp_list, ctx_item) {
+		fba_job_dec_usage(dev, &ctx->usage, job);
+		list_move(&job->ctx_item, &jobs_to_delete);
+	}
+	mutex_unlock(&ctx->ctx_mtx);
+
+	list_for_each_entry_safe(job, tmp, &jobs_to_delete, ctx_item) {
+		list_del_init(&job->ctx_item);
+		fba_dev_dbg(ctx->dev,
+			    "Purged job %04Xh. ctx ID %d Num sub: %d ",
+			    job->sys_cmd_id, ctx->id, job->req.sub_cnt);
+		fba_job_put(job);
+		cnt++;
+	}
+
+	if (cnt)
+		fba_dev_dbg(ctx->dev, "Purged total %d jobs", cnt);
+}
+
+/* After ctx has been stopped, wait for all jobs to complete (or timeout) */
+void fba_ctx_wait_idle(struct fba_ctx *ctx)
+{
+	mutex_lock(&ctx->ctx_mtx);
+
+	if (list_empty(&ctx->sub_list)) {
+		mutex_unlock(&ctx->ctx_mtx);
+		return;
+	}
+
+	reinit_completion(&ctx->ctx_idle);
+	mutex_unlock(&ctx->ctx_mtx);
+
+	/*
+	 * Timeout after 1.2 heartbeat intervals, which should give heartbeat
+	 * an opportunity to fail first.  This is more of a stopgap in case
+	 * heartbeat is disabled or heartbeat is making forward progress
+	 * despite stuck jobs.
+	 */
+	if (wait_for_completion_timeout(
+		    &ctx->ctx_idle,
+		    msecs_to_jiffies(CHAN_HEARTBEAT_PERIOD_MS * 6 / 5)) == 0) {
+		/* Timed out, abort device and wait again for idle. */
+		fba_device_abort(ctx->dev, "timeout waiting for context idle");
+		wait_for_completion(&ctx->ctx_idle);
+	}
+}
+
 /* Prevent ctx from submitting new jobs, or transitioning to open. */
 void fba_ctx_stop(struct fba_ctx *ctx)
 {
@@ -295,7 +368,14 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 	mutex_unlock(&ctx->allocs_mutex);
 
 	if (was_open) {
+		// Not checking the return here as the device is aborted, if the device
+		// returns an error or the protocol fails. If the device is not aborted
+		// it makes sense to fba_ctx_wait_idle to get completion notification
+		// for the jobs. If the device is aborted it still makes sense to call
+		// delete_context_end() as it would fail quickly because the channels
+		// are stopped.
 		fba_admin_delete_context_begin(ctx->dev, ctx->id);
+		fba_ctx_wait_idle(ctx);
 		rc = fba_admin_delete_context_end(ctx->dev, ctx->id);
 		if (rc == 0)
 			ida_free(&ctx->dev->ctx_ids, ctx->id);
@@ -311,6 +391,116 @@ int fba_ctx_close(struct fba_ctx *ctx)
 
 	if (fba_ctx_is_open(ctx))
 		fba_ctx_stop(ctx);
+
+	fba_ctx_purge_cmp(ctx);
+
+	return 0;
+}
+
+bool fba_ctx_has_space(struct fba_ctx *ctx)
+{
+	bool has_space = false;
+
+	mutex_lock(&ctx->ctx_mtx);
+	if (__fba_ctx_is_open(ctx)) {
+		/* Channel has not been stopped */
+		has_space = fba_channel_has_space(ctx->chan);
+	}
+	mutex_unlock(&ctx->ctx_mtx);
+
+	return has_space;
+}
+
+uint64_t fba_ctx_max_job_subs(struct fba_ctx *ctx)
+{
+	return fba_channel_max_job_subs(ctx->chan);
+}
+
+bool fba_ctx_has_completions(struct fba_ctx *ctx)
+{
+	bool result;
+
+	mutex_lock(&ctx->ctx_mtx);
+	result = !list_empty(&ctx->cmp_list);
+	mutex_unlock(&ctx->ctx_mtx);
+
+	return result;
+}
+
+// Complete a job associated with this ctx.
+void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job)
+{
+	mutex_lock(&ctx->ctx_mtx);
+
+	/* Move job to completed list */
+	list_move_tail(&job->ctx_item, &ctx->cmp_list);
+
+	/* If now idle, wake anyone waiting for idle. */
+	if (list_empty(&ctx->sub_list))
+		complete_all(&ctx->ctx_idle);
+
+	mutex_unlock(&ctx->ctx_mtx);
+}
+
+int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job)
+{
+	struct fba_device *fba_dev = ctx->dev;
+	int rc;
+
+	mutex_lock(&ctx->ctx_mtx);
+	if (ctx->ctx_state != FBA_CTX_OPEN) {
+		rc = -EIO;
+		goto out_unlock;
+	}
+
+	// Update counters and verify we don't exceed per CTX limit.
+	rc = fba_job_inc_usage(fba_dev, &fba_dev->cfg->ctx_limits, &ctx->usage,
+			       job);
+	if (rc != 0)
+		goto out_unlock;
+
+	// Post the job to the channel.
+	rc = fba_job_channel_post(ctx->chan, job);
+	if (rc == 0) {
+		list_add_tail(&job->ctx_item, &ctx->sub_list);
+	} else {
+		// Posting to the firmware failed. The firmware will not
+		// dereference the job, and the application will not read it.
+		// Caller will dereference to free it.
+		fba_job_dec_usage(fba_dev, &ctx->usage, job);
+		fba_dev_err(fba_dev, "Failed add to channel, ERR=%d.", rc);
+	}
+
+out_unlock:
+	mutex_unlock(&ctx->ctx_mtx);
+	return rc;
+}
+
+int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res, void *job_key)
+{
+	struct fba_device *fba_dev = ctx->dev;
+	struct fba_job *job, *tmp, *match = NULL;
+
+	mutex_lock(&ctx->ctx_mtx);
+
+	list_for_each_entry_safe(job, tmp, &ctx->cmp_list, ctx_item) {
+		if (fba_job_get_job_key(job) == job_key) {
+			match = job;
+			fba_job_dec_usage(fba_dev, &ctx->usage, match);
+			list_del_init(&match->ctx_item);
+			break;
+		}
+	}
+
+	mutex_unlock(&ctx->ctx_mtx);
+
+	// If we reached the end, we didn't find a match.
+	if (match == NULL)
+		return -EWOULDBLOCK;
+
+	res->cmp = match->req.cmp;
+	res->user_id = match->user_data;
+	fba_job_put(match);
 
 	return 0;
 }
