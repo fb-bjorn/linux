@@ -197,6 +197,9 @@ enum image_location {
 // Doorbell mailbox offset
 #define DB_MAILBOX_BASE HW_MBOX_GROUP_SIZE
 
+#define FREYA_USOC_BAR 1
+#define FREYA_USOC_PFN_OFS 2
+
 #define FREYA_UART_BAR 1
 #define FREYA_UART_MBOX_OFFSET (UART_MBOX_GROUP_OFFS * HW_MBOX_GROUP_SIZE)
 
@@ -216,6 +219,8 @@ enum image_location {
 
 // Use low vector numbers for fixed functionality
 // The rest of the vectors are designated for completion queues
+#define USOC_DS_MSIX_VECTOR 0
+#define USOC_US_MSIX_VECTOR 1
 #define UART_TX_MSIX_VECTOR 2
 #define UART_RX_MSIX_VECTOR 3
 #define COREDUMP_MSIX_VECTOR 4

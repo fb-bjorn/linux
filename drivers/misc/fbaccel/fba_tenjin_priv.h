@@ -38,6 +38,12 @@
 #define HOST_IPC_STRIDE HW_MBOX_ENTRY_STRIDE
 #define HOST_IPC_BAR_OFF 0x2000
 
+#define HOST_USOC_BAR 0
+#define HOST_USOC_BAR_OFF 0x5000
+
+#define TENJIN_USOC_BAR HOST_USOC_BAR
+#define TENJIN_USOC_PFN_OFS (HOST_USOC_BAR_OFF >> PAGE_SHIFT)
+
 #define HOST_SQ_BAR 2
 
 #define M7_RESET_BAR 0
@@ -64,6 +70,8 @@
 #define RISCV_BOOT_ARGS_REGION_SIZE 4096
 // Use low vector numbers for fixed functionality
 // The rest of the vectors are designated for completion queues
+#define USOC_DS_MSIX_VECTOR 0
+#define USOC_US_MSIX_VECTOR 1
 #define UART_TX_MSIX_VECTOR 2
 #define UART_RX_MSIX_VECTOR 3
 

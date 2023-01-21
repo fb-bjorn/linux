@@ -54,6 +54,7 @@ struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
 struct fba_job;
+struct fba_usoc_dev;
 struct fba_uart_dev;
 
 // Default M7 Heartbeat period
@@ -90,6 +91,12 @@ struct fba_cfg {
 
 	// Usage limits.
 	struct fba_limits ctx_limits;
+
+	// UltraSoC configuration
+	int usoc_bar; // BAR containing register block (-1 for none)
+	int usoc_pfn_ofs; // Offset (in pages) of register block in BAR
+	int usoc_msi_irq_ds; // Downstream MSI-X IRQ
+	int usoc_msi_irq_us; // Upstream MSI_X IRQ
 
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
@@ -316,6 +323,8 @@ struct fba_device {
 
 	struct fba_mon mon;
 
+	// UltraSoC sub-device
+	struct fba_usoc_dev *usoc_dev;
 	// UART sub-device
 	struct fba_uart_dev *uart_dev;
 

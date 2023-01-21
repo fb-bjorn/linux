@@ -17,6 +17,7 @@
 #include "fba_device.h"
 #include "fba_admin.h"
 #include "fba_uart.h"
+#include "fba_usoc.h"
 
 #define FBA_MAX_DEVS 32
 
@@ -238,6 +239,11 @@ struct fba_device *fba_device_lookup(unsigned int minor)
 
 static void fba_unregister_subdevs(struct fba_device *fba_dev)
 {
+	if (fba_dev->usoc_dev != NULL) {
+		fba_usoc_unregister(fba_dev->usoc_dev);
+		fba_dev->usoc_dev = NULL;
+	}
+
 	if (fba_dev->uart_dev != NULL) {
 		fba_uart_unregister(fba_dev->uart_dev);
 		fba_dev->uart_dev = NULL;
@@ -406,6 +412,35 @@ static void fba_device_uart_register(struct fba_device *fba_dev)
 		/* Null so we don't try to unregister an ERR_PTR later on */
 		fba_dev->uart_dev = NULL;
 	}
+}
+
+/* Register UltraSoC sub-device */
+static int fba_device_usoc_init(struct fba_device *fba_dev)
+{
+	void __iomem *usoc_regs;
+	int rv = 0;
+
+	if (fba_dev->cfg->usoc_bar >= 0) {
+		usoc_regs = fba_util_get_bar_ptr(
+			fba_dev, fba_dev->cfg->usoc_bar,
+			fba_dev->cfg->usoc_pfn_ofs * PAGE_SIZE);
+		fba_dev->usoc_dev = fba_usoc_register(
+			fba_dev->pdev, fba_dev->dev, fba_dev->minor,
+			fba_dev->cfg->name, fba_dev->id, usoc_regs,
+			(pci_resource_start(fba_dev->pdev,
+					    fba_dev->cfg->usoc_bar) >>
+			 PAGE_SHIFT) +
+				fba_dev->cfg->usoc_pfn_ofs,
+			fba_dev->cfg->usoc_msi_irq_ds,
+			fba_dev->cfg->usoc_msi_irq_us);
+		if (IS_ERR(fba_dev->usoc_dev)) {
+			rv = PTR_ERR(fba_dev->usoc_dev);
+			fba_dev->usoc_dev = NULL;
+			fba_dev_err(fba_dev, "Failed to register usoc.");
+		}
+	}
+
+	return rv;
 }
 
 static void fba_device_fw_setup_ptrs(struct fba_device *dev)
@@ -695,6 +730,9 @@ static int fba_device_fw_init(struct fba_device *dev)
 		goto err_channel_exit;
 
 	fba_device_uart_register(dev);
+
+	/* Any error logged within fba_device_usoc_init already, but continue if it fails */
+	(void)fba_device_usoc_init(dev);
 
 	// Setup Resources
 	rc = fba_resource_init(dev);
@@ -1206,12 +1244,23 @@ static int __init fba_subdevice_driver_init(void)
 	int ret;
 
 	ret = fba_uart_driver_init();
+	if (ret != 0)
+		return ret;
 
+	ret = fba_usoc_driver_init();
+	if (ret != 0)
+		goto err_uart_exit;
+
+	return ret;
+
+err_uart_exit:
+	fba_uart_driver_exit();
 	return ret;
 }
 
 static void fba_subdevice_driver_exit(void)
 {
+	fba_usoc_driver_exit();
 	fba_uart_driver_exit();
 }
 
