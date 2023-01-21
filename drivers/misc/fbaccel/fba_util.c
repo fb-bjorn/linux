@@ -134,3 +134,13 @@ void fba_util_dec_usage(struct fba_device *dev, struct fba_limits *src,
 
 	src->sub_cnt -= sub_cnt;
 }
+
+int list_count(struct list_head *list)
+{
+	struct list_head *item_iter;
+	int count = 0;
+
+	list_for_each(item_iter, list)
+		count++;
+	return count;
+}

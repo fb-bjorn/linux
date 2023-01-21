@@ -44,6 +44,7 @@
 // and the number of MSIX interrupts available
 #define MAX_CHANNELS 128
 
+struct fba_ctx;
 struct fba_channel;
 struct fba_device;
 struct fba_impl_ops;
@@ -120,6 +121,7 @@ struct fba_impl_ops {
 };
 
 #include "fba_channel.h"
+#include "fba_ctx.h"
 #include "fba_resource.h"
 #include "fba_shared.h"
 #include "fba_util.h"
@@ -143,6 +145,8 @@ struct fba_device {
 	// Device-specific implementation details
 	const struct fba_cfg *cfg;
 	void *impl_priv;
+
+	atomic_t allow_open;
 
 	// TEMP DMA data used by Testing and Admin for Info Words, Resources.
 	struct fba_shared cqs_area; // Area for all Completion Qs.
@@ -177,6 +181,9 @@ struct fba_device {
 	// Vend IDs in the range [1, n_ctxs] (inclusive).
 	unsigned int n_ctxs;
 
+	struct mutex ctx_mtx; // Mutex to protect ctx_list
+	struct list_head ctx_list; // Contexts on this device.
+
 	struct workqueue_struct *msix_wq; // queue for msix triggered work
 
 	atomic_t has_failed;
@@ -196,12 +203,21 @@ struct fba_device {
 
 struct fba_device *fba_device_get(struct fba_device *fba_dev);
 void fba_device_put(struct fba_device *fba_dev);
+struct fba_device *fba_device_lookup(unsigned int minor);
 
 // Get a sail channel
 struct fba_channel *fba_get_channel(struct fba_device *dev, int sail_channel);
 
+// Device Operations
+void fba_device_add_ctx(struct fba_device *fba_dev, struct list_head *entry);
+void fba_device_del_ctx(struct fba_device *fba_dev, struct list_head *entry);
+int fba_device_get_ctx_count(struct fba_device *fba_dev);
+
 /* Called to quiesce device on fatal error */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason);
+
+// File Operations
+extern const struct file_operations fba_fops;
 
 //
 // State functions

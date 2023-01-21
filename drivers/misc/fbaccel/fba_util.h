@@ -24,3 +24,5 @@ int fba_util_inc_usage(struct fba_device *dev, const struct fba_limits *max,
 		       struct fba_limits *src, uint32_t sub_cnt);
 void fba_util_dec_usage(struct fba_device *dev, struct fba_limits *src,
 			uint32_t sub_cnt);
+
+int list_count(struct list_head *list);

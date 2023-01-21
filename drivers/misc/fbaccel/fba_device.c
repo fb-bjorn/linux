@@ -21,6 +21,7 @@
 
 static dev_t fba_devt;
 static struct class *fba_class;
+static struct cdev fba_cdev;
 static DEFINE_MUTEX(fba_devices_mtx);
 static struct fba_device *fba_devices[FBA_MAX_DEVS];
 
@@ -184,6 +185,50 @@ struct fba_channel *fba_get_channel(struct fba_device *dev, int i)
 	return &dev->channels[i];
 }
 
+void fba_device_add_ctx(struct fba_device *fba_dev, struct list_head *entry)
+{
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_add_tail(entry, &fba_dev->ctx_list);
+	mutex_unlock(&fba_dev->ctx_mtx);
+}
+
+void fba_device_del_ctx(struct fba_device *fba_dev, struct list_head *entry)
+{
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_del_init(entry);
+	mutex_unlock(&fba_dev->ctx_mtx);
+}
+
+int fba_device_get_ctx_count(struct fba_device *fba_dev)
+{
+	int count;
+
+	mutex_lock(&fba_dev->ctx_mtx);
+	count = list_count(&fba_dev->ctx_list);
+	mutex_unlock(&fba_dev->ctx_mtx);
+
+	return count;
+}
+
+/*
+ * Lookup device by minor id and return refcounted device ptr.
+ * Returns NULL if device no longer available.
+ */
+struct fba_device *fba_device_lookup(unsigned int minor)
+{
+	struct fba_device *fba_dev = NULL;
+
+	if (minor >= ARRAY_SIZE(fba_devices))
+		return NULL;
+
+	mutex_lock(&fba_devices_mtx);
+	if (fba_devices[minor] != NULL)
+		fba_dev = fba_device_get(fba_devices[minor]);
+	mutex_unlock(&fba_devices_mtx);
+
+	return fba_dev;
+}
+
 static void fba_device_unregister(struct fba_device *fba_dev)
 {
 	mutex_lock(&fba_devices_mtx);
@@ -196,7 +241,15 @@ static void fba_device_unregister(struct fba_device *fba_dev)
 /* Stop new work from being submitted to the device. */
 static void fba_device_stop(struct fba_device *fba_dev)
 {
+	struct list_head *item;
 	int i;
+
+	/* Stop each context and wait for outstanding work to drain */
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_for_each(item, &fba_dev->ctx_list) {
+		fba_ctx_stop(fba_dev_item_to_fba_ctx(item));
+	}
+	mutex_unlock(&fba_dev->ctx_mtx);
 
 	/*
 	 * At this point there should be no work in channels.  Finish tearing
@@ -598,7 +651,10 @@ static void fba_device_free(struct kref *kref)
 {
 	struct fba_device *fba_dev = container_of(kref, struct fba_device, ref);
 
+	WARN_ON(fba_device_get_ctx_count(fba_dev) != 0);
+
 	/* Free things that might be referenced by lingering user contexts */
+	mutex_destroy(&fba_dev->ctx_mtx);
 	ida_destroy(&fba_dev->channel_ids);
 	destroy_workqueue(fba_dev->msix_wq);
 	kfree(fba_dev->name);
@@ -807,6 +863,8 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 		return;
 	}
 	fba_dev_info(fba_dev, "Done setting up device, ready for use.");
+
+	atomic_set(&fba_dev->allow_open, true);
 }
 
 static int fba_device_init(struct fba_device *fba_dev)
@@ -815,10 +873,13 @@ static int fba_device_init(struct fba_device *fba_dev)
 
 	kref_init(&fba_dev->ref);
 	spin_lock_init(&fba_dev->resources_lock);
+	mutex_init(&fba_dev->ctx_mtx);
 	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
 
 	ida_init(&fba_dev->channel_ids);
+
+	INIT_LIST_HEAD(&fba_dev->ctx_list);
 
 	rc = -ENOSPC;
 	mutex_lock(&fba_devices_mtx);
@@ -1003,8 +1064,15 @@ static int __init fbaccel_driver_init(void)
 	if (ret < 0)
 		goto err_class_destroy;
 
+	cdev_init(&fba_cdev, &fba_fops);
+	ret = cdev_add(&fba_cdev, fba_devt, FBA_MAX_DEVS);
+	if (ret < 0)
+		goto err_free_chrdev;
+
 	return ret;
 
+err_free_chrdev:
+	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
 err_class_destroy:
 	class_destroy(fba_class);
 	return ret;
@@ -1012,6 +1080,8 @@ err_class_destroy:
 
 static void __exit fbaccel_driver_exit(void)
 {
+	cdev_del(&fba_cdev);
+	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
 	class_destroy(fba_class);
 }
 
