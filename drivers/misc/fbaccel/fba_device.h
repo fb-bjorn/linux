@@ -42,8 +42,6 @@
 #define MAX_RETRIES 50
 #define MIN_RETRIES 5
 
-#define MAX_LOGGER_SRCS 2
-
 // MAX number of channels
 // This will be reduced to the number of advertised channels by the device
 // and the number of MSIX interrupts available
@@ -56,9 +54,6 @@ struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
 struct fba_job;
-struct fba_coredump;
-struct fba_usoc_dev;
-struct fba_uart_dev;
 
 // Default M7 Heartbeat period
 #define M7_HEARTBEAT_PERIOD_MS 60000

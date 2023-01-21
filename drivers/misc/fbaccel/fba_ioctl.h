@@ -158,6 +158,27 @@ struct mon_data_ioctl {
 	int16_t __user *errors;
 };
 
+// IOCTL for getting coredump status.
+struct coredump_status_ioctl {
+	// Output param which provides the trigger status,
+	// 0 - coredump not triggered, 1 - coredump triggered.
+	uint32_t triggered;
+	// Output param which provides coredump data size.
+	uint32_t coredump_size;
+	// If wait >= 0 call will block until coredump generated.
+	// If wait < 0, call will return status immediately.
+	int wait;
+};
+
+//IOCTL for getting coredump.
+struct get_coredump_ioctl {
+	// Destination buffer to read coredump data.
+	void __user *data;
+	// Size of the buffer allocated. This should be at least equal
+	// to coredump_size reported in coredump_status_ioctl.
+	uint64_t size;
+};
+
 //IOCTL for creating streaming context
 struct stream_ioctl {
 	int64_t flags; // Same as flags used in open(2)
@@ -362,6 +383,44 @@ struct get_coredump_region_data_ioctl {
 //   -EACCES - Unable to read struct fba_access from userspace.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_ACCESS_SCRATCH _IOW('f', 11, struct scratch_access_ioctl)
+
+// Get Coredump status.
+//
+// Returns the coredump status. This IOCTL can be used to check
+// if coredump is triggered by the device. If coredump is triggered
+// this IOCTL will provide the size of coredump data that will be dumped
+// by the device.
+// User space apps can pass eventfd to this ioctl which will be registered
+// with the driver and signalled when coredump trigger is detected by driver.
+// If eventfd is < 0 then this IOCTL will return coredump status.
+// If coredump polling is not yet started by the driver, this ioctl will attempt
+// to register eventfd if provided in the ioctl input param, else this will return
+// error code.
+//
+// Confusingly we have two separate flavors of coredump, this one is older and
+// supports smaller coredumps read using PIO from PCIe BAR.  Used with the
+// FBA_IOCTL_GET_COREDUMP_DATA ioctl.
+//
+// RETURNS:
+// 0 - Success.
+// -EFAULT - If IOCTL struct is invalid.
+// -EINVAL - If the device has not started polling for coredump trigger.
+// Negative value if eventfd registration fails.
+#define FBA_IOCTL_GET_COREDUMP_STATUS                                          \
+	_IOWR('f', 12, struct coredump_status_ioctl)
+
+// Get coredump data.
+//
+// Returns the coredump data provided by the device incase of a
+// crash or fatal error.
+//
+// RETURNS:
+// 0 - Success.
+// -EFAULT - If IOCTL struct is invalid or if pointers in struct are invalid.
+// -ENOMEM - If memory allocation fails.
+// -EINVAL - If size of the buffer provided by user is incorrect.
+// -ENXIO  - If reading over PCIe failed.
+#define FBA_IOCTL_GET_COREDUMP_DATA _IOWR('f', 13, struct get_coredump_ioctl)
 
 // Get coredump info.
 //

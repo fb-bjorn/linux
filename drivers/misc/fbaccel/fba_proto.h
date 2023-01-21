@@ -466,3 +466,86 @@ struct fba_job_result {
 	uint64_t user_id;
 };
 static_assert(sizeof(struct fba_job_result) == 16);
+
+/* Coredump (Tenjin style) */
+
+#define COREDUMP_COOKIE 0x43524450
+
+enum coredump_reason {
+	// CPU hit abort handler
+	COREDUMP_REASON_CPU_CRASH = 1,
+	// SW triggered fatal error
+	COREDUMP_REASON_FATAL_ERR = 2,
+	COREDUMP_REASON_FATAL_DDR_ECC_ERR = 3,
+	COREDUMP_REASON_FATAL_SRAM_ECC_ERR = 4,
+	COREDUMP_REASON_FATAL_RISCV_WDT_ERR = 5,
+};
+
+// Layout of coredump region 0.
+// Driver polls this hdr to detect CCP coredump trigger
+// 0- struct coredump_hdr
+//        cookie = 0x43524450
+//        version = (0 << COREDUMP_MAJOR_VERSION_SHIFT)|(1<<COREDUMP_MINOR_VERSION_SHIFT)
+//	      size = Size of the coredump region.
+//	      started = 1 // CPU sets this before start of coredump
+//	      completed = 1 // CPU sets this to 1 after completion of core dump
+//	      cpu_id =  COREDUMP_CPU_CCP
+//		    coredump_reason = COREDUMP_REASON_CPU_CRASH
+// .
+// .
+// .
+// 64   -   struct cpu_coredump_data -  entry 1
+//            size = sizeof(COREDUMP_TYPE_CPU_REG0 data)
+//            type = COREDUMP_TYPE_CPU_REG0
+//      -     data for COREDUMP_TYPE_CPU_REG0
+//      -   struct cpu_coredump_data - entry 2
+//            size = size of stack dump
+//            type = COREDUMP_TYPE_CPU_STACK
+//      -     stack[]
+//      -   struct cpu_coredump_data  - entry 3
+//            size = size of profile buf
+//            type = COREDUMP_TYPE_TRACE
+//      -     profile_data[]
+// .
+// Driver polls this hdr to detect SCP coredump trigger
+// 1000- struct coredump_hdr
+//        cookie = 0x43524450
+//        version = (0 << COREDUMP_MAJOR_VERSION_SHIFT)|(1<<COREDUMP_MINOR_VERSION_SHIFT)
+//	      size = Allocated size
+//	      started = 1 // CPU sets this before start of coredump
+//	      completed = 1 // CPU sets this to 1 after completion of core dump
+//	      cpu_id =  COREDUMP_CPU_SCP
+//		    coredump_reason = COREDUMP_REASON_CPU_CRASH
+// 1064 -   struct cpu_coredump_data -  entry 1
+//            size = sizeof(COREDUMP_TYPE_CPU_REG0 data)
+//            type = COREDUMP_TYPE_CPU_REG0
+//      -     data for COREDUMP_TYPE_CPU_REG0
+//      -   struct cpu_coredump_data - entry 2
+//            size = size of stack dump
+//            type = COREDUMP_TYPE_CPU_STACK
+//      -     stack[]
+//
+//
+
+// Device header written by CPU for each region of coredump.
+// There can be maximum of 2 regions per CPU.
+// Driver always polls region 0 for each CPU to detect coredump trigger.
+struct coredump_hdr {
+	// Magic identifier written by the device.
+	// This is to indicate device has initialized the coredump region with header
+	// and driver can poll the region to detect the coredump.
+	uint32_t cookie;
+	// Version number.
+	uint32_t version;
+	// Allocated size.
+	uint32_t size;
+	// Device sets this before start of coredump, Only valid for region 0.
+	uint32_t started;
+	// Device sets this to 1 after completion of core dump, Only valid for region 0.
+	uint32_t completed;
+	uint32_t cpu_id;
+	// Refer to enum coredump_reason_t, Only valid for region 0
+	int32_t coredump_reason;
+	// Align it to 32 bytes and reserve some mem for future
+	uint32_t reserved[9];
+};

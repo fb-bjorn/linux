@@ -146,6 +146,71 @@ static const char *const fbv_reset_reason_str[] = {
 	 (1 << L0_SYSTEM_RESET) | (1 << RISCV_WATCH_DOG_RESET) |               \
 	 (1 << UNKNOWN_RESET))
 
+// Coredump status
+enum fba_coredump_status {
+	FBA_COREDUMP_STATUS_NONE = 0,
+	// Driver is polling coredump area
+	FBA_COREDUMP_STATUS_POLLING,
+	// Driver detected coredump trigger from device
+	FBA_COREDUMP_STATUS_STARTED,
+	// Driver detected coredump completion by device
+	FBA_COREDUMP_STATUS_COMPLETED,
+	// Driver timed out waiting for coredump completion
+	FBA_COREDUMP_STATUS_TIMEDOUT,
+	// Coredump event is notified
+	FBA_COREDUMP_STATUS_NOTIFIED,
+};
+
+#define COREDUMP_POLLING_TIME_HZ (HZ)
+#define COREDUMP_TIME_OUT_TIME_HZ (2 * HZ)
+
+#define MAX_REGION_COUNT 2
+#define DEVICE_REGION 0
+#define HOST_REGION 1
+
+struct coredump_region {
+	int bar;
+	uint32_t offset;
+	uint32_t size;
+};
+
+static const struct coredump_region tenjin_coredump_regions[] = {
+	{
+		.bar = COREDUMP_BAR,
+		.offset = COREDUMP_CCP_BAR_OFFSET,
+		.size = COREDUMP_CCP_SIZE,
+	},
+	{
+		.bar = COREDUMP_BAR,
+		.offset = COREDUMP_M7_BAR_OFFSET,
+		.size = COREDUMP_M7_SIZE,
+	},
+};
+#define N_COREDUMP_CPUS ARRAY_SIZE(tenjin_coredump_regions)
+
+#define MAX_COREDUMP_SIZE (COREDUMP_M7_SIZE + COREDUMP_CCP_SIZE)
+
+struct fbv_coredump {
+	// To check if coredump init is called
+	uint32_t initialized;
+	bool coredump_disabled;
+
+	struct delayed_work coredump_work;
+	struct completion coredump_ready;
+	// CPU status
+	enum fba_coredump_status cpu_status[N_COREDUMP_CPUS];
+
+	struct fba_shared regions[MAX_REGION_COUNT][N_COREDUMP_CPUS];
+};
+
+struct tenjin_priv {
+	struct fba_device *fba_dev;
+
+	struct fbv_coredump coredump;
+
+	bool ccp_panic;
+};
+
 static int get_firmware(const struct firmware **firmware_p, const char *name,
 			struct device *device, size_t size)
 {
@@ -226,6 +291,57 @@ static inline int tenjin_wait_for_bit_set(struct fba_device *fba_dev,
 	return -ETIMEDOUT;
 }
 
+static bool did_ccp_panic(struct fba_device *fba_dev)
+{
+	struct tenjin_priv *priv = fba_dev->impl_priv;
+
+	if (priv)
+		return priv->ccp_panic;
+	else
+		return false;
+}
+
+static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
+{
+	int mailbox_id =
+		cpu_id == 0 ? CCP_COREDUMP_MBOX_ID : M7_COREDUMP_MBOX_ID;
+	uint32_t alert_type = get_mailbox(fba_dev, mailbox_id);
+	struct tenjin_priv *priv = fba_dev->impl_priv;
+
+	switch (alert_type) {
+	case COREDUMP_REASON_FATAL_DDR_ECC_ERR:
+		fba_dev->ddr_uce_detected = true;
+		fba_dev_err(
+			fba_dev,
+			"Coredump triggered: Uncorrectable ECC error detected on DDR.");
+		break;
+	case COREDUMP_REASON_FATAL_SRAM_ECC_ERR:
+		fba_dev->internal_mem_uce_detected = true;
+		fba_dev_err(
+			fba_dev,
+			"Coredump triggered: Uncorrectable ECC error detected on SRAM.");
+		break;
+	case COREDUMP_REASON_FATAL_RISCV_WDT_ERR:
+		fba_dev->ccp_wdt_failed = true;
+		fba_dev_err(fba_dev,
+			    "Coredump triggered: RISCV WDT timeout detected.");
+		break;
+	default:
+		fba_dev->device_fatal_err_detected = true;
+		if (cpu_id == 0)
+			priv->ccp_panic = true;
+
+		fba_dev_err(fba_dev, "Coredump triggered: Unkown reason.");
+		break;
+	}
+
+	// Generate udev event KOBJ_CHANGE
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (!fba_dev->coredump_disabled)
+		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
+	mutex_unlock(&fba_dev->coredump_mutex);
+}
+
 static void tenjin_log_reset_reason(struct fba_device *fba_dev)
 {
 	uint32_t value;
@@ -237,6 +353,402 @@ static void tenjin_log_reset_reason(struct fba_device *fba_dev)
 		fba_dev_info(fba_dev, "Reset reason %s\n",
 			     fbv_reset_reason_str[value]);
 	}
+}
+
+static int coredump_get_hdr(struct fba_device *dev, int region_id, int cpu_id,
+			    struct coredump_hdr *hdr)
+{
+	struct tenjin_priv *priv = dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	struct fba_shared *region = &coredump->regions[region_id][cpu_id];
+
+	if (!region->data)
+		return -EINVAL;
+
+	if (region->size < sizeof(*hdr))
+		return -EFAULT;
+
+	fba_shared_memcpy_from(region, 0, hdr, sizeof(*hdr));
+
+	return 0;
+}
+
+static void coredump_check_cpu(struct fba_device *dev, int region_id,
+			       int cpu_id, enum fba_coredump_status *status)
+{
+	struct coredump_hdr hdr;
+	int rv;
+
+	rv = coredump_get_hdr(dev, region_id, cpu_id, &hdr);
+	if (rv != 0) {
+		WARN_ON_ONCE(rv != 0);
+		return;
+	}
+
+	switch (*status) {
+	case FBA_COREDUMP_STATUS_NONE:
+		// Check if CPU has initialized the coredump region
+		if (hdr.cookie == COREDUMP_COOKIE)
+			*status = FBA_COREDUMP_STATUS_POLLING;
+		break;
+	case FBA_COREDUMP_STATUS_POLLING:
+		// Check if coredump is triggered by CPU
+		if (hdr.started == 1) {
+			*status = FBA_COREDUMP_STATUS_STARTED;
+
+			/* Also signal that device has failed */
+			fba_device_abort(dev, "coredump triggered");
+		}
+		break;
+	case FBA_COREDUMP_STATUS_STARTED:
+		// Check if coredump is completed. If not then signal timeout
+		if (hdr.completed == 1)
+			*status = FBA_COREDUMP_STATUS_COMPLETED;
+		else
+			*status = FBA_COREDUMP_STATUS_TIMEDOUT;
+		break;
+	default:
+		break;
+	}
+}
+
+static void coredump_notify(struct fba_device *fba_dev)
+{
+	struct tenjin_priv *priv = fba_dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+
+	complete_all(&coredump->coredump_ready);
+}
+
+static void coredump_work_handler(struct work_struct *work)
+{
+	int cpu_id;
+	enum fba_coredump_status *cpu_status;
+	struct delayed_work *d_work =
+		container_of(work, struct delayed_work, work);
+	struct fbv_coredump *coredump =
+		container_of(d_work, struct fbv_coredump, coredump_work);
+	struct tenjin_priv *priv =
+		container_of(coredump, struct tenjin_priv, coredump);
+	struct fba_device *dev = priv->fba_dev;
+
+	// Check for coredump triggers from all CPUs.
+	// If any one of them has started the coredump, set a timeout and come back again.
+	// If coredump is completed or timeout reached then notify the users about the dump.
+	// Check CPU core dump status
+	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+		cpu_status = &coredump->cpu_status[cpu_id];
+
+		coredump_check_cpu(dev, 0, cpu_id, cpu_status);
+
+		if (*cpu_status == FBA_COREDUMP_STATUS_NOTIFIED) {
+			// Skip coredump polling for this CPU
+			continue;
+		}
+
+		if (*cpu_status == FBA_COREDUMP_STATUS_STARTED) {
+			fba_dev_err(dev,
+				    "Coredump trigger detected for CPU id %d",
+				    cpu_id);
+			// Wait for the coredump to complete
+			schedule_delayed_work(&coredump->coredump_work,
+					      COREDUMP_TIME_OUT_TIME_HZ);
+			return;
+		} else if (*cpu_status >= FBA_COREDUMP_STATUS_COMPLETED) {
+			fba_dev_err(dev, "Coredump completed by CPU id %d",
+				    cpu_id);
+			tenjin_coredump_handler(dev, cpu_id);
+			coredump_notify(dev);
+			*cpu_status = FBA_COREDUMP_STATUS_NOTIFIED;
+		}
+	}
+
+	schedule_delayed_work(&coredump->coredump_work,
+			      COREDUMP_POLLING_TIME_HZ);
+}
+
+// Get size of coredump region for a CPU
+static int coredump_get_size(struct fba_device *dev, int region_id, int cpu_id)
+{
+	struct coredump_hdr cpu_hdr;
+	int rv;
+
+	rv = coredump_get_hdr(dev, region_id, cpu_id, &cpu_hdr);
+	if (rv != 0) {
+		// Region is not initialized
+		return 0;
+	} else if (cpu_hdr.cookie != COREDUMP_COOKIE) {
+		fba_dev_dbg(
+			dev,
+			"Coredump region %d for cpu %d not initalized by device",
+			region_id, cpu_id);
+		return 0;
+	}
+	return cpu_hdr.size;
+}
+
+void fbv_coredump_start(struct fba_device *fba_dev)
+{
+	struct tenjin_priv *priv = fba_dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+
+	schedule_delayed_work(&coredump->coredump_work,
+			      COREDUMP_POLLING_TIME_HZ);
+}
+
+int fbv_coredump_host_region_init(struct fba_device *fba_dev,
+				  struct fba_shared *host_mem, int cpu_id)
+{
+	struct tenjin_priv *priv = fba_dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	struct fba_shared *region;
+
+	if (cpu_id >= N_COREDUMP_CPUS)
+		return -EINVAL;
+
+	region = &coredump->regions[HOST_REGION][cpu_id];
+	*region = *host_mem;
+
+	return 0;
+}
+
+int fbv_coredump_init(struct fba_device *dev)
+{
+	struct tenjin_priv *priv = dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	struct fba_shared *region;
+	int cpu_id;
+
+	// Called from probe()
+	// Only initialize the device allocated region here.
+	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+		region = &coredump->regions[HOST_REGION][cpu_id];
+		memset(region, 0, sizeof(struct fba_shared));
+
+		region = &coredump->regions[DEVICE_REGION][cpu_id];
+		fba_shared_alloc_iomem(dev, region,
+				       tenjin_coredump_regions[cpu_id].bar,
+				       tenjin_coredump_regions[cpu_id].offset,
+				       tenjin_coredump_regions[cpu_id].size);
+	}
+
+	INIT_DELAYED_WORK(&coredump->coredump_work, coredump_work_handler);
+	init_completion(&coredump->coredump_ready);
+	coredump->initialized = true;
+
+	fbv_coredump_start(dev);
+
+	return 0;
+}
+
+void fbv_coredump_exit(struct fba_device *dev)
+{
+	struct tenjin_priv *priv = dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	struct fba_shared *region;
+	int cpu_id;
+
+	// Called from remove()
+	if (coredump->initialized) {
+		cancel_delayed_work_sync(&coredump->coredump_work);
+		coredump_notify(dev);
+
+		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+			region = &coredump->regions[DEVICE_REGION][cpu_id];
+			fba_shared_free(dev, region);
+		}
+
+		coredump->initialized = false;
+	}
+}
+
+int fbv_coredump_get_status(struct fba_device *dev,
+			    struct coredump_status_ioctl *coredump_status)
+{
+	struct tenjin_priv *priv = dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	int region;
+	int cpu_id;
+	bool started = false;
+	int rv = 0;
+
+	coredump_status->triggered = 0;
+	coredump_status->coredump_size = 0;
+
+	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+		if (coredump->cpu_status[cpu_id] != FBA_COREDUMP_STATUS_NONE)
+			started = true;
+	}
+
+	// Coredump polling is not started
+	if (!started) {
+		fba_dev_err(
+			dev,
+			"Error in getting coredump status, Coredump polling not yet started");
+		if (coredump_status->wait < 0) {
+			/* if less than 0, don't wait. */
+			return -EINVAL;
+		}
+	}
+
+	if (coredump_status->wait >= 0) {
+		rv = wait_for_completion_killable(&coredump->coredump_ready);
+		if (rv)
+			return rv;
+		coredump_status->triggered = 1;
+	} else {
+		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+			if ((coredump->cpu_status[cpu_id] >=
+			     FBA_COREDUMP_STATUS_COMPLETED)) {
+				coredump_status->triggered = 1;
+			}
+		}
+	}
+
+	for (region = 0; region < MAX_REGION_COUNT; region++) {
+		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
+			coredump_status->coredump_size +=
+				coredump_get_size(dev, region, cpu_id);
+		}
+	}
+
+	return rv;
+}
+
+static int coredump_get_data(struct fba_device *dev, int region_id, int cpu_id,
+			     void *dst, uint32_t size)
+{
+	struct tenjin_priv *priv = dev->impl_priv;
+	struct fbv_coredump *coredump = &priv->coredump;
+	struct fba_shared *region;
+
+	region = &coredump->regions[region_id][cpu_id];
+	if (!region->data)
+		return -ENXIO;
+
+	if (region->size < size)
+		return -EINVAL;
+
+	fba_shared_memcpy_from(region, 0, dst, size);
+
+	return 0;
+}
+
+int fbv_coredump_get_data(struct fba_device *dev, void *coredump_mem,
+			  uint32_t size)
+{
+	int offset = 0;
+	uint32_t cpu_data_size;
+	int region_id;
+	int cpu_id;
+	int rv;
+
+	for (cpu_id = N_COREDUMP_CPUS - 1; cpu_id >= 0; cpu_id--) {
+		for (region_id = 0; region_id < MAX_REGION_COUNT; region_id++) {
+			cpu_data_size =
+				coredump_get_size(dev, region_id, cpu_id);
+			if (cpu_data_size + offset > size) {
+				// Partial reading of coredump is not supported
+				fba_dev_err(
+					dev,
+					"Error in reading coredump data, not enough memory to read full buffer");
+				return -EINVAL;
+			}
+			if (cpu_data_size != 0) {
+				rv = coredump_get_data(dev, region_id, cpu_id,
+						       coredump_mem + offset,
+						       cpu_data_size);
+				if (rv != 0) {
+					fba_dev_err(
+						dev,
+						"Error in reading data for region %d, cpu %d",
+						region_id, cpu_id);
+					return rv;
+				}
+				offset += cpu_data_size;
+			}
+		}
+	}
+
+	return offset;
+}
+
+static int
+fba_ioctl_get_coredump_data(struct fba_device *fba_dev,
+			    struct get_coredump_ioctl *coredump_data_req)
+{
+	void *coredump_mem;
+	void __user *user = coredump_data_req->data;
+	int rc;
+
+	if (coredump_data_req->size > MAX_COREDUMP_SIZE)
+		return -EINVAL;
+
+	coredump_mem = kzalloc(coredump_data_req->size, GFP_KERNEL);
+	if (!coredump_mem)
+		return -ENOMEM;
+
+	rc = fbv_coredump_get_data(fba_dev, coredump_mem,
+				   coredump_data_req->size);
+	if (rc < 0)
+		goto out_free_coredump_mem;
+
+	if (copy_to_user(user, coredump_mem, rc)) {
+		rc = -EFAULT;
+		goto out_free_coredump_mem;
+	}
+	coredump_data_req->size = rc;
+	rc = 0;
+
+out_free_coredump_mem:
+	kfree(coredump_mem);
+	return rc;
+}
+
+static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
+{
+	struct fba_ctx *ctx = fp->private_data;
+	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	void __user *data = (void __user *)arg;
+	long rc;
+
+	switch (cmd) {
+	case FBA_IOCTL_GET_COREDUMP_STATUS: {
+		struct coredump_status_ioctl coredump_status_req;
+
+		if (copy_from_user(&coredump_status_req, data,
+				   sizeof(struct coredump_status_ioctl))) {
+			return -EFAULT;
+		}
+		rc = fbv_coredump_get_status(dev, &coredump_status_req);
+		if (rc != 0)
+			return rc;
+		if (copy_to_user(data, &coredump_status_req,
+				 sizeof(struct coredump_status_ioctl)))
+			return -EFAULT;
+		return 0;
+	}
+	case FBA_IOCTL_GET_COREDUMP_DATA: {
+		struct get_coredump_ioctl coredump_data_req;
+
+		if (copy_from_user(&coredump_data_req, data,
+				   sizeof(struct get_coredump_ioctl))) {
+			return -EFAULT;
+		}
+		rc = fba_ioctl_get_coredump_data(dev, &coredump_data_req);
+		if (rc != 0)
+			return rc;
+
+		if (copy_to_user(data, &coredump_data_req,
+				 sizeof(struct get_coredump_ioctl)))
+			rc = -EFAULT;
+		return rc;
+	}
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 static int tenjin_boot1(struct fba_device *fba_dev)
@@ -530,10 +1042,42 @@ static int tenjin_load_firmware(struct fba_device *fba_dev)
 	return tenjin_boot_ccp(fba_dev);
 }
 
+static int tenjin_init(struct fba_device *fba_dev)
+{
+	struct tenjin_priv *priv;
+
+	priv = kzalloc(sizeof(struct tenjin_priv), GFP_KERNEL);
+	if (priv == NULL)
+		return -ENOMEM;
+
+	priv->fba_dev = fba_dev;
+
+	fba_dev->impl_priv = priv;
+
+	/* We don't need to wait for DMA, so initialize as completed. */
+	fba_device_signal_coredump_done(fba_dev);
+
+	return 0;
+}
+
+static void tenjin_exit(struct fba_device *fba_dev)
+{
+	kfree(fba_dev->impl_priv);
+}
+
 static const struct fba_impl_ops tenjin_impl_ops = {
+	.impl_init = tenjin_init,
+	.impl_exit = tenjin_exit,
+	.priv_ioctl = tenjin_ioctl,
+
 	.is_secure_boot = tenjin_is_secure_boot,
 	.get_fw_filenames = tenjin_get_fw_filenames,
 	.load_firmware = tenjin_load_firmware,
+
+	.coredump_init = fbv_coredump_init,
+	.coredump_exit = fbv_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
 };
 
 const struct fba_cfg tenjin_cfg = {
