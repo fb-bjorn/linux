@@ -34,6 +34,7 @@
 #define BAR_CNT 6
 
 struct fba_device;
+struct fba_impl_ops;
 
 // Per-application configuration parameters
 struct fba_cfg {
@@ -51,10 +52,20 @@ struct fba_cfg {
 
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
+
+	// Implementation-defined operations
+	const struct fba_impl_ops *impl_ops;
 };
 
 extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg tenjin_cfg;
+
+struct fba_impl_ops {
+	/* Implementation defined init */
+	int (*impl_init)(struct fba_device *dev);
+	/* Implementation defined exit */
+	void (*impl_exit)(struct fba_device *dev);
+};
 
 #include "fba_util.h"
 
@@ -76,6 +87,7 @@ struct fba_device {
 
 	// Device-specific implementation details
 	const struct fba_cfg *cfg;
+	void *impl_priv;
 
 	void __iomem *bars[BAR_CNT];
 

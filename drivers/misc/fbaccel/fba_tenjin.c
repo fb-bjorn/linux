@@ -21,6 +21,8 @@
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(tenjin_ida);
 
+static const struct fba_impl_ops tenjin_impl_ops = {};
+
 const struct fba_cfg tenjin_cfg = {
 	.name = DRV_NAME,
 	.devnode_ida = &tenjin_ida,
@@ -29,4 +31,5 @@ const struct fba_cfg tenjin_cfg = {
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.host_sq_wc_bar = -1,
+	.impl_ops = &tenjin_impl_ops,
 };

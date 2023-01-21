@@ -259,12 +259,20 @@ static int fba_device_init(struct fba_device *fba_dev)
 	// Driver is now available for IOCTL communication.
 	fba_dev_info(fba_dev, "Done connecting BARs.");
 
+	if (fba_dev->cfg->impl_ops->impl_init != NULL) {
+		rc = fba_dev->cfg->impl_ops->impl_init(fba_dev);
+		if (rc != 0)
+			goto err_pci_exit;
+	}
+
 	fba_dev->dev = device_create(fba_class, &fba_dev->pdev->dev,
 				     MKDEV(MAJOR(fba_devt), fba_dev->minor),
 				     NULL, "%s", fba_dev->name);
 
 	return 0;
 
+err_pci_exit:
+	fba_pci_exit(fba_dev);
 err_free_id:
 	ida_free(fba_dev->cfg->devnode_ida, fba_dev->id);
 err_free_minor:
@@ -282,6 +290,9 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	WRITE_ONCE(fba_dev->exiting, true);
 
 	fba_device_unregister(fba_dev);
+
+	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
+		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
 
 	fba_pci_exit(fba_dev);
 
