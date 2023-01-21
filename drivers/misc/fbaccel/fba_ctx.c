@@ -30,6 +30,10 @@ struct fba_ctx {
 	// ID for this context.
 	int id;
 
+	// Each context keeps track of resource allocations by id
+	struct mutex allocs_mutex;
+	struct idr allocs_idr;
+
 	// Owned by device.
 	// This context in the device context list.
 	struct list_head dev_item;
@@ -49,6 +53,9 @@ static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
 	kref_init(&ctx->ref);
 	mutex_init(&ctx->ctx_mtx);
 	INIT_LIST_HEAD(&ctx->dev_item);
+
+	mutex_init(&ctx->allocs_mutex);
+	idr_init(&ctx->allocs_idr);
 }
 
 // Allocate per-file context.
@@ -91,8 +98,17 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *dev)
  */
 static void fba_ctx_free(struct kref *ref)
 {
+	int id;
+	struct fba_alloc *alloc;
 	struct fba_ctx *ctx = container_of(ref, struct fba_ctx, ref);
 	struct fba_device *dev = ctx->dev;
+
+	// If the application closes the context without
+	// freeing all the resources, free them now.
+	idr_for_each_entry(&ctx->allocs_idr, alloc, id)
+		fba_alloc_put(alloc);
+	idr_destroy(&ctx->allocs_idr);
+	mutex_destroy(&ctx->allocs_mutex);
 
 	fba_device_put(dev);
 
@@ -196,6 +212,47 @@ struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx)
 	return ctx->dev;
 }
 
+/* Add alloc to context, and return unique id (or -ENOSPC if limit reached.) */
+int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc)
+{
+	struct fba_device *fba_dev = ctx->dev;
+	int rc;
+
+	mutex_lock(&ctx->allocs_mutex);
+	rc = idr_alloc(&ctx->allocs_idr, fba_alloc_get(alloc), 1, 65535,
+		       GFP_KERNEL);
+	if (rc < 0) {
+		fba_dev_dbg(fba_dev, "Reached allocation limit for context");
+		fba_alloc_put(alloc);
+		rc = -ENOSPC;
+	}
+	mutex_unlock(&ctx->allocs_mutex);
+
+	return rc;
+}
+
+/* remove alloc with specified id from context. */
+int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id)
+{
+	struct fba_device *fba_dev = ctx->dev;
+	struct fba_alloc *alloc;
+	int rc = 0;
+
+	mutex_lock(&ctx->allocs_mutex);
+	alloc = (struct fba_alloc *)idr_remove(&ctx->allocs_idr, id);
+	if (alloc == NULL) {
+		fba_dev_dbg(fba_dev, "Cannot remove resource. ID not found: %d",
+			    id);
+		rc = -ENOENT;
+	}
+	mutex_unlock(&ctx->allocs_mutex);
+
+	if (alloc)
+		fba_alloc_put(alloc);
+
+	return rc;
+}
+
 /* Get id associated with ctx, only valid if in FBA_CTX_OPEN state */
 int fba_ctx_get_id(struct fba_ctx *ctx)
 {
@@ -219,6 +276,9 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 	was_open = (ctx->ctx_state == FBA_CTX_OPEN);
 	ctx->ctx_state = FBA_CTX_STOPPED;
 	mutex_unlock(&ctx->ctx_mtx);
+
+	mutex_lock(&ctx->allocs_mutex);
+	mutex_unlock(&ctx->allocs_mutex);
 
 	if (was_open) {
 		fba_admin_delete_context_begin(ctx->dev, ctx->id);

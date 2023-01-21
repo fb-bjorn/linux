@@ -5,6 +5,42 @@
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
 
+struct resource_info {
+	// Type of resources such as memory, computer etc.
+	uint16_t type;
+	// Subtype of resources as SRAM, DRAM in memory etc.
+	uint16_t subtype;
+	// Mainly to ensure 8 byte alignment, can be used for misc. purposes.
+	uint16_t alloc;
+	// Mainly to ensure 8 byte alignment, can be used for misc. purposes.
+	uint16_t misc;
+	// Start address of the resource.
+	uint64_t start;
+	// Size of the resource available for use.
+	uint64_t size;
+	// Granularity of resources e.g. for memory this could imply alignment.
+	uint64_t avail;
+};
+
+// IOCTL struct to retreive Resource Info from device.
+struct res_info_ioctl {
+	size_t count; // Number of resources wanted
+	size_t offset; // Starting index of resources wanted
+	struct resource_info __user *info; // Where resource info should be
+		// copied to.
+};
+
+// IOCTL struct to allocate resrouce and retrieve RID.
+struct res_alloc_ioctl {
+	uint16_t index;
+	uint16_t type;
+	uint16_t subtype;
+	uint16_t reserved;
+	uint64_t count; // Number of resources wanted
+	uint64_t rid; // Returned RID
+	uint64_t start; // Returned START
+};
+
 // IOCTL struct to update and report driver state.
 struct set_state_ioctl {
 	uint32_t oldstate; // Read only old state value.
@@ -60,6 +96,44 @@ struct payload_exec_ioctl {
 	uint64_t __user *user_results_buf;
 	uint64_t __user *user_actual_results_size;
 };
+
+// Return resource status.
+//
+// Fills the array of struct resource_info objects provided in the
+// struct.  Returns up to a PAGE worth of data.  If the number of
+// count + index is greater than the number of resources, the
+// result will be truncated.
+//
+// RETURNS:
+//   +N - On success returns number of structs actually returned.
+//   -EINVAL - Starting index out of range.
+//   -EACCES - Unable to read struct fba_access from userspace.
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_RESOURCE_INFO _IOW('f', 1, struct res_info_ioctl)
+
+// Allocate a resource, and return unique ID.
+//
+// Allocates based on type, subtype, index and returns a 64b ID which can
+// be used to access the object.  On success the rid field will be filled.
+//
+// RETURNS:
+//   0 - Success.
+//   -EINVAL - Bad input params.
+//   -ENOMEM - Insufficent memory to track or resources to allocate.
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_RESOURCE_ALLOC _IOWR('f', 2, struct res_alloc_ioctl)
+
+// Frees a resource by ID.
+//
+// The RID is passed in as the third parameter to the ioctl.
+//
+// RETURNS:
+//   0 - Success. Allocation freed back to the driver.
+//   -EINVAL - Bad RID provided.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_RESOURCE_FREE _IOWR('f', 3, uint64_t)
 
 // Set driver state.
 //

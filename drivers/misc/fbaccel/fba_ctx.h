@@ -39,6 +39,12 @@ bool fba_ctx_is_open(struct fba_ctx *ctx);
 /* Get device associated with ctx. */
 struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx);
 
+/* Add alloc to context, and return unique id (or -ENOSPC if limit reached.) */
+int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc);
+
+/* remove alloc with specified id from context. */
+int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id);
+
 /* Get id associated with ctx */
 int fba_ctx_get_id(struct fba_ctx *ctx);
 

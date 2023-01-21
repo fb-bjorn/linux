@@ -44,3 +44,20 @@ void fba_resource_put(struct fba_resource *res);
 // Resource Operations
 int fba_resource_init(struct fba_device *fba_dev);
 void fba_resource_exit(struct fba_device *fba_dev);
+
+// Return information about the specified resource.
+int fba_resource_info(struct fba_device *fba_dev, struct resource_info *info,
+		      size_t offs);
+
+// Operations relevant to the resource tracker struct fba_alloc (alloc).
+struct fba_resource *fba_resource_find(struct fba_device *fba_dev,
+				       uint16_t index, uint16_t type,
+				       uint16_t subtype);
+
+/* Allocate a portion of a resource */
+struct fba_alloc *fba_resource_allocate(struct fba_resource *res,
+					uint64_t size);
+
+int fba_resource_alloc_create(struct fba_ctx *ctx, uint16_t type, uint16_t sub,
+			      uint16_t index, uint64_t size, int *p_id,
+			      uint64_t *p_addr);

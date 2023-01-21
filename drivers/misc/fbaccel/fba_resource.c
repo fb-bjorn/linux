@@ -60,8 +60,8 @@ static int fba_resource_pool_add(struct fba_resource *res, uint64_t addr,
 	return gen_pool_add(res->pool, addr, size, -1);
 }
 
-int fba_resource_pool_alloc(struct fba_resource *res, uint64_t size,
-			    uint64_t *ret_addr)
+static int fba_resource_pool_alloc(struct fba_resource *res, uint64_t size,
+				   uint64_t *ret_addr)
 {
 	uint64_t addr;
 
@@ -91,6 +91,77 @@ void fba_resource_pool_free(struct fba_resource *res, uint64_t addr,
 	spin_lock(&res->pool_lock);
 	gen_pool_free(res->pool, addr, size);
 	spin_unlock(&res->pool_lock);
+}
+
+struct fba_resource *fba_resource_find(struct fba_device *fba_dev,
+				       uint16_t index, uint16_t type,
+				       uint16_t subtype)
+{
+	struct fba_resource *res;
+
+	spin_lock(&fba_dev->resources_lock);
+	if (index >= fba_dev->resource_cnt) {
+		fba_dev_dbg(fba_dev, "Resource index out of range.");
+		res = ERR_PTR(-EINVAL);
+		goto out_unlock;
+	}
+
+	res = fba_resource_get(fba_dev->resources[index]);
+	if ((res->type != type) || (res->subtype != subtype)) {
+		fba_dev_dbg(fba_dev, "Resource request type mismatch.");
+		fba_resource_put(res);
+		res = ERR_PTR(-EINVAL);
+	}
+
+out_unlock:
+	spin_unlock(&fba_dev->resources_lock);
+
+	return res;
+}
+
+struct fba_alloc *fba_resource_allocate(struct fba_resource *res, uint64_t size)
+{
+	struct fba_alloc *alloc;
+	uint64_t addr = 0;
+	int rc;
+
+	rc = fba_resource_pool_alloc(res, size, &addr);
+	if (rc != 0)
+		return ERR_PTR(-ENOMEM);
+
+	alloc = fba_alloc_new(res, addr, size);
+	if (!alloc)
+		fba_resource_pool_free(res, addr, size);
+
+	return alloc;
+}
+
+int fba_resource_info(struct fba_device *fba_dev, struct resource_info *info,
+		      size_t offs)
+{
+	struct fba_resource *res;
+
+	spin_lock(&fba_dev->resources_lock);
+	if (offs >= fba_dev->resource_cnt) {
+		spin_unlock(&fba_dev->resources_lock);
+		return -EINVAL;
+	}
+	res = fba_resource_get(fba_dev->resources[offs]);
+	spin_unlock(&fba_dev->resources_lock);
+
+	info->type = res->type;
+	info->subtype = res->subtype;
+	info->start = res->start;
+	info->misc = 0;
+
+	spin_lock(&res->pool_lock);
+	info->avail = gen_pool_avail(res->pool);
+	info->size = gen_pool_size(res->pool);
+	spin_unlock(&res->pool_lock);
+
+	fba_resource_put(res);
+
+	return 0;
 }
 
 static struct fba_resource *build_resource(struct fba_device *fba_dev,

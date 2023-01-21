@@ -12,6 +12,73 @@
 #include "fba_device.h"
 #include "fba_ctx.h"
 
+static long fba_ioctl_resource_info(struct fba_device *fba_dev,
+				    struct resource_info __user *dest,
+				    size_t offs, size_t count)
+{
+	size_t i;
+	long rc = 0;
+	struct resource_info info;
+
+	memset(&info, 0, sizeof(info));
+	for (i = 0; i < count; i++) {
+		rc = fba_resource_info(fba_dev, &info, offs + i);
+		if (rc)
+			return rc;
+
+		rc = copy_to_user(&dest[i], &info, sizeof(info));
+		if (rc)
+			return -EFAULT;
+	}
+	return count;
+}
+
+static long fba_ioctl_resource_alloc(struct fba_ctx *ctx, uint16_t type,
+				     uint16_t subtype, uint16_t idx,
+				     uint64_t size, uint64_t *rid,
+				     uint64_t *addr)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	struct fba_resource *res;
+	struct fba_alloc *alloc;
+	long rc;
+
+	res = fba_resource_find(fba_dev, idx, type, subtype);
+	if (IS_ERR(res))
+		return PTR_ERR(res);
+
+	alloc = fba_resource_allocate(res, size);
+	fba_resource_put(res);
+	if (IS_ERR(alloc)) {
+		fba_dev_dbg(fba_dev, "Failed allocation size %#llx from %d.",
+			    size, idx);
+		return PTR_ERR(alloc);
+	}
+
+	rc = fba_ctx_add_alloc(ctx, alloc);
+	if (rc < 0) {
+		fba_alloc_put(alloc);
+		return rc;
+	}
+
+	// Convert ID to RID.
+	*rid = ((uint64_t)rc << RID_ID_SHIFT);
+	*addr = fba_alloc_get_addr(alloc);
+
+	fba_alloc_put(alloc);
+
+	return 0;
+}
+
+static long fba_ioctl_resource_free(struct fba_ctx *ctx, uint64_t rid)
+{
+	// RID should only contain ID not offset.
+	if (rid & RID_OFFS_MASK)
+		return -EINVAL;
+
+	return fba_ctx_remove_alloc(ctx, rid >> RID_ID_SHIFT);
+}
+
 /* For legacy reasons, always return FBA_ACTIVE */
 #define FBA_ACTIVE 8
 
@@ -77,6 +144,37 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		return -EINVAL;
 
 	switch (cmd) {
+	case FBA_IOCTL_RESOURCE_INFO: {
+		struct res_info_ioctl res_req;
+
+		if (copy_from_user(&res_req, data, sizeof(res_req)))
+			return -EFAULT;
+		rc = fba_ioctl_resource_info(dev, res_req.info, res_req.offset,
+					     res_req.count);
+		return rc;
+	}
+	case FBA_IOCTL_RESOURCE_ALLOC: {
+		struct res_alloc_ioctl alloc_req;
+
+#ifdef NOTYET // Not needed?  If needed, alloc is racy?
+		if (!fba_ctx_is_open(ctx))
+			return -EACCES;
+#endif
+
+		if (copy_from_user(&alloc_req, data, sizeof(alloc_req)))
+			return -EFAULT;
+		rc = fba_ioctl_resource_alloc(ctx, alloc_req.type,
+					      alloc_req.subtype,
+					      alloc_req.index, alloc_req.count,
+					      &alloc_req.rid, &alloc_req.start);
+		if (rc != 0)
+			return rc;
+		if (copy_to_user(data, &alloc_req, sizeof(alloc_req)))
+			return -EFAULT;
+		return 0;
+	}
+	case FBA_IOCTL_RESOURCE_FREE:
+		return fba_ioctl_resource_free(ctx, arg);
 	case FBA_IOCTL_GET_DETAILS: {
 		struct get_details_ioctl details_req;
 
