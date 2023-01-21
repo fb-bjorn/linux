@@ -260,6 +260,8 @@ static void fba_device_stop(struct fba_device *fba_dev)
 	}
 	mutex_unlock(&fba_dev->ctx_mtx);
 
+	fba_channel_stop_heartbeats(fba_dev);
+
 	/*
 	 * At this point there should be no work in channels.  Finish tearing
 	 * down channels.
@@ -641,6 +643,8 @@ static int fba_device_fw_init(struct fba_device *dev)
 		fba_dev_err(dev, "Failed initialize monitoring.");
 		goto err_resource_exit;
 	}
+
+	fba_channel_start_heartbeats(dev);
 
 	return 0;
 

@@ -275,3 +275,32 @@ int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 
 	return rc;
 }
+
+bool fba_admin_poll_channel(void *obj)
+{
+	struct fba_channel *chan = (struct fba_channel *)obj;
+	struct fba_device *dev = chan->dev;
+	uint16_t status = 0;
+	int rc;
+
+	if (chan == fba_get_channel(dev, SAIL_CHANNEL_ADMIN)) {
+		rc = fba_admin_time_set(dev, ktime_get_real());
+	} else {
+		struct fba_submission sub = {
+			.header.opcode = EXE_NOOP,
+		};
+
+		rc = fba_admin_packet_chan_sync(dev, chan, &sub, 1, &status);
+	}
+
+	if (rc || status) {
+		fba_device_abort(dev, "heartbeat failure");
+		fba_dev_err(dev,
+			    "Heartbeat failed for channel %d rc=%d status=%d",
+			    (uint16_t)chan->chan_id, rc, status);
+		dev->heart_beat_failed = true;
+		return false;
+	}
+
+	return true;
+}

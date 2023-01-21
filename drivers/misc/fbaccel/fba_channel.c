@@ -10,6 +10,13 @@
 #include "fba_device.h"
 #include "fba_admin.h"
 
+static unsigned int chan_hb_period_ms = CHAN_HEARTBEAT_PERIOD_MS;
+module_param(chan_hb_period_ms, int, 0644);
+MODULE_PARM_DESC(
+	chan_hb_period_ms,
+	"SAIL Channel heartbeat polling period in milliseconds (default: 60000). "
+	"Set to 0 to disable.");
+
 /*
  * The primary host/device interface consists of a set of independent
  * communication channels. Each channel has its own submission queue (squeue or
@@ -527,6 +534,58 @@ void fba_channel_get_fill_watermarks(struct fba_channel *chan,
 	spin_unlock(&chan->lock);
 }
 
+void fba_channel_start_heartbeats(struct fba_device *fba_dev)
+{
+	struct fba_channel *chan;
+	int i, max_channel;
+
+	/* Start monitoring active channels */
+	max_channel =
+		min((uint32_t)(SAIL_CHANNEL_EXE + 1), fba_dev->channel_cnt);
+	for (i = 0; i < max_channel; i++) {
+		chan = fba_get_channel(fba_dev, i);
+		fba_poller_start(&chan->poller);
+		fba_dev_dbg(fba_dev, "Channel %d monitored with heartbeat", i);
+	}
+}
+
+void fba_channel_stop_heartbeats(struct fba_device *fba_dev)
+{
+	int chan_num;
+	struct fba_channel *chan;
+	uint32_t max_monitored_channel =
+		min((uint32_t)(SAIL_CHANNEL_EXE + 1), fba_dev->channel_cnt);
+
+	for (chan_num = 0; chan_num < max_monitored_channel; chan_num++) {
+		chan = fba_get_channel(fba_dev, chan_num);
+		fba_poller_stop(&chan->poller);
+		fba_dev_info(fba_dev, "Channel %d heartbeat stopped", chan_num);
+	}
+}
+
+void fba_channel_set_hb_mon_period(void *obj)
+{
+	struct fba_channel *chan = obj;
+
+	if (chan_hb_period_ms == 0) {
+		// Go back to default polling period, disable the
+		// monitor from sending the heartbeat
+		chan->poller.period_ms = CHAN_HEARTBEAT_PERIOD_MS;
+		if (chan->poller.enabled)
+			fba_dev_err(chan->dev, "HB now disabled for channel %d",
+				    (uint32_t)chan->chan_id);
+		chan->poller.enabled = false;
+	} else {
+		chan->poller.period_ms = chan_hb_period_ms;
+		if (!chan->poller.enabled)
+			fba_dev_info(
+				chan->dev,
+				"HB now enabled for channel %d period %d ms",
+				(uint32_t)chan->chan_id, chan_hb_period_ms);
+		chan->poller.enabled = true;
+	}
+}
+
 /* helper function to init queue from provided queue info */
 static void setup_queue(struct fba_queue *queue, struct fba_queue_info *qinfo,
 			size_t entry_size)
@@ -547,6 +606,8 @@ int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
 		     uint64_t max_job_subs)
 {
 	struct fba_channel *chan = fba_get_channel(dev, id);
+	uint32_t max_monitored_channel =
+		min((uint32_t)(SAIL_CHANNEL_EXE + 1), dev->channel_cnt);
 	int rc;
 
 	chan->dev = dev;
@@ -577,6 +638,9 @@ int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
 		return rc;
 	}
 
+	if (id < max_monitored_channel)
+		fba_poller_init(&chan->poller, chan, fba_admin_poll_channel,
+				fba_channel_set_hb_mon_period);
 	return 0;
 }
 
