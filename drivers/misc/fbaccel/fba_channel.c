@@ -8,6 +8,7 @@
 #include <linux/idr.h>
 
 #include "fba_device.h"
+#include "fba_admin.h"
 
 /*
  * The primary host/device interface consists of a set of independent

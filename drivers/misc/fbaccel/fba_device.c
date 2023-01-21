@@ -15,6 +15,7 @@
 #include <linux/version.h>
 
 #include "fba_device.h"
+#include "fba_admin.h"
 
 #define FBA_MAX_DEVS 32
 
@@ -912,6 +913,7 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->pcie_boot_en = pcie_boot_en;
 
 	dev->num_retries = MAX_RETRIES;
+	dev->admin_cmd_timeout_ms = SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
 
 	return fba_device_init(dev);
 }

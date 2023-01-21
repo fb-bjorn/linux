@@ -174,6 +174,8 @@ struct fba_device {
 	char boot1_filename[NAME_MAX + 1];
 	char boot2_filename[NAME_MAX + 1];
 
+	// Admin channel command timeout value in ms
+	uint32_t admin_cmd_timeout_ms;
 	// Number of retries for state update check
 	int num_retries;
 };
