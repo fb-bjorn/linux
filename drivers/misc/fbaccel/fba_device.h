@@ -42,6 +42,8 @@
 #define MAX_RETRIES 50
 #define MIN_RETRIES 5
 
+#define MAX_LOGGER_SRCS 2
+
 // MAX number of channels
 // This will be reduced to the number of advertised channels by the device
 // and the number of MSIX interrupts available
@@ -54,6 +56,9 @@ struct fba_dma;
 struct fba_device;
 struct fba_impl_ops;
 struct fba_job;
+struct fba_coredump;
+struct fba_usoc_dev;
+struct fba_uart_dev;
 
 // Default M7 Heartbeat period
 #define M7_HEARTBEAT_PERIOD_MS 60000
@@ -167,6 +172,7 @@ struct fba_dma {
 	struct sg_table sg;
 };
 
+/* Implementation defined operations */
 struct fba_impl_ops {
 	/* Implementation defined init */
 	int (*impl_init)(struct fba_device *dev);
@@ -181,8 +187,6 @@ struct fba_impl_ops {
 	const char *(*get_boot_mode)(struct fba_device *dev);
 	// Set device-specific boot mode
 	int (*set_boot_mode)(struct fba_device *dev, const char *mode);
-	// Decide whether to load signed or unsigned firmware
-	bool (*is_secure_boot)(struct fba_device *dev);
 	// Get firmware default boot1 and boot2 filenames
 	void (*get_fw_filenames)(struct fba_device *dev, const char **boot1,
 				 const char **boot2);
@@ -190,9 +194,19 @@ struct fba_impl_ops {
 	int (*load_firmware)(struct fba_device *dev);
 	// Reset CCP and SCP
 	int (*reset_controller)(struct fba_device *dev);
-	// This is a product specific method to check the health of
-	// boot controller.
+
+	/* Coredump init/exit hooks */
+	int (*coredump_init)(struct fba_device *dev);
+	void (*coredump_exit)(struct fba_device *dev);
+
+	// Check the health of boot controller.
 	char *(*boot_health_check)(struct fba_device *dev);
+	// Check CCP Panic State
+	bool (*did_ccp_panic)(struct fba_device *dev);
+	uint32_t (*coredump_get_cxram_crc_offset)(struct fba_device *dev);
+	uint32_t (*coredump_get_crc)(struct fba_device *dev);
+	// Decide whether to load signed or unsigned firmware
+	bool (*is_secure_boot)(struct fba_device *dev);
 };
 
 #include "fba_channel.h"
@@ -224,7 +238,9 @@ struct fba_device {
 	// Device-specific implementation details
 	const struct fba_cfg *cfg;
 	void *impl_priv;
+	bool coredump_init; // XXX - move to impl_priv
 
+	struct mutex coredump_mutex;
 	atomic_t allow_open;
 
 	// TEMP DMA data used by Testing and Admin for Info Words, Resources.
@@ -279,6 +295,8 @@ struct fba_device {
 	atomic_t reset_ok;
 	bool exiting;
 	struct completion abort_done;
+	bool coredump_disabled;
+	struct completion coredump_done;
 	bool pcie_boot_en;
 	atomic_t waiting_for_load;
 	char boot1_filename[NAME_MAX + 1];
@@ -342,6 +360,9 @@ int fba_device_get_ctx_count(struct fba_device *fba_dev);
 
 /* Called to quiesce device on fatal error */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason);
+
+/* Signal coredump has completed, and is safe to fence DMA */
+void fba_device_signal_coredump_done(struct fba_device *fba_dev);
 
 // File Operations
 extern const struct file_operations fba_fops;

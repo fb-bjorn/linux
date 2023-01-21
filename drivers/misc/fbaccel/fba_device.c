@@ -520,6 +520,9 @@ err_free_sq:
 	return rc;
 }
 
+/* XXX - make this into a module parameter */
+#define COREDUMP_TIMEOUT_MS (30 * 1000)
+
 /* Abort operation of device, called upon detection of fatal error. */
 void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 {
@@ -537,6 +540,15 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 	fba_dev_err(fba_dev, "aborting device: %s", reason);
 
 	/*
+	 * Coredump via DMA will fail after clearing master.  We need to
+	 * wait here until coredump is done.  Assumes that coredump will
+	 * be initiated automatically by udev rule and will complete
+	 * within proscribed timeout.
+	 */
+	wait_for_completion_timeout(&fba_dev->coredump_done,
+				    msecs_to_jiffies(COREDUMP_TIMEOUT_MS));
+
+	/*
 	 * Disable PCI bus master/DMA and wait for any in-flight PCIe
 	 * transactions to complete.  After these steps, should be safe
 	 * to free any DMA mappings as device can no longer write to them
@@ -551,6 +563,12 @@ void fba_device_abort(struct fba_device *fba_dev, const char *reason)
 
 	/* Wake up anyone waiting for abort to complete */
 	complete_all(&fba_dev->abort_done);
+}
+
+/* Signal coredump has completed, and is safe to fence DMA */
+void fba_device_signal_coredump_done(struct fba_device *fba_dev)
+{
+	complete_all(&fba_dev->coredump_done);
 }
 
 static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
@@ -571,6 +589,9 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 	} else {
 		fba_dev_err(fba_dev, "Device failed, skipping disable.");
 	}
+
+	if (fba_dev->cfg->impl_ops->coredump_exit != NULL)
+		fba_dev->cfg->impl_ops->coredump_exit(fba_dev);
 
 	for (i = 0; i < fba_dev->channel_total; i++)
 		fba_channel_exit(fba_get_channel(fba_dev, i));
@@ -662,6 +683,10 @@ static int fba_device_fw_init(struct fba_device *dev)
 		fba_dev_err(dev, "Failed to set device time.");
 		goto err_resource_exit;
 	}
+
+	// coredump and mon init must be after fba_resource_init()
+	if (dev->cfg->impl_ops->coredump_init)
+		dev->cfg->impl_ops->coredump_init(dev);
 
 	rc = fba_mon_device_init(dev);
 	if (rc) {
@@ -929,8 +954,10 @@ static int fba_device_init(struct fba_device *fba_dev)
 	kref_init(&fba_dev->ref);
 	spin_lock_init(&fba_dev->resources_lock);
 	mutex_init(&fba_dev->ctx_mtx);
+	mutex_init(&fba_dev->coredump_mutex);
 	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
+	init_completion(&fba_dev->coredump_done);
 
 	ida_init(&fba_dev->ctx_ids);
 	ida_init(&fba_dev->channel_ids);
@@ -1034,6 +1061,14 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	int rc;
 
 	WRITE_ONCE(fba_dev->exiting, true);
+
+	/*
+	 * Grab coredump mutex to ensure no coredump DMA is ongoing, and set
+	 * coredump_disabled flag to disable any new coredump DMA.
+	 */
+	mutex_lock(&fba_dev->coredump_mutex);
+	fba_dev->coredump_disabled = true;
+	mutex_unlock(&fba_dev->coredump_mutex);
 
 	fba_device_unregister(fba_dev);
 

@@ -175,6 +175,26 @@ struct fba_limit_params_ioctl {
 	uint32_t max_entries_per_packet; // Max allowed entries per packet
 };
 
+// IOCTL for getting coredump region info.
+struct get_coredump_region_ioctl {
+	// Destination buffer for coredump region info.
+	void __user *data;
+	// Size of the buffer allocated.This should be at least equal
+	// to coredump_size reported in get_coredump_info_ioctl.
+	uint64_t size;
+};
+
+// IOCTL for getting coredump info.
+struct get_coredump_info_ioctl {
+	// Output param which provides the validity status,
+	// 0 - coredump not valid, 1 - coredump info valid.
+	uint32_t validity;
+	// Output param which provides the number of core dump regions
+	uint32_t num_regions;
+	// Output param which provides coredump info size.
+	uint32_t coredump_info_size;
+};
+
 // IOCTL for running a payload executable binary
 struct payload_exec_ioctl {
 	int use_default_func;
@@ -188,6 +208,24 @@ struct payload_exec_ioctl {
 	uint64_t results_buf_size;
 	uint64_t __user *user_results_buf;
 	uint64_t __user *user_actual_results_size;
+};
+
+// IOCTL for getting coredump data by issuing DMA from M7
+
+// Flag to signal that this will be the last coredump request
+// Used to allow driver to wait for coredump to complete
+// before fencing off DMA during fault conditions.
+#define GET_COREDUMP_DATA_FLAG_COREDUMP_DONE (1 << 0)
+
+struct get_coredump_region_data_ioctl {
+	// Size of the DMA operation
+	uint64_t size;
+	// Device address used for DMA
+	uint64_t device_addr;
+	// Host address used for DMA
+	void __user *host_buf;
+	// flags for request (mainly signaling done)
+	uint32_t flags;
 };
 
 // Return resource status.
@@ -324,6 +362,44 @@ struct payload_exec_ioctl {
 //   -EACCES - Unable to read struct fba_access from userspace.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_ACCESS_SCRATCH _IOW('f', 11, struct scratch_access_ioctl)
+
+// Get coredump info.
+//
+// Returns information about the number of coredump regions and the size of
+// the region table.
+//
+// Confusingly we have two separate flavors of coredump, this one is newer and
+// supports fetching coredump data using DMA from M7.  Use along with the
+// FBA_IOCTL_GET_COREDUMP_REGIONS and FBA_IOCTL_GET_COREDUMP_REGION_DATA
+// ioctls.
+//
+// RETURNS:
+// 0 - Success.
+// -EFAULT - If IOCTL struct is invalid.
+#define FBA_IOCTL_GET_COREDUMP_INFO                                            \
+	_IOWR('f', 14, struct get_coredump_info_ioctl)
+
+// Get coredump regions' info.
+//
+// Returns the coredump region information provided by the device
+//
+// RETURNS:
+// 0 - Success.
+// -EFAULT - If IOCTL struct is invalid or if pointers in struct are invalid.
+// -ENOMEM - If memory allocation fails.
+// -EINVAL - If size of the buffer provided by user is less than amount needed.
+#define FBA_IOCTL_GET_COREDUMP_REGIONS                                         \
+	_IOWR('f', 15, struct get_coredump_region_ioctl)
+
+// Get coredump region data.
+//
+// Returns the coredump data for a given coredump address
+//
+// RETURNS:
+// 0 - Success.
+// -EFAULT - If IOCTL struct is invalid or if pointers in struct are invalid.
+#define FBA_IOCTL_GET_COREDUMP_REGION_DATA                                     \
+	_IOWR('f', 16, struct get_coredump_region_data_ioctl)
 
 // Read Monitoring Definitions
 //

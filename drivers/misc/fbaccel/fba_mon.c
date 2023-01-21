@@ -421,6 +421,61 @@ static int16_t get_m7_health(struct fba_device *dev, void *user_data, void *buf,
 	return err;
 }
 
+static int16_t did_ccp_panic(struct fba_device *dev, void *user_data, void *buf,
+			     size_t buf_size)
+{
+	bool *ccp_panic_sts = buf;
+
+	if (buf_size < sizeof(bool)) {
+		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		return -EFAULT;
+	}
+	if (dev->cfg->impl_ops->did_ccp_panic != NULL)
+		*ccp_panic_sts = dev->cfg->impl_ops->did_ccp_panic(dev);
+	else
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static int16_t get_cxram_ccp_coredump_crc_offset(struct fba_device *dev,
+						 void *user_data, void *buf,
+						 size_t buf_size)
+{
+	uint32_t *cxram_ccp_coredump_crc_offset = buf;
+
+	if (buf_size < sizeof(uint32_t)) {
+		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		return -EFAULT;
+	}
+	if (dev->cfg->impl_ops->coredump_get_cxram_crc_offset != NULL)
+		*cxram_ccp_coredump_crc_offset =
+			dev->cfg->impl_ops->coredump_get_cxram_crc_offset(dev);
+	else
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static int16_t get_latest_ccp_coredump_crc(struct fba_device *dev,
+					   void *user_data, void *buf,
+					   size_t buf_size)
+{
+	uint32_t *latest_ccp_coredump_crc = buf;
+
+	if (buf_size < sizeof(uint32_t)) {
+		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		return -EFAULT;
+	}
+	if (dev->cfg->impl_ops->coredump_get_crc != NULL)
+		*latest_ccp_coredump_crc =
+			dev->cfg->impl_ops->coredump_get_crc(dev);
+	else
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
 static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 	MON_STR("driver_version", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 		get_driver_version),
@@ -447,10 +502,16 @@ static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 		(void *)FBA_MON_ALERT_HEART_BEAT_FAILURE, get_alert_mon_value),
 	MON_U32("alert_ccp_wdt_err", MTG_CARD_ALERTS, SAIL_MTS_DRIVER,
 		(void *)FBA_MON_ALERT_CCP_WDT_FAILURE, get_alert_mon_value),
+	MON_U32("cxram_ccp_coredump_crc_offset", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		NULL, get_cxram_ccp_coredump_crc_offset),
 	MON_BOOL("is_ready", MTG_CARD_ALERTS, SAIL_MTS_DRIVER, NULL,
 		 get_ready_status),
+	MON_BOOL("did_ccp_panic", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
+		 did_ccp_panic),
 	MON_BOOL_STATIC("reset_supported", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 			get_reset_supported),
+	MON_CRC_U32("latest_ccp_coredump_crc", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		    NULL, get_latest_ccp_coredump_crc),
 	MON_U32("device_id", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 		get_device_id),
 };

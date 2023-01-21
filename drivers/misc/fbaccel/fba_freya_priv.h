@@ -207,11 +207,30 @@ enum image_location {
 
 // Ultrasoc AXI Communicator
 
+// Use low vector numbers for fixed functionality
+// The rest of the vectors are designated for completion queues
+#define COREDUMP_MSIX_VECTOR 4
+
 #define FREYA_DEF_BOOT1_FILENAME "boot1.hbin"
 #define FREYA_DEF_BOOT2_FILENAME "ccp.hbin"
 
 #define ARTEMIS_DEF_BOOT1_FILENAME "artemis-boot1.hbin"
 #define ARTEMIS_DEF_BOOT2_FILENAME "artemis-ccp.hbin"
+
+/* from fbia/freya/fbia_coredump.h: */
+
+#define MAGIC_NUMBER 0xFACEB00C
+
+struct coredump_region {
+	__le64 region_addr;
+	__le64 region_size;
+};
+
+struct fbia_coredump_info {
+	__le32 magic;
+	__le32 num_regions;
+	struct coredump_region regions[];
+};
 
 /* From fbia/freya/freya_cxram.h: */
 

@@ -227,6 +227,14 @@ static char *freya_m7_health(struct fba_device *fba_dev)
 	return "UNEXPECTED";
 }
 
+static bool did_ccp_panic(struct fba_device *dev)
+{
+	uint32_t panic = 0;
+
+	panic = fba_read_bar(dev, BAR_CXRAM, CXRAM_CCP_CRASH_STATUS_OFFSET);
+	return panic ? true : false;
+}
+
 static void store_boot_args(struct fba_device *fba_dev)
 {
 	void __iomem *args_bufp;
@@ -296,6 +304,190 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 			"P2P ECC region size not a multiple of 16MB, setting size to 0.");
 		fba_write_bar(fba_dev, 0, BAR_CXRAM, CXRAM_P2P_ECC_SIZE_OFFSET);
 	}
+}
+
+static irqreturn_t fbia_coredump_msix_handler(int irq, void *data)
+{
+	struct fba_device *dev = data;
+
+	fba_dev_err(dev, "CCP has crashed. Aborting device operations.");
+	fba_device_abort(dev, "CCP triggered coredump");
+
+	mutex_lock(&dev->coredump_mutex);
+	if (!dev->coredump_disabled)
+		kobject_uevent(&dev->dev->kobj, KOBJ_CHANGE);
+	mutex_unlock(&dev->coredump_mutex);
+
+	return IRQ_HANDLED;
+}
+
+static void fbia_coredump_exit(struct fba_device *dev)
+{
+	if (dev->coredump_init) {
+		fba_free_irq(dev->pdev, COREDUMP_MSIX_VECTOR, dev);
+		dev->coredump_init = false;
+	}
+}
+
+static int fbia_coredump_init(struct fba_device *dev)
+{
+	int rc;
+
+	rc = fba_request_irq(dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
+			     fbia_coredump_msix_handler, dev, "%s%d-coredump",
+			     dev->cfg->name, dev->id);
+	if (rc) {
+		fba_dev_err(dev, "fba_request_irq failed for tx irq");
+		return rc;
+	}
+	// Only set the coredump exit function when coredump init is successful
+	dev->coredump_init = true;
+	return rc;
+}
+
+static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
+					 uintptr_t host_buf,
+					 uint64_t device_addr)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	struct fba_dma *dma;
+	uint64_t opcode =
+		AT_DMA_GET_OP(size | AT_DMA_OPSZ | AT_DMA_FROM_DEVICE);
+	int rc;
+
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
+		rc = -ENODEV;
+		goto out_unlock;
+	}
+
+	fba_dev_info(fba_dev, "%s: Mapping DMA pages size=%zu.", __func__,
+		     (size_t)size);
+	dma = fba_dma_map(ctx, (uint64_t *)host_buf, size, DMA_FROM_DEVICE,
+			  true);
+	if (IS_ERR(dma)) {
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (dma->map_cnt != 1) {
+		fba_dev_dbg(fba_dev, "DMA pages are in PRP format.");
+		opcode = opcode | AT_DMA_PRP;
+		host_buf = dma->prp_addr;
+	} else {
+		fba_dev_dbg(fba_dev, "DMA pages are in contig format.");
+		host_buf = dma->dma_addr;
+	}
+
+	set_mailbox64(fba_dev, M7_MBOX_DMA_OPCODE_ENTRY, opcode);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_SIZE_ENTRY, size);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_DADDR_ENTRY, device_addr);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_HADDR_ENTRY, host_buf);
+	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
+	set_mailbox(fba_dev, M7_MBOX_DMA_SUBMISSION_ENTRY, DMA_SUBMISSION);
+
+	rc = fba_wait_for_state(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY,
+				DMA_COMPLETION, WAIT_FOR_M7_DMA_COMPLETION);
+	fba_dev_dbg(fba_dev, "Setting completion mailboxes back to zero.");
+	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
+
+	if (rc != 0) {
+		/*
+		 * Most likely the MSIX crash handler has already called
+		 * fba_device_abort, but this won't return until it's safe to
+		 * free devices.  If we're already aborting and waiting on
+		 * coredump, that may even timeout before we did here, in which
+		 * case the call should return immediately.
+		 */
+		fba_device_abort(fba_dev, "coredump timeout");
+	}
+
+	fba_dma_free(ctx, dma);
+
+out_unlock:
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	return rc;
+}
+
+static uint32_t fbia_coredump_get_num_regions(struct fba_device *dev)
+{
+	return fba_read_bar(dev, BAR_CXRAM, CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET);
+}
+
+static int fbia_coredump_get_info(struct fba_device *dev,
+				  struct get_coredump_info_ioctl *coredump_info)
+{
+	int rc = 0;
+	uint32_t magic;
+
+	mutex_lock(&dev->coredump_mutex);
+	if (dev->coredump_disabled) {
+		rc = -ENODEV;
+		goto out_unlock;
+	}
+
+	magic = fba_read_bar(dev, BAR_CXRAM, CXRAM_CORE_DUMP_OFFSET);
+	if (magic != MAGIC_NUMBER) {
+		coredump_info->validity = 0;
+		coredump_info->coredump_info_size = 0;
+		coredump_info->num_regions = 0;
+		goto out_unlock;
+	}
+	coredump_info->validity = 1;
+	coredump_info->num_regions = fbia_coredump_get_num_regions(dev);
+	coredump_info->coredump_info_size =
+		sizeof(struct coredump_region) * coredump_info->num_regions;
+
+out_unlock:
+	mutex_unlock(&dev->coredump_mutex);
+
+	return rc;
+}
+
+static int fbia_coredump_get_regions(struct fba_device *dev, void *coredump_mem,
+				     uint32_t size)
+{
+	int rc;
+	uint32_t regions_size;
+
+	mutex_lock(&dev->coredump_mutex);
+	if (dev->coredump_disabled) {
+		rc = -ENODEV;
+		goto out_unlock;
+	}
+
+	regions_size = fbia_coredump_get_num_regions(dev) *
+		       sizeof(struct coredump_region);
+	if (size < regions_size) {
+		// Partial reading of coredump info is not supported
+		fba_dev_err(
+			dev,
+			"Error in reading coredump region info, not enough memory to read full buffer");
+		rc = -EINVAL;
+		goto out_unlock;
+	}
+
+	memcpy_fromio(coredump_mem,
+		      (void __iomem *)(dev->bars[BAR_CXRAM] +
+				       CXRAM_CORE_DUMP_REGION_INFO_OFFSET),
+		      regions_size);
+	rc = regions_size;
+
+out_unlock:
+	mutex_unlock(&dev->coredump_mutex);
+
+	return rc;
+}
+
+static uint32_t fbia_coredump_get_crc_offset(struct fba_device *dev)
+{
+	return CXRAM_CCP_CORE_DUMP_CRC_OFFSET;
+}
+
+static uint32_t fbia_coredump_get_crc(struct fba_device *dev)
+{
+	return fba_read_bar(dev, BAR_CXRAM, CXRAM_CCP_CORE_DUMP_CRC_OFFSET);
 }
 
 static inline void cxram_sideband_set_mask(struct fba_device *dev,
@@ -887,12 +1079,87 @@ static int reset_ccp(struct fba_device *fba_dev)
 	return rc;
 }
 
+static long fba_ioctl_get_coredump_regions(struct fba_device *dev,
+					   void __user *data)
+{
+	struct get_coredump_region_ioctl coredump_region_req;
+	void __user *user;
+	void *coredump_mem;
+	long rc;
+
+	if (copy_from_user(&coredump_region_req, data,
+			   sizeof(struct get_coredump_region_ioctl)))
+		return -EFAULT;
+
+	user = coredump_region_req.data;
+	coredump_mem = kzalloc(coredump_region_req.size, GFP_KERNEL);
+	if (!coredump_mem)
+		return -ENOMEM;
+
+	rc = fbia_coredump_get_regions(dev, coredump_mem,
+				       coredump_region_req.size);
+	if (rc < 0)
+		goto out_free;
+
+	coredump_region_req.size = rc;
+	if (copy_to_user(user, coredump_mem, rc)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+	if (copy_to_user(data, &coredump_region_req,
+			 sizeof(struct get_coredump_region_ioctl))) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+	rc = 0;
+
+out_free:
+	kfree(coredump_mem);
+	return rc;
+}
+
 static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	struct fba_ctx *ctx = fp->private_data;
 	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	void __user *data = (void __user *)arg;
+	long rc;
 
 	switch (cmd) {
+	case FBA_IOCTL_GET_COREDUMP_INFO: {
+		struct get_coredump_info_ioctl coredump_info_req;
+
+		if (copy_from_user(&coredump_info_req, data,
+				   sizeof(struct get_coredump_info_ioctl)))
+			return -EFAULT;
+		rc = fbia_coredump_get_info(dev, &coredump_info_req);
+		if (rc != 0)
+			return rc;
+		if (copy_to_user(data, &coredump_info_req,
+				 sizeof(struct get_coredump_info_ioctl)))
+			return -EFAULT;
+		return 0;
+	}
+	case FBA_IOCTL_GET_COREDUMP_REGIONS:
+		return fba_ioctl_get_coredump_regions(dev, data);
+
+	case FBA_IOCTL_GET_COREDUMP_REGION_DATA: {
+		struct get_coredump_region_data_ioctl get_coredump_region_data;
+
+		if (copy_from_user(&get_coredump_region_data, data,
+				   sizeof(get_coredump_region_data)))
+			return -EFAULT;
+		rc = fbia_coredump_get_region_data(
+			ctx, get_coredump_region_data.size,
+			(uintptr_t)get_coredump_region_data.host_buf,
+			get_coredump_region_data.device_addr);
+		if ((get_coredump_region_data.flags &
+		     GET_COREDUMP_DATA_FLAG_COREDUMP_DONE) != 0) {
+			/* Signal fba_device_abort() to stop waiting */
+			fba_device_signal_coredump_done(dev);
+		}
+		return rc;
+	}
 	case FBA_IOCTL_SECURE_DBG_UNLOCK:
 		return freya_secure_dbg_unlock(dev);
 	default:
@@ -1040,7 +1307,14 @@ static const struct fba_impl_ops freya_impl_ops = {
 	.set_boot_mode = freya_set_boot_mode,
 	.load_firmware = freya_load_firmware,
 	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
 	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
 };
 
 static const struct fba_impl_ops artemis_impl_ops = {
@@ -1054,7 +1328,14 @@ static const struct fba_impl_ops artemis_impl_ops = {
 	.set_boot_mode = freya_set_boot_mode,
 	.load_firmware = freya_load_firmware,
 	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
 	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
 };
 
 const struct fba_cfg freya_cfg = {
