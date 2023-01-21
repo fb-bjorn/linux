@@ -6,6 +6,10 @@
  * FBA Admin
  */
 
+int fba_admin_create_context(struct fba_device *dev, int id);
+int fba_admin_delete_context_begin(struct fba_device *dev, int id);
+int fba_admin_delete_context_end(struct fba_device *dev, int id);
+
 int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 			   uint16_t opcode, uint64_t start, uint64_t end);
 

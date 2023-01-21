@@ -73,6 +73,85 @@ static int fba_admin_packet_sync(struct fba_device *fba_dev,
 		sub_cnt, stat);
 }
 
+int fba_admin_create_context(struct fba_device *dev, int id)
+{
+	struct fba_submission sub;
+	uint16_t status;
+	int rc;
+
+	memset(&sub, 0, sizeof(sub));
+	sub.header.opcode = ADMIN_CREATE_CONTEXT;
+	sub.ctx.id = id;
+
+	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	if (rc) {
+		fba_dev_err(dev, "ADMIN_CREATE_CONTEXT failed %d.", rc);
+		return rc;
+	}
+	if (status != 0) {
+		fba_dev_err(dev, "Failed to create ctx on device, status=%d.",
+			    status);
+		fba_device_abort(dev, "create context failed");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+int fba_admin_delete_context_begin(struct fba_device *dev, int id)
+{
+	struct fba_submission sub;
+	uint16_t status;
+	int rc;
+
+	memset(&sub, 0, sizeof(sub));
+	sub.header.opcode = ADMIN_DELETE_CONTEXT_BEGIN;
+	sub.ctx.id = id;
+
+	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	if (rc) {
+		fba_dev_err(dev, "%s: failed rc %d", __func__, rc);
+		return rc;
+	}
+	if (status != 0) {
+		fba_dev_err(
+			dev,
+			"Failed to delete ctx begin id=%d on device, status=%d.",
+			id, status);
+		fba_device_abort(dev, "delete context failed");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+int fba_admin_delete_context_end(struct fba_device *dev, int id)
+{
+	struct fba_submission sub;
+	uint16_t status;
+	int rc;
+
+	memset(&sub, 0, sizeof(sub));
+	sub.header.opcode = ADMIN_DELETE_CONTEXT_END;
+	sub.ctx.id = id;
+
+	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	if (rc) {
+		fba_dev_err(dev, "%s: failed rc %d", __func__, rc);
+		return rc;
+	}
+	if (status != 0) {
+		fba_dev_err(
+			dev,
+			"Failed to delete ctx end id=%d on device, status=%d.",
+			id, status);
+		fba_device_abort(dev, "delete context failed.");
+		return -EIO;
+	}
+
+	return 0;
+}
+
 int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 			   uint16_t opcode, uint64_t start, uint64_t end)
 {

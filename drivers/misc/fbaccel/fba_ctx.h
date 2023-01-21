@@ -24,8 +24,17 @@
 // Allocate and initialize a dynamic context object.
 struct fba_ctx *fba_ctx_alloc(struct fba_device *dev);
 
+// Send open admin message and promote the state to allow FW transactions.
+int fba_ctx_open(struct fba_ctx *ctx);
+
+// Send a close admin message (if appropriate) and release any resources
+// associated with this context as it will no longer be valid.
+// NOTE:  This does not deref the ctx.
+int fba_ctx_close(struct fba_ctx *ctx);
+
 // Check state of ctx.
 bool fba_ctx_is_valid(struct fba_ctx *ctx);
+bool fba_ctx_is_open(struct fba_ctx *ctx);
 
 /* Get device associated with ctx. */
 struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx);

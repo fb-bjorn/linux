@@ -5,6 +5,12 @@
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
 
+// IOCTL struct to update and report driver state.
+struct set_state_ioctl {
+	uint32_t oldstate; // Read only old state value.
+	uint32_t newstate; // Write only new state value.
+};
+
 // IOCTL struct to read driver details.
 struct get_details_ioctl {
 	uint64_t size; // Max bytes to transfer.
@@ -39,6 +45,20 @@ struct fba_limit_params_ioctl {
 	uint32_t reserved;
 	uint32_t max_entries_per_packet; // Max allowed entries per packet
 };
+
+// Set driver state.
+//
+// DOWN -> PRESENT -> CONNECTED -> ACTIVE.
+//
+// Currently we only support moving from a lower state to a higher state.
+// It's not possible to skip a state, switching to a higher state will
+// always step through any previous states that haven't been activated yet.
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+// NOTE:  Examine driver logging to determine what happened.
+#define FBA_IOCTL_SET_STATE _IOWR('f', 9, struct set_state_ioctl)
 
 // Get Driver Info
 //

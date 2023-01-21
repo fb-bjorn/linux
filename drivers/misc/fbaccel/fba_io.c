@@ -92,6 +92,11 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		return 0;
 	}
+	case FBA_IOCTL_SET_STATE:
+		/* No need to set state anymore, but still need side effect */
+		rc = fba_ctx_open(ctx);
+
+		return rc;
 	case FBA_IOCTL_GET_LIMIT_PARAMS: {
 		struct fba_limit_params_ioctl limit_params_req;
 
@@ -149,10 +154,12 @@ static int fba_open(struct inode *node, struct file *fp)
 static int fba_release(struct inode *node, struct file *fp)
 {
 	struct fba_ctx *ctx = fp->private_data;
+	int rc;
 
+	rc = fba_ctx_close(ctx);
 	fba_ctx_put(ctx);
 
-	return 0;
+	return rc;
 }
 
 const struct file_operations fba_fops = {

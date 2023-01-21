@@ -27,6 +27,8 @@ struct fba_ctx {
 	struct fba_channel *chan;
 	// Reference count.
 	struct kref ref;
+	// ID for this context.
+	int id;
 
 	// Owned by device.
 	// This context in the device context list.
@@ -114,6 +116,66 @@ bool fba_ctx_is_valid(struct fba_ctx *ctx)
 	return is_valid;
 }
 
+static bool __fba_ctx_is_open(struct fba_ctx *ctx)
+{
+	return (ctx->ctx_state == FBA_CTX_OPEN);
+}
+
+bool fba_ctx_is_open(struct fba_ctx *ctx)
+{
+	bool is_open;
+
+	mutex_lock(&ctx->ctx_mtx);
+	is_open = __fba_ctx_is_open(ctx);
+	mutex_unlock(&ctx->ctx_mtx);
+
+	return is_open;
+}
+
+int fba_ctx_open(struct fba_ctx *ctx)
+{
+	struct fba_device *dev = ctx->dev;
+	int rc, id;
+
+	mutex_lock(&ctx->ctx_mtx);
+
+	if (__fba_ctx_is_open(ctx)) {
+		/* Already open, quietly do nothing. */
+		rc = 0;
+		goto out_unlock;
+	}
+
+	if (ctx->ctx_state == FBA_CTX_STOPPED) {
+		fba_dev_err(dev,
+			    "Context promotion failed: context is stopped.");
+		rc = -EIO;
+		goto out_unlock;
+	}
+	id = ida_alloc_range(&dev->ctx_ids, 1, dev->n_ctxs, GFP_KERNEL);
+	if (id < 0) {
+		fba_dev_err(dev,
+			    "Context promotion failed: context limit reached.");
+		rc = id;
+		goto out_unlock;
+	}
+
+	rc = fba_admin_create_context(dev, id);
+	if (rc) {
+		ida_free(&dev->ctx_ids, id);
+		fba_dev_err(
+			dev,
+			"Context promotion failed: unable to create context in device.");
+		goto out_unlock;
+	}
+
+	ctx->id = id;
+	ctx->ctx_state = FBA_CTX_OPEN;
+
+out_unlock:
+	mutex_unlock(&ctx->ctx_mtx);
+	return rc;
+}
+
 // Increment reference count to context
 struct fba_ctx *fba_ctx_get(struct fba_ctx *ctx)
 {
@@ -134,6 +196,13 @@ struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx)
 	return ctx->dev;
 }
 
+/* Get id associated with ctx, only valid if in FBA_CTX_OPEN state */
+int fba_ctx_get_id(struct fba_ctx *ctx)
+{
+	/* XXX - racy with respect to quiesce? */
+	return ctx->id;
+}
+
 /* Helper to keep fba_device from needing to reach into ctx */
 struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item)
 {
@@ -143,7 +212,31 @@ struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item)
 /* Prevent ctx from submitting new jobs, or transitioning to open. */
 void fba_ctx_stop(struct fba_ctx *ctx)
 {
+	bool was_open;
+	int rc;
+
 	mutex_lock(&ctx->ctx_mtx);
+	was_open = (ctx->ctx_state == FBA_CTX_OPEN);
 	ctx->ctx_state = FBA_CTX_STOPPED;
 	mutex_unlock(&ctx->ctx_mtx);
+
+	if (was_open) {
+		fba_admin_delete_context_begin(ctx->dev, ctx->id);
+		rc = fba_admin_delete_context_end(ctx->dev, ctx->id);
+		if (rc == 0)
+			ida_free(&ctx->dev->ctx_ids, ctx->id);
+	}
+}
+
+// Close the context
+int fba_ctx_close(struct fba_ctx *ctx)
+{
+	struct fba_device *dev = ctx->dev;
+
+	fba_device_del_ctx(dev, &ctx->dev_item);
+
+	if (fba_ctx_is_open(ctx))
+		fba_ctx_stop(ctx);
+
+	return 0;
 }

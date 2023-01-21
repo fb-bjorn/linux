@@ -670,6 +670,7 @@ static void fba_device_free(struct kref *kref)
 	/* Free things that might be referenced by lingering user contexts */
 	mutex_destroy(&fba_dev->ctx_mtx);
 	ida_destroy(&fba_dev->channel_ids);
+	ida_destroy(&fba_dev->ctx_ids);
 	destroy_workqueue(fba_dev->msix_wq);
 	kfree(fba_dev->name);
 
@@ -891,6 +892,7 @@ static int fba_device_init(struct fba_device *fba_dev)
 	mutex_init(&fba_dev->area_mutex);
 	init_completion(&fba_dev->abort_done);
 
+	ida_init(&fba_dev->ctx_ids);
 	ida_init(&fba_dev->channel_ids);
 
 	INIT_LIST_HEAD(&fba_dev->ctx_list);

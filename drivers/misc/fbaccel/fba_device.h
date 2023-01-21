@@ -231,6 +231,7 @@ struct fba_device {
 
 	// Context ID == 0 is reserved for the admin context.
 	// Vend IDs in the range [1, n_ctxs] (inclusive).
+	struct ida ctx_ids;
 	unsigned int n_ctxs;
 
 	struct mutex ctx_mtx; // Mutex to protect ctx_list
