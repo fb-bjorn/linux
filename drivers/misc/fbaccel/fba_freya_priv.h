@@ -198,6 +198,8 @@ enum image_location {
 #define DDR_BAR 4
 #define DDR_BAR_OFF 0
 
+#define P2P_BAR 4
+
 #define DRAM_ECC_REGION_GRANULARITY_MB (16)
 
 // Max number of `struct fba_submission` per context.

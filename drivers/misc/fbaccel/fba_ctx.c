@@ -379,6 +379,8 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 {
 	bool was_open;
 	int rc;
+	int id;
+	struct fba_alloc *alloc;
 
 	mutex_lock(&ctx->ctx_mtx);
 	was_open = (ctx->ctx_state == FBA_CTX_OPEN);
@@ -386,6 +388,8 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 	mutex_unlock(&ctx->ctx_mtx);
 
 	mutex_lock(&ctx->allocs_mutex);
+	idr_for_each_entry(&ctx->allocs_idr, alloc, id)
+		fba_dmabuf_exit(alloc);
 	mutex_unlock(&ctx->allocs_mutex);
 
 	if (was_open) {

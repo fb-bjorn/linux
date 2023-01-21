@@ -93,6 +93,9 @@ struct fba_cfg {
 	// Host SQ BAR -- SQ bar is mapped in WC mode if not set to -1
 	int host_sq_wc_bar;
 
+	// P2P BAR
+	int p2p_bar;
+
 	// Implementation-defined operations
 	const struct fba_impl_ops *impl_ops;
 
@@ -300,6 +303,26 @@ struct fba_device {
 	int num_retries;
 };
 
+struct fba_dmabuf_attach {
+	struct list_head list;
+	size_t orig_size;
+	size_t offset;
+	size_t size;
+	struct dma_buf_attachment *attach;
+	struct sg_table sgt;
+	struct scatterlist sgl;
+};
+
+struct fba_dmabuf {
+	struct list_head list;
+	struct pci_dev *pdev;
+	dma_addr_t bus_base;
+	struct dma_buf *dmabuf;
+	struct kref kref;
+	struct percpu_ref attach_ref;
+	struct completion detaches_done;
+};
+
 /* Module parameter for forcing PRP list usage */
 extern bool test_force_prp;
 
@@ -353,6 +376,13 @@ int fba_wait_for_state(struct fba_device *dev, enum sail_regs reg,
 		       uint32_t state, uint32_t num_retries);
 int fba_wait_for_state_nobail(struct fba_device *dev, enum sail_regs reg,
 			      uint32_t state, uint32_t num_retries);
+
+struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
+						  size_t offset, size_t size);
+void fba_translate_p2p_teardown(struct fba_ctx *ctx,
+				struct fba_dmabuf_attach *fba_dmabuf_attach);
+int fba_get_dmabuf(struct fba_ctx *ctx, uint64_t rid, int *rfd);
+void fba_dmabuf_exit(struct fba_alloc *alloc);
 
 #define fba_dev_err(fba_dev, fmt, ...)                                         \
 	dev_err(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,           \

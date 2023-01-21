@@ -640,6 +640,23 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 			return -EFAULT;
 		return 0;
 	}
+	case FBA_IOCTL_P2P_RESOURCE_EXPORT: {
+		struct res_p2p_export_ioctl export_p2p_req;
+
+		if (!fba_ctx_is_open(ctx))
+			return -EACCES;
+
+		if (copy_from_user(&export_p2p_req, data,
+				   sizeof(export_p2p_req)))
+			return -EFAULT;
+		rc = fba_get_dmabuf(ctx, export_p2p_req.source_rid,
+				    &export_p2p_req.fd);
+		if (rc != 0)
+			return rc;
+		if (copy_to_user(data, &export_p2p_req, sizeof(export_p2p_req)))
+			return -EFAULT;
+		return 0;
+	}
 	case FBA_IOCTL_RESOURCE_FREE:
 		return fba_ioctl_resource_free(ctx, arg);
 	case FBA_IOCTL_ACCESS_BAR: {

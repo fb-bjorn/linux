@@ -54,6 +54,12 @@ struct res_alloc_ioctl {
 	uint64_t start; // Returned START
 };
 
+// IOCTL struct to map a P2P memory RID to an fd
+struct res_p2p_export_ioctl {
+	uint64_t source_rid; // Returned RID
+	int fd; // Returned dmabuf fd
+};
+
 // IOCTL struct to read or write data directly to device BARs.
 #define FBA_ACCESS_READ 0
 #define FBA_ACCESS_WRITE 1
@@ -374,6 +380,15 @@ struct payload_exec_ioctl {
 //   0 - Success.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_GET_LIMIT_PARAMS _IO('f', 22)
+
+// Export allocated resource
+//
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_P2P_RESOURCE_EXPORT                                          \
+	_IOWR('f', 23, struct res_p2p_export_ioctl)
 
 // Set Monitoring data
 //

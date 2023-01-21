@@ -6,6 +6,7 @@ fbaccel-y += fba_channel.o
 fbaccel-y += fba_ctx.o
 fbaccel-y += fba_device.o
 fbaccel-y += fba_dma.o
+fbaccel-y += fba_dmabuf.o
 fbaccel-y += fba_freya.o
 fbaccel-y += fba_io.o
 fbaccel-y += fba_job.o

@@ -545,6 +545,7 @@ const struct fba_cfg tenjin_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = -1,
+	.p2p_bar = -1,
 	.impl_ops = &tenjin_impl_ops,
 	.ctx_limits = {
 		.sub_cnt = CONTEXT_SUB_CAP,

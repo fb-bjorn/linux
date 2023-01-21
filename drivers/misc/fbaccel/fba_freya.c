@@ -40,6 +40,7 @@ static bool emulation_boot_timeouts;
 static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
 static int pe_idcache_disable;
 static int ecc_region_size_mb;
+static int p2p_ecc_region_size_mb;
 
 // Firmware boot parameters as a string.
 static char *freya_boot_args = "";
@@ -77,6 +78,10 @@ MODULE_PARM_DESC(
 module_param(ecc_region_size_mb, int, 0444);
 MODULE_PARM_DESC(ecc_region_size_mb,
 		 "Size of ECC region in MB (Must be multiple of 16MB)");
+
+module_param(p2p_ecc_region_size_mb, int, 0444);
+MODULE_PARM_DESC(p2p_ecc_region_size_mb,
+		 "Size of P2P ECC region in MB (Must be multiple of 16MB)");
 
 module_param(freya_boot_args, charp, 0444);
 MODULE_PARM_DESC(freya_boot_args, "Firmware boot parameters.");
@@ -279,6 +284,17 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 			"ECC region size not a multiple of 16MB, setting size to 0.");
 		fba_write_bar(fba_dev, 0, BAR_CXRAM,
 			      CXRAM_ECC_REGION_SIZE_OFFSET);
+	}
+
+	if (IS_ALIGNED(p2p_ecc_region_size_mb,
+		       DRAM_ECC_REGION_GRANULARITY_MB)) {
+		fba_write_bar(fba_dev, p2p_ecc_region_size_mb, BAR_CXRAM,
+			      CXRAM_P2P_ECC_SIZE_OFFSET);
+	} else {
+		fba_dev_warn(
+			fba_dev,
+			"P2P ECC region size not a multiple of 16MB, setting size to 0.");
+		fba_write_bar(fba_dev, 0, BAR_CXRAM, CXRAM_P2P_ECC_SIZE_OFFSET);
 	}
 }
 
@@ -593,7 +609,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
-	if ((ecc_region_size_mb != 0)) {
+	if ((ecc_region_size_mb != 0) || (p2p_ecc_region_size_mb != 0)) {
 		/* Only enable ECC if the user requested some amount of ECC protected
 		 * DRAM since turning it on automatically reduces capacity by 1/8.
 		 * Boot1 currently is not aware of the CCP boot parameters in CXRAM,
@@ -1050,6 +1066,7 @@ const struct fba_cfg freya_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
+	.p2p_bar = P2P_BAR,
 	.impl_ops = &freya_impl_ops,
 	.ctx_limits = {
 		.sub_cnt = CONTEXT_SUB_CAP,
@@ -1065,6 +1082,7 @@ const struct fba_cfg artemis_cfg = {
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
 	.host_sq_wc_bar = HOST_SQ_BAR,
+	.p2p_bar = P2P_BAR,
 	.impl_ops = &artemis_impl_ops,
 	.ctx_limits = {
 		.sub_cnt = CONTEXT_SUB_CAP,

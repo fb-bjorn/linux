@@ -16,6 +16,8 @@ static void fba_alloc_free(struct kref *ref)
 	struct fba_resource *res = alloc->resource;
 	uint64_t addr = alloc->addr;
 
+	fba_dmabuf_exit(alloc);
+
 	fba_resource_pool_free(res, addr, alloc->size);
 	fba_resource_put(res);
 
@@ -141,6 +143,26 @@ void fba_alloc_translate_teardown(struct fba_job *job)
 	job->alloc_cnt = 0;
 }
 
+static int fba_alloc_translate_p2p(struct fba_job *job, uint64_t rid,
+				   uint64_t size, uint64_t *val)
+{
+	int fd = (rid >> RID_ID_SHIFT);
+	uint64_t offset = (rid & RID_OFFS_MASK);
+	struct fba_dmabuf_attach *fba_dmabuf;
+
+	size = size & AT_DMA_SIZE_MASK;
+	fba_dmabuf = fba_translate_p2p_setup(job->ctx, fd, offset, size);
+	if (IS_ERR(fba_dmabuf))
+		return PTR_ERR(fba_dmabuf);
+
+	*val = sg_dma_address(fba_dmabuf->sgt.sgl);
+
+	job->dmabuf_cnt++;
+	list_add_tail(&fba_dmabuf->list, &job->dma_buf_list);
+
+	return 0;
+}
+
 static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 					       struct fba_job *job,
 					       uintptr_t buf_addr,
@@ -239,6 +261,18 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				*ptr = dma->prp_addr;
 				iargs[i + 1] |= AT_DMA_OPSZ | AT_DMA_PRP;
 			}
+			break;
+		}
+
+		case AT_P2P_DMA64: {
+			// P2P_DMA64 not available when last arg.
+			if (i == SUBMISSION_ENTRY_ARGS - 1)
+				return -EINVAL;
+
+			size = iargs[i + 1];
+			rc = fba_alloc_translate_p2p(job, iargs[i], size, ptr);
+			if (!rc)
+				iargs[i + 1] |= AT_DMA_OPSZ;
 			break;
 		}
 

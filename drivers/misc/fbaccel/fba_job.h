@@ -35,6 +35,7 @@ struct fba_job {
 	void *user_job_key; // Used to find matching job
 
 	uint32_t dma_cnt; // Number of DMA ops in this job.
+	uint32_t dmabuf_cnt; // Number of DMABUF ops in this job.
 	uint16_t sys_cmd_id; // Channel unique ID for this packet.
 
 	// Owned by job_alloc

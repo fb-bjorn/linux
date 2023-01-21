@@ -80,6 +80,15 @@ err_put_job:
 void fba_job_release_resources(struct fba_job *job)
 {
 	struct fba_dma *dma, *tmp;
+	struct fba_dmabuf_attach *dmabuf, *tmp2;
+
+	/*
+	 * release dmabufs before releasing allocs
+	 */
+	list_for_each_entry_safe(dmabuf, tmp2, &job->dma_buf_list, list) {
+		list_del_init(&dmabuf->list);
+		fba_translate_p2p_teardown(job->ctx, dmabuf);
+	}
 
 	if (job->allocs)
 		fba_alloc_translate_teardown(job);
