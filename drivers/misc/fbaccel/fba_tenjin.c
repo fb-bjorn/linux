@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (c) Meta Platforms, Inc. and affiliates */
+//
+// Tenjin Driver
+//
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/module.h>
+#include <linux/pci.h>
+#include <linux/types.h>
+#include <linux/bitfield.h>
+#include <linux/version.h>
+
+#include "fba_device.h"
+#include "fba_tenjin_priv.h"
+
+#define DRV_NAME "tenjin"
+
+/* Used to give each class of device it's own id space */
+static DEFINE_IDA(tenjin_ida);
+
+const struct fba_cfg tenjin_cfg = {
+	.name = DRV_NAME,
+	.devnode_ida = &tenjin_ida,
+};

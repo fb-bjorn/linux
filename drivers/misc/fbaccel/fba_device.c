@@ -241,7 +241,13 @@ static void fbaccel_remove(struct pci_dev *pdev)
 	fba_device_exit(dev);
 }
 
-static const struct pci_device_id fbaccel_ids[] = { {} };
+#define PCI_VENDOR_ID_BROADCOM 0x14e4
+#define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
+
+static const struct pci_device_id fbaccel_ids[] = {
+	{ PCI_DEVICE_DATA(BROADCOM, VIPER, &tenjin_cfg) },
+	{}
+};
 
 MODULE_DEVICE_TABLE(pci, fbaccel_ids);
 

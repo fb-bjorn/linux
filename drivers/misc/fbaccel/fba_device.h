@@ -40,6 +40,8 @@ struct fba_cfg {
 	struct ida *devnode_ida;
 };
 
+extern const struct fba_cfg tenjin_cfg;
+
 /*
  * FBA Device Object
  *
