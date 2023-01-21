@@ -294,6 +294,11 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
 		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
 
+	if (!atomic_read(&fba_dev->has_failed)) {
+		if (fba_dev->cfg->impl_ops->reset_controller)
+			(void)fba_dev->cfg->impl_ops->reset_controller(fba_dev);
+	}
+
 	fba_pci_exit(fba_dev);
 
 	fba_device_put(fba_dev);
@@ -312,6 +317,8 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	dev->pdev = pdev;
 	dev->cfg = (const struct fba_cfg *)ent->driver_data;
+
+	dev->num_retries = MAX_RETRIES;
 
 	return fba_device_init(dev);
 }

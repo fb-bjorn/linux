@@ -85,6 +85,30 @@ static inline void cxram_sideband_clearbit(struct fba_device *dev,
 	freya_write_cxram_sb(dev, value, offset);
 }
 
+// Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
+// callback is set to reset CCP and CIP. The second entry serves as a status
+// to let the driver know that the CCP CIP reset is done
+static int reset_ccp(struct fba_device *fba_dev)
+{
+	int rc;
+
+	fba_dev_info(fba_dev, "Interrupting M7 to reset CCP and CIP.");
+	set_mailbox(fba_dev, M7_MBOX_CTRL, CCP_CIP_RESET);
+	fba_dev_info(fba_dev, "Waiting for M7 to reset CCP and CIP.");
+	rc = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
+				       CCP_CIP_RESET_DONE,
+				       fba_dev->num_retries);
+	set_mailbox(fba_dev, M7_MBOX_CTRL, STATUS_RESET);
+	rc = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
+				       STATUS_RESET_DONE, fba_dev->num_retries);
+	return rc;
+}
+
+static int freya_reset_controllers(struct fba_device *fba_dev)
+{
+	return reset_ccp(fba_dev);
+}
+
 static int freya_init_priv(struct fba_device *fba_dev,
 			   const struct fbia_priv_data *data)
 {
@@ -126,6 +150,7 @@ static void freya_exit(struct fba_device *fba_dev)
 static const struct fba_impl_ops freya_impl_ops = {
 	.impl_init = freya_init,
 	.impl_exit = freya_exit,
+	.reset_controller = freya_reset_controllers,
 };
 
 const struct fba_cfg freya_cfg = {

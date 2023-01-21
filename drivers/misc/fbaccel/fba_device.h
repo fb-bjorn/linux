@@ -33,6 +33,10 @@
 
 #define BAR_CNT 6
 
+// Retry count while waiting for device to change state
+#define MAX_RETRIES 50
+#define MIN_RETRIES 5
+
 struct fba_device;
 struct fba_impl_ops;
 
@@ -65,6 +69,9 @@ struct fba_impl_ops {
 	int (*impl_init)(struct fba_device *dev);
 	/* Implementation defined exit */
 	void (*impl_exit)(struct fba_device *dev);
+
+	// Reset CCP and SCP
+	int (*reset_controller)(struct fba_device *dev);
 };
 
 #include "fba_util.h"
@@ -94,6 +101,9 @@ struct fba_device {
 	atomic_t has_failed;
 	bool exiting;
 	struct completion abort_done;
+
+	// Number of retries for state update check
+	int num_retries;
 };
 
 struct fba_device *fba_device_get(struct fba_device *fba_dev);
