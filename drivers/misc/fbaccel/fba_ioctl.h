@@ -119,13 +119,37 @@ struct get_details_ioctl {
 	uint64_t resource_cnt; // Number of resources available.
 	uint64_t context_cnt; // Number of contexts available.
 	uint64_t context_used; // Number of contexts used.
-	uint64_t reserved1;
-	uint64_t reserved2;
+	uint64_t mon_item_cnt; // Number of monitoring items definitions.
+	uint64_t mon_group_cnt; // Number of monitoring group definitions.
 	uint32_t admin_sq_fill_watermark; // AdminQ SQ fill watermark.
 	uint32_t admin_cq_fill_watermark; // AdminQ CQ fill watermark.
 	uint32_t exe_sq_fill_watermark; // ExeQ SQ fill watermark.
 	uint32_t exe_cq_fill_watermark; // ExeQ CQ fill watermark.
-	uint32_t reserved3;
+	uint32_t reserved;
+};
+
+// IOCTL struct to read items or groups definitions into data.
+struct mon_defs_ioctl {
+	void __user *items; // Buffer to hold items defs
+	uint64_t max_items_size; // items buffer size in bytes.
+	uint64_t items_bytes_written; // Number of byte written into items buffer.
+	void __user *groups; // Buffer to hold group defs
+	uint64_t max_groups_size; // groups buffer size in bytes.
+	uint64_t groups_bytes_written; // Number of byte written into groups buffer.
+};
+
+#define MON_VALUE_SIZE 124
+
+// IOCTL struct to read monitoring data for the specified item ids.
+struct mon_data_ioctl {
+	uint64_t id_count; // Number of elements in ids, data, and err arrays.
+	uint32_t __user *ids; // input: array of ids
+	// Data buffer destination. Buffer size is assumed to be
+	// id_count * MON_VALUE_SIZE
+	void __user *data;
+	// Error buffer destination. Buffer size is assumed to be
+	// id_count * sizeof(int16_t)
+	int16_t __user *errors;
 };
 
 // Enumeration for channel_type in fba_limit_params_ioctl
@@ -288,6 +312,24 @@ struct payload_exec_ioctl {
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_ACCESS_SCRATCH _IOW('f', 11, struct scratch_access_ioctl)
 
+// Read Monitoring Definitions
+//
+// Returns monitoring items and groups definitions.
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_MON_DEFS _IOWR('f', 17, struct mon_defs_ioctl)
+
+// Read Monitoring current state
+//
+// Returns the state of requested monitoring items.
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_MON_DATA _IOR('f', 18, struct mon_data_ioctl)
+
 // Unlock Secure Debug capabilities
 //
 // Downloads binary with Secure Debug certificate chain to enable debugging
@@ -316,3 +358,16 @@ struct payload_exec_ioctl {
 //   0 - Success.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_GET_LIMIT_PARAMS _IO('f', 22)
+
+// Set Monitoring data
+//
+// Sets the data of requested monitoring items.
+//
+// RETURNS:
+//   0 - Success.
+//   non-zero - Other, lower level errors.
+//   EACCES	on attempt to write to a monitoring entry that has no write callback
+//   or the values are not successfully write
+//   EINVAL for invalid ids.
+//   EFAULT failed to copy values from host
+#define FBA_IOCTL_MON_SET_DATA _IOR('f', 24, struct mon_data_ioctl)

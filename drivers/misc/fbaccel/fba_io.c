@@ -11,6 +11,9 @@
 #include "fba_ioctl.h"
 #include "fba_device.h"
 #include "fba_ctx.h"
+#include "fba_mon.h"
+
+#define MAX_MON_SET_DATA_SIZE 2048
 
 static long fba_ioctl_bar_access(struct fba_device *fba_dev,
 				 struct bar_access_ioctl *access)
@@ -275,6 +278,8 @@ static long fba_ioctl_get_details(struct fba_device *dev,
 	detail->dma_size = SAIL_DEBUG_SIZE;
 	detail->resource_cnt = dev->resource_cnt;
 	detail->context_cnt = dev->n_ctxs;
+	detail->mon_item_cnt = fba_mon_get_item_cnt(&dev->mon);
+	detail->mon_group_cnt = fba_mon_get_group_cnt(&dev->mon);
 
 	detail->state = FBA_ACTIVE;
 
@@ -401,6 +406,150 @@ static long fba_ioctl_get_limit_params(struct fba_device *dev,
 	return 0;
 }
 
+static int fba_mon_defs_ioctl(struct fba_device *dev, void __user *data)
+{
+	struct mon_defs_ioctl mon_defs_req;
+	int rv;
+
+	if (copy_from_user(&mon_defs_req, data, sizeof(mon_defs_req)))
+		return -EFAULT;
+
+	rv = fba_mon_get_defs(dev, &mon_defs_req);
+	if (rv)
+		return rv;
+
+	if (copy_to_user(data, &mon_defs_req, sizeof(mon_defs_req)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static int fba_mon_data_ioctl(struct fba_device *dev, void __user *data_req)
+{
+	struct mon_data_ioctl mon_data_req = {}; // Users's request
+	uint32_t *ids;
+	void *data;
+	int16_t *errors;
+	int rc = 0;
+	size_t data_size = 0;
+	size_t id_size = 0;
+	size_t err_size = 0;
+
+	if (copy_from_user(&mon_data_req, data_req, sizeof(mon_data_req)))
+		return -EFAULT;
+
+	if (mon_data_req.id_count == 0)
+		return 0;
+
+	id_size = mon_data_req.id_count * sizeof(*mon_data_req.ids);
+	data_size = mon_data_req.id_count * MON_VALUE_SIZE;
+	err_size = mon_data_req.id_count * sizeof(*mon_data_req.errors);
+	ids = kzalloc(id_size, GFP_KERNEL);
+	data = kzalloc(data_size, GFP_KERNEL);
+	errors = kzalloc(err_size, GFP_KERNEL);
+	if (ids == NULL || data == NULL || errors == NULL) {
+		rc = -ENOMEM;
+		goto out_free;
+	}
+
+	if (copy_from_user(ids, mon_data_req.ids, id_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	if (copy_from_user(data, mon_data_req.data, data_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	if (copy_from_user(errors, mon_data_req.errors, err_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	rc = fba_mon_get_data(dev, ids, mon_data_req.id_count, data, errors);
+	if (rc != 0)
+		goto out_free;
+
+	if (copy_to_user((void __user *)mon_data_req.ids, ids, id_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	if (copy_to_user((void __user *)mon_data_req.data, data, data_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+	if (copy_to_user((void __user *)mon_data_req.errors, errors,
+			 err_size)) {
+		rc = -EFAULT;
+		goto out_free;
+	}
+
+out_free:
+	kfree(ids);
+	kfree(data);
+	kfree(errors);
+
+	return rc;
+}
+
+static int fba_mon_data_set_ioctl(struct fba_device *dev, void __user *data_req)
+{
+	struct mon_data_ioctl mon_data_req; // Users's request
+	uint32_t *ids;
+	void *data;
+	size_t data_size = 0;
+	size_t id_size = 0;
+	int max_id_cnt = fba_mon_get_item_cnt(&dev->mon);
+	int rc = 0;
+
+	if (copy_from_user(&mon_data_req, data_req, sizeof(mon_data_req)))
+		return -EFAULT;
+
+	if (mon_data_req.id_count > max_id_cnt)
+		return -EINVAL;
+
+	if (mon_data_req.id_count == 0)
+		return 0;
+
+	id_size = mon_data_req.id_count * sizeof(*mon_data_req.ids);
+	data_size = mon_data_req.id_count * MON_VALUE_SIZE;
+	if (data_size > MAX_MON_SET_DATA_SIZE)
+		return -EINVAL;
+
+	ids = kzalloc(id_size, GFP_KERNEL);
+	data = kzalloc(data_size, GFP_KERNEL);
+
+	if (data == NULL) {
+		rc = -ENOMEM;
+		goto out_free_bufs;
+	}
+
+	if (ids == NULL) {
+		rc = -ENOMEM;
+		goto out_free_bufs;
+	}
+
+	if (copy_from_user(ids, mon_data_req.ids, id_size)) {
+		rc = -EFAULT;
+		goto out_free_bufs;
+	}
+
+	if (copy_from_user(data, mon_data_req.data, data_size)) {
+		rc = -EFAULT;
+		goto out_free_bufs;
+	}
+	rc = fba_mon_set_data(dev, ids, mon_data_req.id_count, data);
+
+out_free_bufs:
+	kfree(ids);
+	kfree(data);
+
+	return rc;
+}
+
 static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	void __user *data = (void __user *)arg;
@@ -489,6 +638,12 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		return 0;
 	}
+	case FBA_IOCTL_MON_DEFS:
+		return fba_mon_defs_ioctl(dev, data);
+	case FBA_IOCTL_MON_DATA:
+		return fba_mon_data_ioctl(dev, data);
+	case FBA_IOCTL_MON_SET_DATA:
+		return fba_mon_data_set_ioctl(dev, data);
 	case FBA_IOCTL_SET_STATE:
 		/* No need to set state anymore, but still need side effect */
 		rc = fba_ctx_open(ctx);

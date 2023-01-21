@@ -250,6 +250,9 @@ static void fba_device_stop(struct fba_device *fba_dev)
 	struct list_head *item;
 	int i;
 
+	/* Stop polling requests */
+	fba_mon_device_stop(&fba_dev->mon);
+
 	/* Stop each context and wait for outstanding work to drain */
 	mutex_lock(&fba_dev->ctx_mtx);
 	list_for_each(item, &fba_dev->ctx_list) {
@@ -633,6 +636,12 @@ static int fba_device_fw_init(struct fba_device *dev)
 		goto err_resource_exit;
 	}
 
+	rc = fba_mon_device_init(dev);
+	if (rc) {
+		fba_dev_err(dev, "Failed initialize monitoring.");
+		goto err_resource_exit;
+	}
+
 	return 0;
 
 err_resource_exit:
@@ -649,10 +658,12 @@ static int fba_device_fw_exit(struct fba_device *fba_dev)
 	int rc;
 
 	/*
-	 * Wait for any outstanding work to complete, so that we can safely
-	 * tear down channels.
+	 * Stop monitoring/polling and wait for any outstanding work to
+	 * complete, so that we can safely tear down channels.
 	 */
 	fba_device_stop(fba_dev);
+
+	fba_mon_device_exit(&fba_dev->mon);
 
 	fba_resource_exit(fba_dev);
 
@@ -946,10 +957,14 @@ static int fba_device_init(struct fba_device *fba_dev)
 	// Driver is now available for IOCTL communication.
 	fba_dev_info(fba_dev, "Done connecting BARs.");
 
+	rc = fba_mon_init(fba_dev);
+	if (rc != 0)
+		goto err_shared_area_exit;
+
 	if (fba_dev->cfg->impl_ops->impl_init != NULL) {
 		rc = fba_dev->cfg->impl_ops->impl_init(fba_dev);
 		if (rc != 0)
-			goto err_shared_area_exit;
+			goto err_mon_exit;
 	}
 
 	fba_init_fw_filenames(fba_dev);
@@ -965,6 +980,8 @@ static int fba_device_init(struct fba_device *fba_dev)
 
 	return 0;
 
+err_mon_exit:
+	fba_mon_exit(&fba_dev->mon);
 err_shared_area_exit:
 	fba_shared_area_exit(fba_dev);
 err_pci_exit:
@@ -1004,6 +1021,8 @@ static int fba_device_exit(struct fba_device *fba_dev)
 		if (fba_dev->cfg->impl_ops->reset_controller)
 			(void)fba_dev->cfg->impl_ops->reset_controller(fba_dev);
 	}
+
+	fba_mon_exit(&fba_dev->mon);
 
 	fba_shared_area_exit(fba_dev);
 	fba_pci_exit(fba_dev);

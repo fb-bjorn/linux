@@ -229,6 +229,10 @@ int fba_resource_init(struct fba_device *fba_dev)
 	words = (uint64_t *)temp_data;
 	fba_dev->n_ctxs = words[INFO_CONTEXT_MAX_COUNT];
 	fba_dev->info_cnt = words[INFO_WORD_MAX_COUNT];
+	fba_dev->mon.src_info[SAIL_MTS_CCP].item_cnt =
+		words[INFO_MON_ITEM_COUNT];
+	fba_dev->mon.src_info[SAIL_MTS_CCP].group_cnt =
+		words[INFO_MON_GROUP_COUNT];
 	fba_dev->max_dma_segment_size = words[INFO_DMA_MAX_SEGMENT_SIZE];
 	fba_dev->platform_type = words[INFO_PLATFORM_TYPE];
 

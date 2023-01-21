@@ -20,6 +20,7 @@
 #pragma once
 
 #include "fba_ioctl.h"
+#include "fba_mon.h"
 
 #include <linux/device.h>
 #include <linux/eventfd.h>
@@ -182,6 +183,7 @@ struct fba_impl_ops {
 #include "fba_channel.h"
 #include "fba_ctx.h"
 #include "fba_job.h"
+#include "fba_poller.h"
 #include "fba_resource.h"
 #include "fba_shared.h"
 #include "fba_util.h"
@@ -247,6 +249,8 @@ struct fba_device {
 	struct mutex ctx_mtx; // Mutex to protect ctx_list
 	struct list_head ctx_list; // Contexts on this device.
 
+	// Monitor Work Queue thread.
+	struct workqueue_struct *monitor_thread;
 	struct workqueue_struct *msix_wq; // queue for msix triggered work
 
 	atomic_t has_failed;
@@ -257,6 +261,19 @@ struct fba_device {
 	atomic_t waiting_for_load;
 	char boot1_filename[NAME_MAX + 1];
 	char boot2_filename[NAME_MAX + 1];
+
+	// DDR memory un-correctable error detected
+	bool ddr_uce_detected;
+	// Internal memory un-correctable error detected
+	bool internal_mem_uce_detected;
+	// Device Fatal error detected
+	bool device_fatal_err_detected;
+	// Indicates heart beat check failed
+	bool heart_beat_failed;
+	// Indicated WDT on control core failed
+	bool ccp_wdt_failed;
+
+	struct fba_mon mon;
 
 	// Admin channel command timeout value in ms
 	uint32_t admin_cmd_timeout_ms;

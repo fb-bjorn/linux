@@ -2,8 +2,6 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
 #pragma once
 
-#include "fba_proto.h"
-
 /*
  * FBA Channel
  *
