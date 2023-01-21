@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "fba_ioctl.h"
+
 #include <linux/device.h>
 #include <linux/eventfd.h>
 #include <linux/mutex.h>

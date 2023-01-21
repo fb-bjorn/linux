@@ -7,6 +7,7 @@
 #include <linux/string.h>
 #include <linux/types.h>
 
+#include "fba_ioctl.h"
 #include "fba_device.h"
 #include "fba_admin.h"
 
