@@ -14,6 +14,7 @@
 #include <linux/version.h>
 
 #include "fba_device.h"
+#include "fba_proto.h"
 
 #define FBA_MAX_DEVS 32
 

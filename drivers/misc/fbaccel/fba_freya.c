@@ -19,6 +19,7 @@
 
 #include "fba_freya_priv.h"
 #include "fba_device.h"
+#include "fba_proto.h"
 
 #define FREYA_DRV_NAME "freya"
 

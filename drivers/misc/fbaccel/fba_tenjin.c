@@ -14,6 +14,7 @@
 
 #include "fba_device.h"
 #include "fba_tenjin_priv.h"
+#include "fba_proto.h"
 
 #define DRV_NAME "tenjin"
 
