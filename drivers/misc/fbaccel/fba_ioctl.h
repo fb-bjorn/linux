@@ -41,8 +41,16 @@ struct res_alloc_ioctl {
 	uint64_t start; // Returned START
 };
 
+// IOCTL struct to read or write data directly to device BARs.
 #define FBA_ACCESS_READ 0
 #define FBA_ACCESS_WRITE 1
+struct bar_access_ioctl {
+	uint32_t __user *data; // Read destination, or write source.
+	uint64_t offset; // Word-aligned byte offset into bar to access.
+	uint32_t len; // Word-multiple number of bytes to read/write.
+	uint8_t bar; // Driver bar index.
+	uint8_t type; // Read or write.
+};
 
 struct scratch_access_ioctl {
 	void __user *data; // Read destination, or write source.
@@ -153,6 +161,16 @@ struct payload_exec_ioctl {
 //   -EINVAL - Bad RID provided.
 //   non-zero - Other, lower level errors.
 #define FBA_IOCTL_RESOURCE_FREE _IOWR('f', 3, uint64_t)
+
+// Read or write 32-bit words at the given driver bar index and offset.
+//
+// RETURNS:
+//   0 - Success. Read or write completed.
+//   -EINVAL - Bad input params (unaligned offset or length, out of range bar).
+//   -EFAULT - If IOCTL struct or pointers in struct are invalid.
+//   -EACCES - Unable to read struct fba_access from userspace.
+//   non-zero - Other, lower level errors.
+#define FBA_IOCTL_ACCESS_BAR _IOW('f', 5, struct bar_access_ioctl)
 
 // Read or write DMA mapped area
 //

@@ -12,6 +12,61 @@
 #include "fba_device.h"
 #include "fba_ctx.h"
 
+static long fba_ioctl_bar_access(struct fba_device *fba_dev,
+				 struct bar_access_ioctl *access)
+{
+	int rv;
+	const char *rwstr;
+	uint32_t nwords;
+	uint32_t owords;
+	uint32_t i;
+	uint32_t val;
+	uint32_t __iomem *bar_words;
+	uint64_t bar_len;
+
+	rwstr = (access->type == FBA_ACCESS_READ) ? "Read" : "Write";
+	fba_dev_dbg(fba_dev, "%s bar=%u offset=%#llx len=%#x", rwstr,
+		    access->bar, access->offset, access->len);
+
+	if ((access->bar >= BAR_CNT) || (access->len & 3) ||
+	    (access->offset & 3)) {
+		fba_dev_dbg(fba_dev, "Invalid BAR access params.");
+		return -EINVAL;
+	}
+
+	if (fba_dev->bars[access->bar] == NULL)
+		return -EINVAL;
+	bar_len = pci_resource_len(fba_dev->pdev, access->bar);
+	if (access->offset >= bar_len || access->len > bar_len - access->offset)
+		return -EINVAL;
+
+	nwords = access->len / sizeof(uint32_t);
+	owords = access->offset / sizeof(uint32_t);
+	bar_words = (uint32_t __iomem *)fba_dev->bars[access->bar];
+
+	if (access->type == FBA_ACCESS_READ) {
+		for (i = 0; i < nwords; i++) {
+			val = ioread32(&bar_words[i + owords]);
+			rv = put_user(val, &access->data[i]);
+			if (rv)
+				return rv;
+		}
+		return 0;
+	}
+	if (access->type == FBA_ACCESS_WRITE) {
+		for (i = 0; i < nwords; i++) {
+			rv = get_user(val, &access->data[i]);
+			if (rv)
+				return rv;
+			iowrite32(val, &bar_words[i + owords]);
+		}
+		return 0;
+	}
+
+	fba_dev_err(fba_dev, "Invalid access type: %u", access->type);
+	return -EINVAL;
+}
+
 static long fba_ioctl_resource_info(struct fba_device *fba_dev,
 				    struct resource_info __user *dest,
 				    size_t offs, size_t count)
@@ -267,6 +322,14 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	}
 	case FBA_IOCTL_RESOURCE_FREE:
 		return fba_ioctl_resource_free(ctx, arg);
+	case FBA_IOCTL_ACCESS_BAR: {
+		struct bar_access_ioctl bar_req;
+
+		if (copy_from_user(&bar_req, data, sizeof(bar_req)))
+			return -EFAULT;
+		rc = fba_ioctl_bar_access(dev, &bar_req);
+		return rc;
+	}
 	case FBA_IOCTL_GET_DETAILS: {
 		struct get_details_ioctl details_req;
 
