@@ -1,0 +1,9 @@
+config FBACCEL
+	tristate "Meta Accelerator Host Driver"
+	depends on PCI
+	select DMA_SHARED_BUFFER
+	select FW_LOADER
+	select GENERIC_ALLOCATOR
+	select SERIAL_CORE
+	help
+	  Driver for Meta's Accelerator silicon
