@@ -61,12 +61,13 @@ static void prf_fill_header(void **buffer)
 	header->magic = LLVM_INSTR_PROF_RAW_MAGIC_32;
 #endif
 	header->version = LLVM_VARIANT_MASK_IR_PROF | LLVM_INSTR_PROF_RAW_VERSION;
+	header->binary_ids_size = 0;
 	header->data_size = prf_data_count();
 	header->padding_bytes_before_counters = 0;
 	header->counters_size = prf_cnts_count();
 	header->padding_bytes_after_counters = 0;
 	header->names_size = prf_names_count();
-	header->counters_delta = (u64)__llvm_prf_cnts_start;
+	header->counters_delta = (u64)__llvm_prf_cnts_start - (u64)__llvm_prf_data_start;
 	header->names_delta = (u64)__llvm_prf_names_start;
 	header->value_kind_last = LLVM_INSTR_PROF_IPVK_LAST;
 
