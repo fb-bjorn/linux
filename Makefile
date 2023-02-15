@@ -827,7 +827,7 @@ endif # KBUILD_EXTMOD
 # Defaults to vmlinux, but the arch makefile usually adds further targets
 all: vmlinux
 
-CFLAGS_PGO_CLANG := -fprofile-generate
+CFLAGS_PGO_CLANG :=
 export CFLAGS_PGO_CLANG
 
 CFLAGS_GCOV	:= -fprofile-arcs -ftest-coverage
