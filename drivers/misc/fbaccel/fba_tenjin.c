@@ -377,11 +377,11 @@ static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 			       int cpu_id, enum fba_coredump_status *status)
 {
 	struct coredump_hdr hdr;
-	int rv;
+	int ret;
 
-	rv = coredump_get_hdr(fba_dev, region_id, cpu_id, &hdr);
-	if (rv != 0) {
-		WARN_ON_ONCE(rv != 0);
+	ret = coredump_get_hdr(fba_dev, region_id, cpu_id, &hdr);
+	if (ret != 0) {
+		WARN_ON_ONCE(ret != 0);
 		return;
 	}
 
@@ -472,10 +472,10 @@ static int coredump_get_size(struct fba_device *fba_dev, int region_id,
 			     int cpu_id)
 {
 	struct coredump_hdr cpu_hdr;
-	int rv;
+	int ret;
 
-	rv = coredump_get_hdr(fba_dev, region_id, cpu_id, &cpu_hdr);
-	if (rv != 0) {
+	ret = coredump_get_hdr(fba_dev, region_id, cpu_id, &cpu_hdr);
+	if (ret != 0) {
 		// Region is not initialized
 		return 0;
 	} else if (cpu_hdr.cookie != COREDUMP_COOKIE) {
@@ -571,7 +571,7 @@ int fbv_coredump_get_status(struct fba_device *fba_dev,
 	int region;
 	int cpu_id;
 	bool started = false;
-	int rv = 0;
+	int ret = 0;
 
 	coredump_status->triggered = 0;
 	coredump_status->coredump_size = 0;
@@ -593,9 +593,9 @@ int fbv_coredump_get_status(struct fba_device *fba_dev,
 	}
 
 	if (coredump_status->wait >= 0) {
-		rv = wait_for_completion_killable(&coredump->coredump_ready);
-		if (rv)
-			return rv;
+		ret = wait_for_completion_killable(&coredump->coredump_ready);
+		if (ret)
+			return ret;
 		coredump_status->triggered = 1;
 	} else {
 		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
@@ -613,7 +613,7 @@ int fbv_coredump_get_status(struct fba_device *fba_dev,
 		}
 	}
 
-	return rv;
+	return ret;
 }
 
 static int coredump_get_data(struct fba_device *fba_dev, int region_id,
@@ -642,7 +642,7 @@ int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
 	uint32_t cpu_data_size;
 	int region_id;
 	int cpu_id;
-	int rv;
+	int ret;
 
 	for (cpu_id = N_COREDUMP_CPUS - 1; cpu_id >= 0; cpu_id--) {
 		for (region_id = 0; region_id < MAX_REGION_COUNT; region_id++) {
@@ -656,16 +656,16 @@ int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
 				return -EINVAL;
 			}
 			if (cpu_data_size != 0) {
-				rv = coredump_get_data(fba_dev, region_id,
-						       cpu_id,
-						       coredump_mem + offset,
-						       cpu_data_size);
-				if (rv != 0) {
+				ret = coredump_get_data(fba_dev, region_id,
+							cpu_id,
+							coredump_mem + offset,
+							cpu_data_size);
+				if (ret != 0) {
 					fba_dev_err(
 						fba_dev,
 						"Error in reading data for region %d, cpu %d",
 						region_id, cpu_id);
-					return rv;
+					return ret;
 				}
 				offset += cpu_data_size;
 			}
@@ -681,7 +681,7 @@ fba_ioctl_get_coredump_data(struct fba_device *fba_dev,
 {
 	void *coredump_mem;
 	void __user *user = coredump_data_req->data;
-	int rc;
+	int ret;
 
 	if (coredump_data_req->size > MAX_COREDUMP_SIZE)
 		return -EINVAL;
@@ -690,21 +690,21 @@ fba_ioctl_get_coredump_data(struct fba_device *fba_dev,
 	if (!coredump_mem)
 		return -ENOMEM;
 
-	rc = fbv_coredump_get_data(fba_dev, coredump_mem,
-				   coredump_data_req->size);
-	if (rc < 0)
+	ret = fbv_coredump_get_data(fba_dev, coredump_mem,
+				    coredump_data_req->size);
+	if (ret < 0)
 		goto out_free_coredump_mem;
 
-	if (copy_to_user(user, coredump_mem, rc)) {
-		rc = -EFAULT;
+	if (copy_to_user(user, coredump_mem, ret)) {
+		ret = -EFAULT;
 		goto out_free_coredump_mem;
 	}
-	coredump_data_req->size = rc;
-	rc = 0;
+	coredump_data_req->size = ret;
+	ret = 0;
 
 out_free_coredump_mem:
 	kfree(coredump_mem);
-	return rc;
+	return ret;
 }
 
 static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
@@ -712,7 +712,7 @@ static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	struct fba_ctx *ctx = fp->private_data;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	void __user *data = (void __user *)arg;
-	long rc;
+	long ret;
 
 	switch (cmd) {
 	case FBA_IOCTL_GET_COREDUMP_STATUS: {
@@ -722,9 +722,9 @@ static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(struct coredump_status_ioctl))) {
 			return -EFAULT;
 		}
-		rc = fbv_coredump_get_status(fba_dev, &coredump_status_req);
-		if (rc != 0)
-			return rc;
+		ret = fbv_coredump_get_status(fba_dev, &coredump_status_req);
+		if (ret != 0)
+			return ret;
 		if (copy_to_user(data, &coredump_status_req,
 				 sizeof(struct coredump_status_ioctl)))
 			return -EFAULT;
@@ -737,14 +737,14 @@ static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(struct get_coredump_ioctl))) {
 			return -EFAULT;
 		}
-		rc = fba_ioctl_get_coredump_data(fba_dev, &coredump_data_req);
-		if (rc != 0)
-			return rc;
+		ret = fba_ioctl_get_coredump_data(fba_dev, &coredump_data_req);
+		if (ret != 0)
+			return ret;
 
 		if (copy_to_user(data, &coredump_data_req,
 				 sizeof(struct get_coredump_ioctl)))
-			rc = -EFAULT;
-		return rc;
+			ret = -EFAULT;
+		return ret;
 	}
 	default:
 		return -EINVAL;
@@ -984,18 +984,18 @@ out_free_buf:
 
 static int tenjin_boot_ccp(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	/* Assume APP FW is booted if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
-	rc = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
-				fba_dev->num_retries);
-	if (rc < 0)
+	ret = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+				 fba_dev->num_retries);
+	if (ret < 0)
 		fba_dev_err(fba_dev, "CCP boot failed");
 
-	return rc;
+	return ret;
 }
 
 static bool tenjin_is_secure_boot(struct fba_device *fba_dev)
@@ -1033,14 +1033,14 @@ static void tenjin_get_fw_filenames(struct fba_device *fba_dev,
 
 static int tenjin_load_firmware(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
-	rc = tenjin_boot1(fba_dev);
-	if (rc != 0)
-		return rc;
-	rc = tenjin_load_ccp(fba_dev);
-	if (rc != 0)
-		return rc;
+	ret = tenjin_boot1(fba_dev);
+	if (ret != 0)
+		return ret;
+	ret = tenjin_load_ccp(fba_dev);
+	if (ret != 0)
+		return ret;
 	return tenjin_boot_ccp(fba_dev);
 }
 

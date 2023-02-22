@@ -195,7 +195,7 @@ static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			    struct fba_submission *sub)
 {
-	int i, rc = 0;
+	int i, ret = 0;
 	uint64_t *iargs = sub->args;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 
@@ -211,7 +211,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			break;
 
 		case AT_RID:
-			rc = fba_alloc_convert_job(job, iargs[i], 0, ptr);
+			ret = fba_alloc_convert_job(job, iargs[i], 0, ptr);
 			break;
 
 		case AT_RID_ARG32:
@@ -220,7 +220,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				return -EINVAL;
 
 			size = iargs[i + 1] & 0xFFFFFFFF;
-			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
 			break;
 
 		case AT_ARG32_RID:
@@ -228,7 +228,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			if (i == 0)
 				return -EINVAL;
 			size = iargs[i - 1] >> 32;
-			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
 			break;
 
 		case AT_ARG64_RID:
@@ -238,7 +238,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			size = iargs[i - 1];
 			if ((size & AT_DMA_OPSZ))
 				size = size & AT_DMA_SIZE_MASK;
-			rc = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
 			break;
 
 		case AT_VA_DMA64: {
@@ -251,7 +251,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			size = iargs[i + 1];
 			dma = fba_alloc_translate_dma(ctx, job, iargs[i], size);
 			if (IS_ERR(dma)) {
-				rc = PTR_ERR(dma);
+				ret = PTR_ERR(dma);
 				break;
 			}
 			if (dma->map_cnt == 1 && !test_force_prp) {
@@ -270,8 +270,8 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				return -EINVAL;
 
 			size = iargs[i + 1];
-			rc = fba_alloc_translate_p2p(job, iargs[i], size, ptr);
-			if (!rc)
+			ret = fba_alloc_translate_p2p(job, iargs[i], size, ptr);
+			if (!ret)
 				iargs[i + 1] |= AT_DMA_OPSZ;
 			break;
 		}
@@ -281,10 +281,10 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				    (int)arg_type);
 			return -EINVAL;
 		}
-		if (rc != 0)
+		if (ret != 0)
 			break;
 	}
-	return rc;
+	return ret;
 }
 
 /* Map the provided addr (in resource space) to its virtual address offset. */

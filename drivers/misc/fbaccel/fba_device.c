@@ -118,14 +118,14 @@ static ssize_t boot_mode_store(struct device *dev,
 			       size_t count)
 {
 	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
-	int err;
+	int ret;
 
 	buf = skip_spaces(buf);
 
 	/* Use device private method if we have one */
 	if (fba_dev->cfg->impl_ops->set_boot_mode != NULL) {
-		err = fba_dev->cfg->impl_ops->set_boot_mode(fba_dev, buf);
-		return (err == 0) ? count : err;
+		ret = fba_dev->cfg->impl_ops->set_boot_mode(fba_dev, buf);
+		return (ret == 0) ? count : ret;
 	}
 
 	/* Otherwise accept only "normal" setting */
@@ -305,12 +305,12 @@ static int fba_device_alloc_queue(struct fba_device *fba_dev,
 				  enum sail_regs sail_q, size_t q_size,
 				  uint32_t bdes)
 {
-	int rc;
+	int ret;
 
 	if (bdes & host_queue_mask) {
-		rc = fba_shared_alloc_coherent(fba_dev, area, q_size);
-		if (rc)
-			return rc;
+		ret = fba_shared_alloc_coherent(fba_dev, area, q_size);
+		if (ret)
+			return ret;
 
 		set_mailbox64(fba_dev, sail_q, area->addr);
 	} else {
@@ -391,17 +391,17 @@ static int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
 static int fba_device_msix_init(struct fba_device *fba_dev)
 {
 	struct pci_dev *pdev = fba_dev->pdev;
-	int rc, msix_cnt;
+	int ret, msix_cnt;
 
 	msix_cnt = CHANNEL_MSIX_VECTOR_BASE + fba_dev->channel_total;
-	rc = pci_alloc_irq_vectors(pdev, msix_cnt, msix_cnt, PCI_IRQ_MSIX);
-	if (rc < 0 || rc != msix_cnt) {
+	ret = pci_alloc_irq_vectors(pdev, msix_cnt, msix_cnt, PCI_IRQ_MSIX);
+	if (ret < 0 || ret != msix_cnt) {
 		fba_dev_err(fba_dev, "Failed to allocate IRQ vectors.");
-		if (rc >= 0) {
-			rc = -ENOSPC;
+		if (ret >= 0) {
+			ret = -ENOSPC;
 			pci_free_irq_vectors(pdev);
 		}
-		return rc;
+		return ret;
 	}
 
 	return 0;
@@ -429,7 +429,7 @@ static void fba_device_uart_register(struct fba_device *fba_dev)
 static int fba_device_usoc_init(struct fba_device *fba_dev)
 {
 	void __iomem *usoc_regs;
-	int rv = 0;
+	int ret = 0;
 
 	if (fba_dev->cfg->usoc_bar >= 0) {
 		usoc_regs = fba_util_get_bar_ptr(
@@ -445,13 +445,13 @@ static int fba_device_usoc_init(struct fba_device *fba_dev)
 			fba_dev->cfg->usoc_msi_irq_ds,
 			fba_dev->cfg->usoc_msi_irq_us);
 		if (IS_ERR(fba_dev->usoc_dev)) {
-			rv = PTR_ERR(fba_dev->usoc_dev);
+			ret = PTR_ERR(fba_dev->usoc_dev);
 			fba_dev->usoc_dev = NULL;
 			fba_dev_err(fba_dev, "Failed to register usoc.");
 		}
 	}
 
-	return rv;
+	return ret;
 }
 
 static void fba_device_fw_setup_ptrs(struct fba_device *fba_dev)
@@ -473,7 +473,7 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 	uint32_t strm = get_mailbox(fba_dev, SAIL_STRM);
 	uint32_t pkt_size = get_mailbox(fba_dev, SAIL_PKT_SIZE);
 	size_t q_size;
-	int rc, i;
+	int ret, i;
 
 	fba_dev->channel_cnt = SAIL_CDES_CNUM(cdes);
 	if (fba_dev->channel_cnt > MAX_CHANNELS)
@@ -519,19 +519,19 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 		 fba_dev->streaming_channel_cnt *
 			 fba_dev->streaming_channel_entries *
 			 SAIL_CDES_SQES(cdes);
-	rc = fba_device_alloc_queue(fba_dev, &fba_dev->sqs_area, SAIL_BDES_HSQ,
-				    SAIL_SQAL, q_size, bdes);
-	if (rc)
-		return rc;
+	ret = fba_device_alloc_queue(fba_dev, &fba_dev->sqs_area, SAIL_BDES_HSQ,
+				     SAIL_SQAL, q_size, bdes);
+	if (ret)
+		return ret;
 
 	// Allocate enough space for all completion queues.
 	q_size = SAIL_CQ_BYTES(cdes) +
 		 fba_dev->streaming_channel_cnt *
 			 fba_dev->streaming_channel_entries *
 			 SAIL_CDES_CQES(cdes);
-	rc = fba_device_alloc_queue(fba_dev, &fba_dev->cqs_area, SAIL_BDES_HCQ,
-				    SAIL_CQAL, q_size, bdes);
-	if (rc)
+	ret = fba_device_alloc_queue(fba_dev, &fba_dev->cqs_area, SAIL_BDES_HCQ,
+				     SAIL_CQAL, q_size, bdes);
+	if (ret)
 		goto err_free_sq;
 
 	cqinfo.size = fba_dev->channel_entries * SAIL_CDES_CQES(cdes);
@@ -544,8 +544,8 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 	sqinfo.offset = 0;
 
 	/* Allocate MSIX vectors now that we know the number of channels */
-	rc = fba_device_msix_init(fba_dev);
-	if (rc != 0)
+	ret = fba_device_msix_init(fba_dev);
+	if (ret != 0)
 		goto err_free_cq;
 
 	/* Initialize channels */
@@ -569,9 +569,9 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 			max_subs = fba_dev->streaming_channel_max_packet_size;
 		}
 
-		rc = fba_channel_init(fba_dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
-				      &sqinfo, &cqinfo, limits, max_subs);
-		if (rc)
+		ret = fba_channel_init(fba_dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
+				       &sqinfo, &cqinfo, limits, max_subs);
+		if (ret)
 			goto err_exit_channels;
 
 		sqinfo.offset += sqinfo.size;
@@ -592,7 +592,7 @@ err_free_cq:
 err_free_sq:
 	fba_shared_free(fba_dev, &fba_dev->sqs_area);
 
-	return rc;
+	return ret;
 }
 
 /* XXX - make this into a module parameter */
@@ -648,16 +648,16 @@ void fba_device_signal_coredump_done(struct fba_device *fba_dev)
 
 static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 {
-	int i, rc = 0;
+	int i, ret = 0;
 
 	if (!atomic_read(&fba_dev->has_failed)) {
 		// disable sail through mailbox registers
 		set_mailbox(fba_dev, SAIL_CTRL, SAIL_DISABLED);
 		/* Use _nobail so we do actually wait for state change. */
-		rc = fba_wait_for_state_nobail(fba_dev, SAIL_STAT,
-					       SAIL_DISABLED,
-					       fba_dev->num_retries);
-		if (rc) {
+		ret = fba_wait_for_state_nobail(fba_dev, SAIL_STAT,
+						SAIL_DISABLED,
+						fba_dev->num_retries);
+		if (ret) {
 			fba_device_abort(fba_dev, "disable device failed");
 			fba_dev_err(fba_dev, "Failed to disable device.");
 		}
@@ -677,7 +677,7 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 	fba_shared_free(fba_dev, &fba_dev->cqs_area);
 	fba_shared_free(fba_dev, &fba_dev->sqs_area);
 
-	return rc;
+	return ret;
 }
 
 static uint32_t get_admin_command_timeout(struct fba_device *fba_dev)
@@ -687,7 +687,7 @@ static uint32_t get_admin_command_timeout(struct fba_device *fba_dev)
 
 static int fba_device_enable_sail(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	/*
 	 * Once we trigger enable of SAIL, we have to avoid touching the device
@@ -696,23 +696,23 @@ static int fba_device_enable_sail(struct fba_device *fba_dev)
 	 * us know it is safe to proceed.
 	 */
 	set_mailbox(fba_dev, SAIL_CTRL, SAIL_ENABLED);
-	rc = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
-				 fba_dev->num_retries);
-	if (rc) {
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
 		fba_dev_err(fba_dev,
 			    "Failed waiting for status memory signature.");
-		return rc;
+		return ret;
 	}
 	// Resetting the ACK signal
 	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
 			  sizeof(uint32_t));
 
-	rc = fba_wait_for_state(fba_dev, SAIL_STAT, SAIL_ENABLED,
-				fba_dev->num_retries);
-	if (rc)
+	ret = fba_wait_for_state(fba_dev, SAIL_STAT, SAIL_ENABLED,
+				 fba_dev->num_retries);
+	if (ret)
 		fba_dev_err(fba_dev, "Failed waiting for state %d.", SAIL_STAT);
 
-	return rc;
+	return ret;
 }
 
 /* Setup some defaults once we know platform type */
@@ -737,14 +737,14 @@ static void fba_device_fw_setup_platform(struct fba_device *fba_dev)
 /* Finish device setup once firmware is ready. */
 static int fba_device_fw_init(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
-	rc = fba_device_fw_channel_init(fba_dev);
-	if (rc)
-		return rc;
+	ret = fba_device_fw_channel_init(fba_dev);
+	if (ret)
+		return ret;
 
-	rc = fba_device_enable_sail(fba_dev);
-	if (rc)
+	ret = fba_device_enable_sail(fba_dev);
+	if (ret)
 		goto err_channel_exit;
 
 	fba_device_uart_register(fba_dev);
@@ -758,16 +758,16 @@ static int fba_device_fw_init(struct fba_device *fba_dev)
 		fba_dev->logger_dev = NULL;
 
 	// Setup Resources
-	rc = fba_resource_init(fba_dev);
-	if (rc) {
+	ret = fba_resource_init(fba_dev);
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to init resources.");
 		goto err_channel_exit;
 	}
 
 	fba_device_fw_setup_platform(fba_dev);
 
-	rc = fba_admin_time_set(fba_dev, ktime_get_real());
-	if (rc) {
+	ret = fba_admin_time_set(fba_dev, ktime_get_real());
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to set device time.");
 		goto err_resource_exit;
 	}
@@ -776,8 +776,8 @@ static int fba_device_fw_init(struct fba_device *fba_dev)
 	if (fba_dev->cfg->impl_ops->coredump_init)
 		fba_dev->cfg->impl_ops->coredump_init(fba_dev);
 
-	rc = fba_mon_device_init(fba_dev);
-	if (rc) {
+	ret = fba_mon_device_init(fba_dev);
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed initialize monitoring.");
 		goto err_resource_exit;
 	}
@@ -791,13 +791,13 @@ err_resource_exit:
 err_channel_exit:
 	fba_device_fw_channel_exit(fba_dev);
 
-	return rc;
+	return ret;
 }
 
 /* Tear down firmware-related device state */
 static int fba_device_fw_exit(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	/*
 	 * Stop monitoring/polling and wait for any outstanding work to
@@ -809,9 +809,9 @@ static int fba_device_fw_exit(struct fba_device *fba_dev)
 
 	fba_resource_exit(fba_dev);
 
-	rc = fba_device_fw_channel_exit(fba_dev);
+	ret = fba_device_fw_channel_exit(fba_dev);
 
-	return rc;
+	return ret;
 }
 
 static void fba_device_free(struct kref *kref)
@@ -865,22 +865,22 @@ static void fba_pci_exit(struct fba_device *fba_dev)
 static int fba_pci_init(struct fba_device *fba_dev)
 {
 	struct pci_dev *pdev = fba_dev->pdev;
-	int rc, i;
+	int ret, i;
 
-	rc = pci_enable_device(pdev);
-	if (rc) {
+	ret = pci_enable_device(pdev);
+	if (ret) {
 		fba_dev_err(fba_dev, "Cannot enable PCI device.");
-		return rc;
+		return ret;
 	}
 
-	rc = pci_request_regions(pdev, fba_dev->cfg->name);
-	if (rc) {
+	ret = pci_request_regions(pdev, fba_dev->cfg->name);
+	if (ret) {
 		fba_dev_err(fba_dev, "Cannot obtain PCI resources.");
 		goto err_disable_device;
 	}
 
-	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
-	if (rc) {
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to set DMA mask.");
 		goto err_release_regions;
 	}
@@ -893,9 +893,9 @@ static int fba_pci_init(struct fba_device *fba_dev)
 	pci_enable_pcie_error_reporting(pdev);
 
 	// Disable relaxed ordering on the device.
-	rc = pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
-					PCI_EXP_DEVCTL_RELAX_EN);
-	if (rc) {
+	ret = pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
+					 PCI_EXP_DEVCTL_RELAX_EN);
+	if (ret) {
 		fba_dev_err(
 			fba_dev,
 			"Failed to disable relaxed ordering on PCIe device.");
@@ -915,7 +915,7 @@ static int fba_pci_init(struct fba_device *fba_dev)
 
 		if (fba_dev->bars[i] == NULL) {
 			fba_dev_err(fba_dev, "Failed to map BAR %d.", i);
-			rc = -ENOSPC;
+			ret = -ENOSPC;
 			goto err_unmap_bars;
 		}
 	}
@@ -933,7 +933,7 @@ err_release_regions:
 err_disable_device:
 	pci_disable_device(pdev);
 
-	return rc;
+	return ret;
 }
 
 /* Free shared memory used to communicate with device */
@@ -949,7 +949,7 @@ static void fba_shared_area_exit(struct fba_device *fba_dev)
 /* Initialize shared memory used to communicate with device */
 static int fba_shared_area_init(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	// Add a dma_alloc_coherent() to provide some mapped in DMA space.
 	// We already do something like that in fba_resource to get back
@@ -958,31 +958,31 @@ static int fba_shared_area_init(struct fba_device *fba_dev)
 	// read/write into it from user space.
 
 	// Debug Area pages.
-	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->debug_area,
-				       SAIL_DEBUG_SIZE);
-	if (rc)
-		return rc;
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->debug_area,
+					SAIL_DEBUG_SIZE);
+	if (ret)
+		return ret;
 
 	// Temp Area pages.
-	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
-				       SAIL_SCRATCH_SIZE);
-	if (rc)
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
+					SAIL_SCRATCH_SIZE);
+	if (ret)
 		goto err_free_debug;
 
 	// Allocate Host Status pages.
-	rc = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
-				       SAIL_STATUS_SIZE);
-	if (rc)
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
+					SAIL_STATUS_SIZE);
+	if (ret)
 		goto err_free_scratch;
 
-	return rc;
+	return ret;
 
 err_free_scratch:
 	fba_shared_free(fba_dev, &fba_dev->scratch_area);
 err_free_debug:
 	fba_shared_free(fba_dev, &fba_dev->debug_area);
 
-	return rc;
+	return ret;
 }
 
 /* Detect secure boot and initialize firmware filenames */
@@ -1006,16 +1006,16 @@ static void fba_init_fw_filenames(struct fba_device *fba_dev)
 static void fba_async_probe(void *data, async_cookie_t cookie)
 {
 	struct fba_device *fba_dev = data;
-	int rc;
+	int ret;
 
 	if (!fba_dev->pcie_boot_en) {
-		rc = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
-					fba_dev->num_retries);
-		if (rc != 0)
+		ret = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+					 fba_dev->num_retries);
+		if (ret != 0)
 			return;
 	} else {
-		rc = fba_dev->cfg->impl_ops->load_firmware(fba_dev);
-		if (rc != 0) {
+		ret = fba_dev->cfg->impl_ops->load_firmware(fba_dev);
+		if (ret != 0) {
 			/*
 			 * Mark as failed so attempts to use the device return EIO
 			 * instead of EBUSY.
@@ -1025,8 +1025,8 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 		}
 	}
 
-	rc = fba_device_fw_init(fba_dev);
-	if (rc != 0) {
+	ret = fba_device_fw_init(fba_dev);
+	if (ret != 0) {
 		fba_dev_err(fba_dev, "Failed to enable device.");
 		return;
 	}
@@ -1037,7 +1037,7 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 
 static int fba_device_init(struct fba_device *fba_dev)
 {
-	int i, rc;
+	int i, ret;
 
 	kref_init(&fba_dev->ref);
 	spin_lock_init(&fba_dev->resources_lock);
@@ -1054,60 +1054,60 @@ static int fba_device_init(struct fba_device *fba_dev)
 	init_waitqueue_head(&fba_dev->write_q);
 	INIT_LIST_HEAD(&fba_dev->ctx_list);
 
-	rc = -ENOSPC;
+	ret = -ENOSPC;
 	mutex_lock(&fba_devices_mtx);
 	for (i = 0; i < FBA_MAX_DEVS; i++) {
 		if (fba_devices[i] == NULL) {
 			fba_dev->minor = i;
 			fba_devices[i] = fba_dev;
-			rc = 0;
+			ret = 0;
 			break;
 		}
 	}
 	mutex_unlock(&fba_devices_mtx);
-	if (rc) {
+	if (ret) {
 		dev_err(&fba_dev->pdev->dev, "Failed to allocate device ID.");
 		goto err_put_device;
 	}
 
 	fba_dev->id = ida_alloc(fba_dev->cfg->devnode_ida, GFP_KERNEL);
 	if (fba_dev->id < 0) {
-		rc = fba_dev->id;
+		ret = fba_dev->id;
 		goto err_free_minor;
 	}
 
 	fba_dev->name =
 		kasprintf(GFP_KERNEL, "%s%d", fba_dev->cfg->name, fba_dev->id);
 	if (!fba_dev->name) {
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		goto err_free_id;
 	}
 
 	fba_dev->msix_wq = alloc_workqueue(fba_dev->name, 0, 0);
 	if (!fba_dev->msix_wq) {
 		fba_dev_err(fba_dev, "Failed to create workqueue thread.");
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		goto err_free_id;
 	}
 
-	rc = fba_pci_init(fba_dev);
-	if (rc)
+	ret = fba_pci_init(fba_dev);
+	if (ret)
 		goto err_free_wq;
 
-	rc = fba_shared_area_init(fba_dev);
-	if (rc)
+	ret = fba_shared_area_init(fba_dev);
+	if (ret)
 		goto err_pci_exit;
 
 	// Driver is now available for IOCTL communication.
 	fba_dev_info(fba_dev, "Done connecting BARs.");
 
-	rc = fba_mon_init(fba_dev);
-	if (rc != 0)
+	ret = fba_mon_init(fba_dev);
+	if (ret != 0)
 		goto err_shared_area_exit;
 
 	if (fba_dev->cfg->impl_ops->impl_init != NULL) {
-		rc = fba_dev->cfg->impl_ops->impl_init(fba_dev);
-		if (rc != 0)
+		ret = fba_dev->cfg->impl_ops->impl_init(fba_dev);
+		if (ret != 0)
 			goto err_mon_exit;
 	}
 
@@ -1141,12 +1141,12 @@ err_free_minor:
 err_put_device:
 	fba_device_put(fba_dev);
 
-	return rc;
+	return ret;
 }
 
 static int fba_device_exit(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	WRITE_ONCE(fba_dev->exiting, true);
 
@@ -1163,8 +1163,8 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
 		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
 
-	rc = fba_device_fw_exit(fba_dev);
-	if (rc != 0) {
+	ret = fba_device_fw_exit(fba_dev);
+	if (ret != 0) {
 		fba_dev_err(fba_dev,
 			    "Error in deactivating the device. Continue");
 	}

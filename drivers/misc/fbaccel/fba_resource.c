@@ -123,10 +123,10 @@ struct fba_alloc *fba_resource_allocate(struct fba_resource *res, uint64_t size)
 {
 	struct fba_alloc *alloc;
 	uint64_t addr = 0;
-	int rc;
+	int ret;
 
-	rc = fba_resource_pool_alloc(res, size, &addr);
-	if (rc != 0)
+	ret = fba_resource_pool_alloc(res, size, &addr);
+	if (ret != 0)
 		return ERR_PTR(-ENOMEM);
 
 	alloc = fba_alloc_new(res, addr, size);
@@ -169,7 +169,7 @@ static struct fba_resource *build_resource(struct fba_device *fba_dev,
 {
 	int order = granularity_to_order(fba_dev, def->gran);
 	struct fba_resource *res;
-	int rc;
+	int ret;
 
 	res = kzalloc(sizeof(*res), GFP_KERNEL);
 	if (res == NULL)
@@ -182,7 +182,7 @@ static struct fba_resource *build_resource(struct fba_device *fba_dev,
 	if (res->pool == NULL) {
 		fba_dev_err(fba_dev, "Create pool w/gran %#llx failed.",
 			    def->gran);
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		goto err_free_res;
 	}
 
@@ -191,10 +191,10 @@ static struct fba_resource *build_resource(struct fba_device *fba_dev,
 	res->start = def->start;
 	res->va = va;
 
-	rc = fba_resource_pool_add(res, def->start, def->count);
-	if (rc != 0) {
+	ret = fba_resource_pool_add(res, def->start, def->count);
+	if (ret != 0) {
 		fba_dev_err(fba_dev, "Add to pool failed.");
-		rc = -EINVAL;
+		ret = -EINVAL;
 		goto err_destroy_pool;
 	}
 	return res;
@@ -204,7 +204,7 @@ err_destroy_pool:
 err_free_res:
 	kfree(res);
 
-	return ERR_PTR(rc);
+	return ERR_PTR(ret);
 }
 
 int fba_resource_init(struct fba_device *fba_dev)
@@ -217,12 +217,12 @@ int fba_resource_init(struct fba_device *fba_dev)
 	struct resource_def scratch_def;
 	size_t cnt = 0;
 	int idx, r_total;
-	int rc = -ENOMEM;
+	int ret = -ENOMEM;
 
 	// Capture current value of INFO_WORDS
-	rc = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_INFO_WORDS,
-				    INFO_WORD_FIRST, INFO_WORD_APP_START);
-	if (rc) {
+	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_INFO_WORDS,
+				     INFO_WORD_FIRST, INFO_WORD_APP_START);
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to get info words first.");
 		goto err_put_resources;
 	}
@@ -246,7 +246,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 
 	words = kzalloc(sizeof(uint64_t) * fba_dev->info_cnt, GFP_KERNEL);
 	if (words == NULL) {
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		fba_dev_err(fba_dev, "Failed to allocate info_data.");
 		goto err_put_resources;
 	}
@@ -257,12 +257,12 @@ int fba_resource_init(struct fba_device *fba_dev)
 		len = ((len + cnt) > fba_dev->info_cnt) ?
 				    fba_dev->info_cnt - cnt :
 				    len;
-		rc = fba_admin_get_cfg_data(fba_dev, temp_addr,
-					    ADMIN_GET_INFO_WORDS, cnt, len);
-		if (rc != 0) {
+		ret = fba_admin_get_cfg_data(fba_dev, temp_addr,
+					     ADMIN_GET_INFO_WORDS, cnt, len);
+		if (ret != 0) {
 			fba_dev_err(fba_dev,
 				    "Failed to get info words %d:%d = %d.",
-				    (int)cnt, (int)len, (int)rc);
+				    (int)cnt, (int)len, (int)ret);
 			goto err_put_resources;
 		}
 
@@ -271,9 +271,9 @@ int fba_resource_init(struct fba_device *fba_dev)
 	}
 
 	// Capture resource data.
-	rc = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_RESOURCES, 0,
-				    words[INFO_RESOURCE_MAX_COUNT]);
-	if (rc) {
+	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_RESOURCES, 0,
+				     words[INFO_RESOURCE_MAX_COUNT]);
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to get resource data.");
 		goto err_put_resources;
 	}
@@ -282,7 +282,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 	r_total = words[INFO_RESOURCE_MAX_COUNT] + 1;
 	resources = kcalloc(r_total, sizeof(*resources), GFP_KERNEL);
 	if (resources == NULL) {
-		rc = -ENOMEM;
+		ret = -ENOMEM;
 		goto err_put_resources;
 	}
 
@@ -296,7 +296,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 	};
 	res = build_resource(fba_dev, &scratch_def, fba_dev->scratch_area.data);
 	if (IS_ERR(res)) {
-		rc = PTR_ERR(res);
+		ret = PTR_ERR(res);
 		goto err_put_resources;
 	}
 	res->index = 0;
@@ -308,7 +308,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 
 		res = build_resource(fba_dev, &defs[idx], NULL);
 		if (IS_ERR(res)) {
-			rc = PTR_ERR(res);
+			ret = PTR_ERR(res);
 			goto err_put_resources;
 		}
 		res->index = idx + 1;
@@ -333,7 +333,7 @@ err_put_resources:
 	}
 	kfree(words);
 
-	return rc;
+	return ret;
 }
 
 void fba_resource_exit(struct fba_device *fba_dev)

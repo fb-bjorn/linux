@@ -111,15 +111,15 @@ static void fba_channel_set_cqueue_head(struct fba_device *fba_dev, int chan,
 static int fba_channel_alloc_cmd_id(struct fba_channel *chan,
 				    struct fba_channel_req *req)
 {
-	int rc;
+	int ret;
 
 	WARN_ON(!mutex_is_locked(&chan->pending_mutex));
 
-	rc = idr_alloc(&chan->cmd_ids, req, 1, MAX_CMD_ID, GFP_KERNEL);
-	if (rc < 0)
-		return rc;
+	ret = idr_alloc(&chan->cmd_ids, req, 1, MAX_CMD_ID, GFP_KERNEL);
+	if (ret < 0)
+		return ret;
 
-	req->cmd_id = rc;
+	req->cmd_id = ret;
 	return 0;
 }
 
@@ -133,7 +133,7 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 	struct fba_device *fba_dev = chan->fba_dev;
 	struct fba_queue *sq = &chan->squeue;
 	uint32_t space, head, tail;
-	int rc;
+	int ret;
 
 	WARN_ON(!mutex_is_locked(&chan->pending_mutex));
 
@@ -144,8 +144,8 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 
 	if (req->cmd_id == 0) {
 		/* We didn't have a cmd_id before, but can do it now */
-		rc = fba_channel_alloc_cmd_id(chan, req);
-		if (rc < 0) {
+		ret = fba_channel_alloc_cmd_id(chan, req);
+		if (ret < 0) {
 			/* No such luck, will need to try again later */
 			return false;
 		}
@@ -235,7 +235,7 @@ void fba_channel_init_req(struct fba_channel_req *req, size_t n_subs,
 int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 {
 	bool was_empty;
-	int rc = 0;
+	int ret = 0;
 
 	mutex_lock(&chan->pending_mutex);
 	spin_lock(&chan->lock);
@@ -244,7 +244,7 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 	if (chan->stopped) {
 		spin_unlock(&chan->lock);
 		fba_dev_err(chan->fba_dev, "channel stopped.");
-		rc = -EIO;
+		ret = -EIO;
 		goto out_unlock_pending;
 	}
 
@@ -259,7 +259,7 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 			chan->fba_dev,
 			"job exceeds size of channel (sub_cnt=%u, max=%llu)",
 			req->sub_cnt, chan->max_job_subs);
-		rc = -EINVAL;
+		ret = -EINVAL;
 		goto out_unlock_pending;
 	}
 
@@ -283,7 +283,7 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 out_unlock_pending:
 	mutex_unlock(&chan->pending_mutex);
 
-	return rc;
+	return ret;
 }
 
 /* XXX - add to constants.h? */
@@ -422,13 +422,13 @@ static int get_completion(struct fba_channel *chan, struct fba_completion *cmp)
 	struct fba_completion *cmp_array =
 		chan->cqueue.area->data + chan->cqueue.offset;
 	struct fba_completion *tmp = NULL;
-	int rv;
+	int ret;
 
 	spin_lock(&chan->lock);
 
 	tmp = &cmp_array[chan->cqueue.head % chan->cqueue.entries];
 	if (tmp->phase_tag != chan->phase) {
-		rv = -ENOENT;
+		ret = -ENOENT;
 		goto out_unlock;
 	}
 
@@ -454,11 +454,11 @@ static int get_completion(struct fba_channel *chan, struct fba_completion *cmp)
 	}
 
 	*cmp = *tmp;
-	rv = chan->cqueue.head;
+	ret = chan->cqueue.head;
 
 out_unlock:
 	spin_unlock(&chan->lock);
-	return rv;
+	return ret;
 }
 
 bool fba_channel_has_space(struct fba_channel *chan)
@@ -486,16 +486,16 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 
 	while (1) {
 		struct fba_completion cmp;
-		int rv;
+		int ret;
 
-		rv = get_completion(chan, &cmp);
-		if (rv < 0)
+		ret = get_completion(chan, &cmp);
+		if (ret < 0)
 			break;
 
 		trace_fba_channel_done(fba_dev->name, chan->chan_id,
-				       cmp.command_id, rv);
+				       cmp.command_id, ret);
 
-		cqueue_head = rv;
+		cqueue_head = ret;
 		ncmp++;
 
 		(void)fba_channel_complete(chan, &cmp);
@@ -626,7 +626,7 @@ int fba_channel_init(struct fba_device *fba_dev, int id, unsigned int irq,
 	struct fba_channel *chan = fba_get_channel(fba_dev, id);
 	uint32_t max_monitored_channel =
 		min((uint32_t)(SAIL_CHANNEL_EXE + 1), fba_dev->channel_cnt);
-	int rc;
+	int ret;
 
 	chan->fba_dev = fba_dev;
 	chan->chan_id = id;
@@ -645,15 +645,15 @@ int fba_channel_init(struct fba_device *fba_dev, int id, unsigned int irq,
 	INIT_WORK(&chan->work, work_handler);
 
 	if (id == SAIL_CHANNEL_ADMIN) {
-		rc = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
-				     chan, "%s-admin", fba_dev->name);
+		ret = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
+				      chan, "%s-admin", fba_dev->name);
 	} else {
-		rc = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
-				     chan, "%s-chan%d", fba_dev->name, id);
+		ret = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
+				      chan, "%s-chan%d", fba_dev->name, id);
 	}
-	if (rc) {
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to request IRQ %d.", irq);
-		return rc;
+		return ret;
 	}
 
 	if (id < max_monitored_channel)

@@ -134,7 +134,7 @@ error:
 struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 			    int dir, bool force_prp_ok)
 {
-	int rc = -ENOMEM;
+	int ret = -ENOMEM;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	struct device *dev = &fba_dev->pdev->dev;
 	size_t overflow;
@@ -190,28 +190,28 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 					   gup_flags, dma->pages);
 	if (dma->get_cnt != npages) {
 		if (dma->get_cnt < 0)
-			rc = dma->get_cnt;
+			ret = dma->get_cnt;
 		else
-			rc = -EFAULT;
+			ret = -EFAULT;
 		goto err_dma_free;
 	}
 	max_dma_segment_size = min(fba_dev->max_dma_segment_size,
 				   (uint64_t)FBA_MAX_SEGMENT_SIZE);
-	rc = sg_alloc_table_from_pages_segment(
+	ret = sg_alloc_table_from_pages_segment(
 		&dma->sg, dma->pages, dma->get_cnt, dma->user_addr & ~PAGE_MASK,
 		dma->size, max_dma_segment_size, GFP_KERNEL);
-	if (rc) {
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to allocate sg_table.");
 		goto err_dma_free;
 	}
 
-	rc = dma_map_sg(dev, dma->sg.sgl, dma->sg.nents, dir);
-	if (!rc) {
+	ret = dma_map_sg(dev, dma->sg.sgl, dma->sg.nents, dir);
+	if (!ret) {
 		fba_dev_err(fba_dev, "Failed to map sg.");
-		rc = -EINVAL;
+		ret = -EINVAL;
 		goto err_dma_free;
 	}
-	dma->map_cnt = rc;
+	dma->map_cnt = ret;
 
 	if (dma->map_cnt == 1 && !force_prp) {
 		dma->dma_addr = sg_dma_address(&dma->sg.sgl[0]);
@@ -219,8 +219,8 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 	}
 
 	INIT_LIST_HEAD(&dma->prp_list_head);
-	rc = generate_prp_list(dev, dma->sg.sgl, &dma->prp_list_head);
-	if (rc) {
+	ret = generate_prp_list(dev, dma->sg.sgl, &dma->prp_list_head);
+	if (ret) {
 		fba_dev_err(fba_dev, "Failed to generate prp list");
 		goto err_dma_free;
 	}
@@ -234,7 +234,7 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 err_dma_free:
 	if (dma)
 		fba_dma_free(ctx, dma);
-	return ERR_PTR(rc);
+	return ERR_PTR(ret);
 }
 
 void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma)

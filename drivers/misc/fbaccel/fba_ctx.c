@@ -184,32 +184,32 @@ bool fba_ctx_is_open(struct fba_ctx *ctx)
 int fba_ctx_open(struct fba_ctx *ctx)
 {
 	struct fba_device *fba_dev = ctx->fba_dev;
-	int rc, id;
+	int ret, id;
 
 	mutex_lock(&ctx->ctx_mtx);
 
 	if (__fba_ctx_is_open(ctx)) {
 		/* Already open, quietly do nothing. */
-		rc = 0;
+		ret = 0;
 		goto out_unlock;
 	}
 
 	if (ctx->ctx_state == FBA_CTX_STOPPED) {
 		fba_dev_err(fba_dev,
 			    "Context promotion failed: context is stopped.");
-		rc = -EIO;
+		ret = -EIO;
 		goto out_unlock;
 	}
 	id = ida_alloc_range(&fba_dev->ctx_ids, 1, fba_dev->n_ctxs, GFP_KERNEL);
 	if (id < 0) {
 		fba_dev_err(fba_dev,
 			    "Context promotion failed: context limit reached.");
-		rc = id;
+		ret = id;
 		goto out_unlock;
 	}
 
-	rc = fba_admin_create_context(fba_dev, id);
-	if (rc) {
+	ret = fba_admin_create_context(fba_dev, id);
+	if (ret) {
 		ida_free(&fba_dev->ctx_ids, id);
 		fba_dev_err(
 			fba_dev,
@@ -222,7 +222,7 @@ int fba_ctx_open(struct fba_ctx *ctx)
 
 out_unlock:
 	mutex_unlock(&ctx->ctx_mtx);
-	return rc;
+	return ret;
 }
 
 // Increment reference count to context
@@ -255,19 +255,19 @@ struct fba_ctx *fba_ctx_get_parent(struct fba_ctx *ctx)
 int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc)
 {
 	struct fba_device *fba_dev = ctx->fba_dev;
-	int rc;
+	int ret;
 
 	mutex_lock(&ctx->allocs_mutex);
-	rc = idr_alloc(&ctx->allocs_idr, fba_alloc_get(alloc), 1, 65535,
-		       GFP_KERNEL);
-	if (rc < 0) {
+	ret = idr_alloc(&ctx->allocs_idr, fba_alloc_get(alloc), 1, 65535,
+			GFP_KERNEL);
+	if (ret < 0) {
 		fba_dev_dbg(fba_dev, "Reached allocation limit for context");
 		fba_alloc_put(alloc);
-		rc = -ENOSPC;
+		ret = -ENOSPC;
 	}
 	mutex_unlock(&ctx->allocs_mutex);
 
-	return rc;
+	return ret;
 }
 
 /* remove alloc with specified id from context. */
@@ -275,21 +275,21 @@ int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id)
 {
 	struct fba_device *fba_dev = ctx->fba_dev;
 	struct fba_alloc *alloc;
-	int rc = 0;
+	int ret = 0;
 
 	mutex_lock(&ctx->allocs_mutex);
 	alloc = (struct fba_alloc *)idr_remove(&ctx->allocs_idr, id);
 	if (alloc == NULL) {
 		fba_dev_dbg(fba_dev, "Cannot remove resource. ID not found: %d",
 			    id);
-		rc = -ENOENT;
+		ret = -ENOENT;
 	}
 	mutex_unlock(&ctx->allocs_mutex);
 
 	if (alloc)
 		fba_alloc_put(alloc);
 
-	return rc;
+	return ret;
 }
 
 /* Find and reference an alloc by the given id */
@@ -380,7 +380,7 @@ void fba_ctx_wait_idle(struct fba_ctx *ctx)
 void fba_ctx_stop(struct fba_ctx *ctx)
 {
 	bool was_open;
-	int rc;
+	int ret;
 	int id;
 	struct fba_alloc *alloc;
 
@@ -403,8 +403,8 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 		// are stopped.
 		fba_admin_delete_context_begin(ctx->fba_dev, ctx->id);
 		fba_ctx_wait_idle(ctx);
-		rc = fba_admin_delete_context_end(ctx->fba_dev, ctx->id);
-		if (rc == 0)
+		ret = fba_admin_delete_context_end(ctx->fba_dev, ctx->id);
+		if (ret == 0)
 			ida_free(&ctx->fba_dev->ctx_ids, ctx->id);
 	}
 }
@@ -472,35 +472,35 @@ void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job)
 int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job)
 {
 	struct fba_device *fba_dev = ctx->fba_dev;
-	int rc;
+	int ret;
 
 	mutex_lock(&ctx->ctx_mtx);
 	if (ctx->ctx_state != FBA_CTX_OPEN) {
-		rc = -EIO;
+		ret = -EIO;
 		goto out_unlock;
 	}
 
 	// Update counters and verify we don't exceed per CTX limit.
-	rc = fba_job_inc_usage(fba_dev, &fba_dev->cfg->ctx_limits, &ctx->usage,
-			       job);
-	if (rc != 0)
+	ret = fba_job_inc_usage(fba_dev, &fba_dev->cfg->ctx_limits, &ctx->usage,
+				job);
+	if (ret != 0)
 		goto out_unlock;
 
 	// Post the job to the channel.
-	rc = fba_job_channel_post(ctx->chan, job);
-	if (rc == 0) {
+	ret = fba_job_channel_post(ctx->chan, job);
+	if (ret == 0) {
 		list_add_tail(&job->ctx_item, &ctx->sub_list);
 	} else {
 		// Posting to the firmware failed. The firmware will not
 		// dereference the job, and the application will not read it.
 		// Caller will dereference to free it.
 		fba_job_dec_usage(fba_dev, &ctx->usage, job);
-		fba_dev_err(fba_dev, "Failed add to channel, ERR=%d.", rc);
+		fba_dev_err(fba_dev, "Failed add to channel, ERR=%d.", ret);
 	}
 
 out_unlock:
 	mutex_unlock(&ctx->ctx_mtx);
-	return rc;
+	return ret;
 }
 
 int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res, void *job_key)

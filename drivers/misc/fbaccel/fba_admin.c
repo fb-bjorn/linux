@@ -32,18 +32,18 @@ static int fba_admin_packet_chan_sync(struct fba_device *fba_dev,
 	uint16_t opcode = sub->header.opcode;
 
 	long duration;
-	int rc;
+	int ret;
 
 	init_completion(&cb_data.completion);
 	fba_channel_init_req(&cb_data.req, sub_cnt, sub, fba_admin_channel_cb);
 
-	rc = fba_channel_post_req(chan, &cb_data.req);
-	if (rc < 0)
-		return rc;
+	ret = fba_channel_post_req(chan, &cb_data.req);
+	if (ret < 0)
+		return ret;
 
 	duration = msecs_to_jiffies(fba_dev->admin_cmd_timeout_ms);
-	rc = wait_for_completion_timeout(&cb_data.completion, duration);
-	if (rc == 0) {
+	ret = wait_for_completion_timeout(&cb_data.completion, duration);
+	if (ret == 0) {
 		fba_device_abort(fba_dev, "admin packet timeout");
 		fba_dev_err(fba_dev,
 			    "Timeout waiting for admin packet. opcode=%d.",
@@ -55,7 +55,7 @@ static int fba_admin_packet_chan_sync(struct fba_device *fba_dev,
 
 	if (!cb_data.completed) {
 		fba_dev_err(fba_dev, "Admin command did not complete.");
-		return rc;
+		return ret;
 	}
 
 	*status = cb_data.req.cmp.status;
@@ -77,16 +77,16 @@ int fba_admin_create_context(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
-	int rc;
+	int ret;
 
 	memset(&sub, 0, sizeof(sub));
 	sub.header.opcode = ADMIN_CREATE_CONTEXT;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
-	if (rc) {
-		fba_dev_err(fba_dev, "ADMIN_CREATE_CONTEXT failed %d.", rc);
-		return rc;
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (ret) {
+		fba_dev_err(fba_dev, "ADMIN_CREATE_CONTEXT failed %d.", ret);
+		return ret;
 	}
 	if (status != 0) {
 		fba_dev_err(fba_dev,
@@ -103,16 +103,16 @@ int fba_admin_delete_context_begin(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
-	int rc;
+	int ret;
 
 	memset(&sub, 0, sizeof(sub));
 	sub.header.opcode = ADMIN_DELETE_CONTEXT_BEGIN;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
-	if (rc) {
-		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, rc);
-		return rc;
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (ret) {
+		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, ret);
+		return ret;
 	}
 	if (status != 0) {
 		fba_dev_err(
@@ -130,16 +130,16 @@ int fba_admin_delete_context_end(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
-	int rc;
+	int ret;
 
 	memset(&sub, 0, sizeof(sub));
 	sub.header.opcode = ADMIN_DELETE_CONTEXT_END;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
-	if (rc) {
-		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, rc);
-		return rc;
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (ret) {
+		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, ret);
+		return ret;
 	}
 	if (status != 0) {
 		fba_dev_err(
@@ -158,7 +158,7 @@ int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 {
 	struct fba_submission sub;
 	uint16_t status;
-	int rc;
+	int ret;
 
 	memset(&sub, 0, sizeof(sub));
 
@@ -171,18 +171,18 @@ int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 	sub.info_words.first_word = start;
 	sub.info_words.num_words = end;
 
-	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
-	if (rc != 0) {
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (ret != 0) {
 		fba_dev_err(fba_dev, "Failed to %d get cfg data. rc=%d", opcode,
-			    rc);
+			    ret);
 	} else if (status != CS_OK) {
 		fba_dev_err(fba_dev,
 			    "Failed to %d get cfg data. rc=%d, status=%u",
-			    opcode, rc, status);
-		rc = -EIO;
+			    opcode, ret, status);
+		ret = -EIO;
 	}
 
-	return rc;
+	return ret;
 }
 
 int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
@@ -193,7 +193,7 @@ int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
 	struct device *dev = &fba_dev->pdev->dev;
 	dma_addr_t pa_dma;
 	void *va_dma;
-	int err = 0;
+	int ret = 0;
 
 	va_dma = dma_alloc_coherent(dev, size, &pa_dma, GFP_KERNEL);
 	if (va_dma == NULL)
@@ -203,20 +203,20 @@ int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
 	sub.va_dma.host_addr = pa_dma;
 	sub.va_dma.flags_size = size;
 
-	err = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 
-	if (err == 0) {
+	if (ret == 0) {
 		memcpy(dst, va_dma, size);
 	} else {
 		fba_dev_err(
 			fba_dev,
 			"%s: opcode %d failed to read from device: dst=%p size=%u err=%d.",
-			__func__, opcode, dst, size, err);
+			__func__, opcode, dst, size, ret);
 	}
 
 	dma_free_coherent(dev, size, va_dma, pa_dma);
 
-	return err;
+	return ret;
 }
 
 int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
@@ -231,7 +231,7 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 	uint16_t status;
 	void *va_dma;
 	dma_addr_t host_addr;
-	int err;
+	int ret;
 
 	va_dma = dma_alloc_coherent(dev, size, &host_addr, GFP_KERNEL);
 	if (va_dma == NULL)
@@ -240,18 +240,18 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 
 	memcpy(va_dma, dst, size);
 
-	err = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 
-	if (err != 0) {
+	if (ret != 0) {
 		fba_dev_err(
 			fba_dev,
 			"%s: opcode %d failed to write to device: dst=%p size=%u err=%d.",
-			__func__, opcode, dst, size, err);
+			__func__, opcode, dst, size, ret);
 	}
 
 	dma_free_coherent(dev, size, va_dma, host_addr);
 
-	return err;
+	return ret;
 }
 
 int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
@@ -261,22 +261,22 @@ int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 	};
 	uint16_t status;
 	int32_t rem;
-	int rc;
+	int ret;
 
 	sub.time_spec.tv_sec = div_s64_rem(time, NSEC_PER_SEC, &rem);
 	sub.time_spec.tv_nsec = rem;
 
-	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
-	if (rc || status) {
+	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
+	if (ret || status) {
 		fba_dev_err(fba_dev, "ADMIN_TIME_SET failed rc=%d status=%d",
-			    rc, status);
-		if (!rc)
-			rc = -EIO;
+			    ret, status);
+		if (!ret)
+			ret = -EIO;
 	}
 	trace_fba_time_sync(fba_dev->name, sub.time_spec.tv_sec,
 			    sub.time_spec.tv_nsec);
 
-	return rc;
+	return ret;
 }
 
 bool fba_admin_poll_channel(void *obj)
@@ -284,24 +284,24 @@ bool fba_admin_poll_channel(void *obj)
 	struct fba_channel *chan = (struct fba_channel *)obj;
 	struct fba_device *fba_dev = chan->fba_dev;
 	uint16_t status = 0;
-	int rc;
+	int ret;
 
 	if (chan == fba_get_channel(fba_dev, SAIL_CHANNEL_ADMIN)) {
-		rc = fba_admin_time_set(fba_dev, ktime_get_real());
+		ret = fba_admin_time_set(fba_dev, ktime_get_real());
 	} else {
 		struct fba_submission sub = {
 			.header.opcode = EXE_NOOP,
 		};
 
-		rc = fba_admin_packet_chan_sync(fba_dev, chan, &sub, 1,
-						&status);
+		ret = fba_admin_packet_chan_sync(fba_dev, chan, &sub, 1,
+						 &status);
 	}
 
-	if (rc || status) {
+	if (ret || status) {
 		fba_device_abort(fba_dev, "heartbeat failure");
 		fba_dev_err(fba_dev,
 			    "Heartbeat failed for channel %d rc=%d status=%d",
-			    (uint16_t)chan->chan_id, rc, status);
+			    (uint16_t)chan->chan_id, ret, status);
 		fba_dev->heart_beat_failed = true;
 		return false;
 	}

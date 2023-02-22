@@ -20,7 +20,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 	int ctx_id = fba_ctx_get_id(ctx);
 	struct fba_job *job;
 	size_t size;
-	int rc = -ENOMEM;
+	int ret = -ENOMEM;
 	int i;
 
 	if (n_subs < 1)
@@ -48,7 +48,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 
 	// User submitted packets must be copied in.
 	if (copy_from_user(job->sub_array, subs, size)) {
-		rc = -EFAULT;
+		ret = -EFAULT;
 		goto err_put_job;
 	}
 
@@ -58,8 +58,8 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 
 	fba_alloc_translate_setup(fba_dev, job, job->req.sub_cnt);
 	for (i = 0; i < job->req.sub_cnt; i++) {
-		rc = fba_alloc_translate_sub(ctx, job, &job->sub_array[i]);
-		if (rc < 0)
+		ret = fba_alloc_translate_sub(ctx, job, &job->sub_array[i]);
+		if (ret < 0)
 			goto err_put_job;
 	}
 	// Setup tail, and assign context ID.
@@ -73,7 +73,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 
 err_put_job:
 	fba_job_put(job);
-	return ERR_PTR(rc);
+	return ERR_PTR(ret);
 }
 
 // Dereference all allocs used by the job.
@@ -135,14 +135,14 @@ static void fba_job_channel_cb(bool completed, struct fba_channel_req *req)
 // Submit a job to the specified channel
 int fba_job_channel_post(struct fba_channel *chan, struct fba_job *job)
 {
-	int rc;
+	int ret;
 
 	fba_job_get(job);
-	rc = fba_channel_post_req(chan, &job->req);
-	if (rc < 0)
+	ret = fba_channel_post_req(chan, &job->req);
+	if (ret < 0)
 		fba_job_put(job);
 
-	return rc;
+	return ret;
 }
 
 // Notify anyone interested in the job and move it to

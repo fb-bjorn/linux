@@ -349,18 +349,18 @@ static void fbia_coredump_exit(struct fba_device *fba_dev)
 
 static int fbia_coredump_init(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
-	rc = fba_request_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
-			     fbia_coredump_msix_handler, fba_dev,
-			     "%s%d-coredump", fba_dev->cfg->name, fba_dev->id);
-	if (rc) {
+	ret = fba_request_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
+			      fbia_coredump_msix_handler, fba_dev,
+			      "%s%d-coredump", fba_dev->cfg->name, fba_dev->id);
+	if (ret) {
 		fba_dev_err(fba_dev, "fba_request_irq failed for tx irq");
-		return rc;
+		return ret;
 	}
 	// Only set the coredump exit function when coredump init is successful
 	fba_dev->coredump_init = true;
-	return rc;
+	return ret;
 }
 
 static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
@@ -371,11 +371,11 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 	struct fba_dma *dma;
 	uint64_t opcode =
 		AT_DMA_GET_OP(size | AT_DMA_OPSZ | AT_DMA_FROM_DEVICE);
-	int rc;
+	int ret;
 
 	mutex_lock(&fba_dev->coredump_mutex);
 	if (fba_dev->coredump_disabled) {
-		rc = -ENODEV;
+		ret = -ENODEV;
 		goto out_unlock;
 	}
 
@@ -384,7 +384,7 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 	dma = fba_dma_map(ctx, (uint64_t *)host_buf, size, DMA_FROM_DEVICE,
 			  true);
 	if (IS_ERR(dma)) {
-		rc = -EINVAL;
+		ret = -EINVAL;
 		goto out_unlock;
 	}
 
@@ -404,12 +404,12 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
 	set_mailbox(fba_dev, M7_MBOX_DMA_SUBMISSION_ENTRY, DMA_SUBMISSION);
 
-	rc = fba_wait_for_state(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY,
-				DMA_COMPLETION, WAIT_FOR_M7_DMA_COMPLETION);
+	ret = fba_wait_for_state(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY,
+				 DMA_COMPLETION, WAIT_FOR_M7_DMA_COMPLETION);
 	fba_dev_dbg(fba_dev, "Setting completion mailboxes back to zero.");
 	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
 
-	if (rc != 0) {
+	if (ret != 0) {
 		/*
 		 * Most likely the MSIX crash handler has already called
 		 * fba_device_abort, but this won't return until it's safe to
@@ -425,7 +425,7 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 out_unlock:
 	mutex_unlock(&fba_dev->coredump_mutex);
 
-	return rc;
+	return ret;
 }
 
 static uint32_t fbia_coredump_get_num_regions(struct fba_device *fba_dev)
@@ -437,12 +437,12 @@ static uint32_t fbia_coredump_get_num_regions(struct fba_device *fba_dev)
 static int fbia_coredump_get_info(struct fba_device *fba_dev,
 				  struct get_coredump_info_ioctl *coredump_info)
 {
-	int rc = 0;
+	int ret = 0;
 	uint32_t magic;
 
 	mutex_lock(&fba_dev->coredump_mutex);
 	if (fba_dev->coredump_disabled) {
-		rc = -ENODEV;
+		ret = -ENODEV;
 		goto out_unlock;
 	}
 
@@ -461,18 +461,18 @@ static int fbia_coredump_get_info(struct fba_device *fba_dev,
 out_unlock:
 	mutex_unlock(&fba_dev->coredump_mutex);
 
-	return rc;
+	return ret;
 }
 
 static int fbia_coredump_get_regions(struct fba_device *fba_dev,
 				     void *coredump_mem, uint32_t size)
 {
-	int rc;
+	int ret;
 	uint32_t regions_size;
 
 	mutex_lock(&fba_dev->coredump_mutex);
 	if (fba_dev->coredump_disabled) {
-		rc = -ENODEV;
+		ret = -ENODEV;
 		goto out_unlock;
 	}
 
@@ -483,7 +483,7 @@ static int fbia_coredump_get_regions(struct fba_device *fba_dev,
 		fba_dev_err(
 			fba_dev,
 			"Error in reading coredump region info, not enough memory to read full buffer");
-		rc = -EINVAL;
+		ret = -EINVAL;
 		goto out_unlock;
 	}
 
@@ -491,12 +491,12 @@ static int fbia_coredump_get_regions(struct fba_device *fba_dev,
 		      (void __iomem *)(fba_dev->bars[BAR_CXRAM] +
 				       CXRAM_CORE_DUMP_REGION_INFO_OFFSET),
 		      regions_size);
-	rc = regions_size;
+	ret = regions_size;
 
 out_unlock:
 	mutex_unlock(&fba_dev->coredump_mutex);
 
-	return rc;
+	return ret;
 }
 
 static uint32_t fbia_coredump_get_crc_offset(struct fba_device *fba_dev)
@@ -795,11 +795,11 @@ static int freya_boot(struct fba_device *fba_dev,
 		      enum image_location image_destination,
 		      const char *file_name, uint32_t load_timeout)
 {
-	int rc;
+	int ret;
 
-	rc = freya_download_image(fba_dev, image_destination, file_name,
-				  load_timeout);
-	if (rc == 0) {
+	ret = freya_download_image(fba_dev, image_destination, file_name,
+				   load_timeout);
+	if (ret == 0) {
 		// Signal the device to boot the new image
 		cxram_sideband_setbit(fba_dev, BOOT_CMD,
 				      SB_FW_IMAGE_TARGET_CMD_OFS);
@@ -811,7 +811,7 @@ static int freya_boot(struct fba_device *fba_dev,
 					SB_FW_UPDATE_OFS);
 	}
 
-	return rc;
+	return ret;
 }
 
 static int freya_boot1(struct fba_device *fba_dev)
@@ -948,7 +948,7 @@ static int freya_load_ccp(struct fba_device *fba_dev)
 
 static int freya_boot_ccp(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 	int retry_limit;
 	struct freya_priv *priv = fba_dev->impl_priv;
 
@@ -958,11 +958,12 @@ static int freya_boot_ccp(struct fba_device *fba_dev)
 
 	retry_limit = priv->boot_timeouts->wait_for_ccp_boot_retries;
 
-	rc = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC, retry_limit);
-	if (rc < 0)
+	ret = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+				 retry_limit);
+	if (ret < 0)
 		fba_dev_err(fba_dev, "CCP boot failed");
 
-	return rc;
+	return ret;
 }
 
 static int freya_secure_dbg_unlock(struct fba_device *fba_dev)
@@ -1057,12 +1058,12 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv = fba_dev->impl_priv;
 	enum freya_boot_mode boot_mode;
-	int rc;
+	int ret;
 
 	boot_mode = READ_ONCE(priv->boot_mode);
-	rc = freya_boot1(fba_dev);
-	if (rc != 0)
-		return rc;
+	ret = freya_boot1(fba_dev);
+	if (ret != 0)
+		return ret;
 
 	if (boot_mode == FREYA_BOOT_MBIST) {
 		(void)freya_load_mbist(fba_dev);
@@ -1072,9 +1073,9 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 		return -ENODEV;
 	}
 
-	rc = freya_load_ccp(fba_dev);
-	if (rc != 0)
-		return rc;
+	ret = freya_load_ccp(fba_dev);
+	if (ret != 0)
+		return ret;
 	return freya_boot_ccp(fba_dev);
 }
 
@@ -1083,7 +1084,7 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 // to let the driver know that the CCP CIP reset is done
 static int reset_ccp(struct fba_device *fba_dev)
 {
-	int rc;
+	int ret;
 
 	if (!fba_dev->pcie_boot_en)
 		return 0;
@@ -1091,13 +1092,14 @@ static int reset_ccp(struct fba_device *fba_dev)
 	fba_dev_info(fba_dev, "Interrupting M7 to reset CCP and CIP.");
 	set_mailbox(fba_dev, M7_MBOX_CTRL, CCP_CIP_RESET);
 	fba_dev_info(fba_dev, "Waiting for M7 to reset CCP and CIP.");
-	rc = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
-				       CCP_CIP_RESET_DONE,
-				       fba_dev->num_retries);
+	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
+					CCP_CIP_RESET_DONE,
+					fba_dev->num_retries);
 	set_mailbox(fba_dev, M7_MBOX_CTRL, STATUS_RESET);
-	rc = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
-				       STATUS_RESET_DONE, fba_dev->num_retries);
-	return rc;
+	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
+					STATUS_RESET_DONE,
+					fba_dev->num_retries);
+	return ret;
 }
 
 static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
@@ -1106,7 +1108,7 @@ static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
 	struct get_coredump_region_ioctl coredump_region_req;
 	void __user *user;
 	void *coredump_mem;
-	long rc;
+	long ret;
 
 	if (copy_from_user(&coredump_region_req, data,
 			   sizeof(struct get_coredump_region_ioctl)))
@@ -1117,26 +1119,26 @@ static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
 	if (!coredump_mem)
 		return -ENOMEM;
 
-	rc = fbia_coredump_get_regions(fba_dev, coredump_mem,
-				       coredump_region_req.size);
-	if (rc < 0)
+	ret = fbia_coredump_get_regions(fba_dev, coredump_mem,
+					coredump_region_req.size);
+	if (ret < 0)
 		goto out_free;
 
-	coredump_region_req.size = rc;
-	if (copy_to_user(user, coredump_mem, rc)) {
-		rc = -EFAULT;
+	coredump_region_req.size = ret;
+	if (copy_to_user(user, coredump_mem, ret)) {
+		ret = -EFAULT;
 		goto out_free;
 	}
 	if (copy_to_user(data, &coredump_region_req,
 			 sizeof(struct get_coredump_region_ioctl))) {
-		rc = -EFAULT;
+		ret = -EFAULT;
 		goto out_free;
 	}
-	rc = 0;
+	ret = 0;
 
 out_free:
 	kfree(coredump_mem);
-	return rc;
+	return ret;
 }
 
 static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
@@ -1144,7 +1146,7 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	struct fba_ctx *ctx = fp->private_data;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	void __user *data = (void __user *)arg;
-	long rc;
+	long ret;
 
 	switch (cmd) {
 	case FBA_IOCTL_GET_COREDUMP_INFO: {
@@ -1153,9 +1155,9 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&coredump_info_req, data,
 				   sizeof(struct get_coredump_info_ioctl)))
 			return -EFAULT;
-		rc = fbia_coredump_get_info(fba_dev, &coredump_info_req);
-		if (rc != 0)
-			return rc;
+		ret = fbia_coredump_get_info(fba_dev, &coredump_info_req);
+		if (ret != 0)
+			return ret;
 		if (copy_to_user(data, &coredump_info_req,
 				 sizeof(struct get_coredump_info_ioctl)))
 			return -EFAULT;
@@ -1170,7 +1172,7 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&get_coredump_region_data, data,
 				   sizeof(get_coredump_region_data)))
 			return -EFAULT;
-		rc = fbia_coredump_get_region_data(
+		ret = fbia_coredump_get_region_data(
 			ctx, get_coredump_region_data.size,
 			(uintptr_t)get_coredump_region_data.host_buf,
 			get_coredump_region_data.device_addr);
@@ -1179,7 +1181,7 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 			/* Signal fba_device_abort() to stop waiting */
 			fba_device_signal_coredump_done(fba_dev);
 		}
-		return rc;
+		return ret;
 	}
 	case FBA_IOCTL_SECURE_DBG_UNLOCK:
 		return freya_secure_dbg_unlock(fba_dev);
@@ -1245,7 +1247,7 @@ static int freya_init_priv(struct fba_device *fba_dev,
 			   const struct fbia_priv_data *data)
 {
 	struct freya_priv *priv;
-	int rc;
+	int ret;
 
 	priv = kzalloc(sizeof(struct freya_priv), GFP_KERNEL);
 	if (priv == NULL)
@@ -1254,11 +1256,11 @@ static int freya_init_priv(struct fba_device *fba_dev,
 	priv->data = data;
 	fba_dev->impl_priv = priv;
 
-	rc = freya_poller_init(fba_dev);
-	if (rc != 0) {
-		fba_dev_err(fba_dev, "freya_poller_init() failed with %d", rc);
+	ret = freya_poller_init(fba_dev);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "freya_poller_init() failed with %d", ret);
 		kfree(fba_dev->impl_priv);
-		return rc;
+		return ret;
 	}
 	mutex_init(&priv->download_mtx);
 
@@ -1316,11 +1318,11 @@ static const struct fbia_priv_data artemis_data = {
 static int freya_init(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv;
-	int rc;
+	int ret;
 
-	rc = freya_init_priv(fba_dev, &freya_data);
-	if (rc != 0)
-		return rc;
+	ret = freya_init_priv(fba_dev, &freya_data);
+	if (ret != 0)
+		return ret;
 
 	priv = fba_dev->impl_priv;
 	priv->cxram_upgrade_ofs =
@@ -1334,12 +1336,12 @@ static int freya_init(struct fba_device *fba_dev)
 static int artemis_init(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv;
-	int rc;
+	int ret;
 	uint32_t hw_type;
 
-	rc = freya_init_priv(fba_dev, &artemis_data);
-	if (rc != 0)
-		return rc;
+	ret = freya_init_priv(fba_dev, &artemis_data);
+	if (ret != 0)
+		return ret;
 
 	priv = fba_dev->impl_priv;
 	priv->cxram_upgrade_ofs =
