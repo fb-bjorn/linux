@@ -37,7 +37,7 @@
 #define FBA_UART_TX_CTRL_OFFS 0
 #define FBA_UART_RX_CTRL_OFFS 1
 #define FBA_UART_IEN_OFFS 2
-#define FBA_UART_REMOTE_CTRL_OFFS 3 // remote tail + head
+#define FBA_UART_REMOTE_CTRL_OFFS 3 /* remote tail + head */
 #define FBA_UART_TX_FIFO_OFFS 4
 #define FBA_UART_RX_FIFO_OFFS 0x12
 
@@ -469,7 +469,7 @@ void fba_uart_unregister(struct fba_uart_dev *fbau)
 {
 	uart_remove_one_port(&fba_uart_uart_driver, &fbau->port);
 
-	// disable device interrupts
+	/* disable device interrupts */
 	fbau_write_mbox(fbau, 0, FBA_UART_IEN_OFFS);
 
 	fba_free_irq(fbau->fba->pdev, fbau->msi_irq_rx, fbau);

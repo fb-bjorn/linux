@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
-//
-// Tenjin Driver
-//
+/*
+ *
+ * Tenjin Driver
+ *
+ */
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/firmware.h>
@@ -17,7 +19,7 @@
 #include "fba_tenjin_priv.h"
 
 static int retry_count = -1;
-// FW boot args string
+/* FW boot args string */
 static char *tenjin_boot_args = "";
 
 module_param(retry_count, int, 0664);
@@ -36,9 +38,9 @@ static DEFINE_IDA(tenjin_ida);
 #define BAR_2 4
 
 #define COREDUMP_BAR 2
-// M7 Coredump region is at 0x20013000(DTCM), Mapped on BAR2 at offset 0x13000
+/* M7 Coredump region is at 0x20013000(DTCM), Mapped on BAR2 at offset 0x13000 */
 #define COREDUMP_M7_BAR_OFFSET 0x13000
-// RISCV coredump region follows after M7 coredump region
+/* RISCV coredump region follows after M7 coredump region */
 #define COREDUMP_CCP_BAR_OFFSET (COREDUMP_M7_BAR_OFFSET + COREDUMP_M7_SIZE)
 
 #define RISCV_BOOT_ARGS_BAR 2
@@ -59,10 +61,10 @@ static DEFINE_IDA(tenjin_ida);
 /* Fastboot request for Secure Boot Image (SBI) */
 /* mapped to CRMU_IHOST_SW_NS_PERSISTENT_REG2(0x40070408)*/
 #define BAR_CODEPUSH_SBI 0x408
-// mapped offset to reset reason register (NS_PERSISTENT_REG7)
+/* mapped offset to reset reason register (NS_PERSISTENT_REG7) */
 #define FBV_RESET_REASON_REG 0x41c
 #define FBV_RESET_REASON_MASK GENMASK(3, 0)
-// mapped to CRMU_NS_PERSISTENT_REG8 (0x40070420)
+/* mapped to CRMU_NS_PERSISTENT_REG8 (0x40070420) */
 #define BAR_QSPI_STATUS 0x420
 
 #define FB_BOOT1_STARTED 0x6
@@ -72,9 +74,9 @@ static DEFINE_IDA(tenjin_ida);
 #define FLASHER_BOOTED BIT(21)
 #define FB_BOOT1_STATUS (DDR_OPEN | FLASHER_BOOTED)
 #define FLASHER_COMPLETED (BIT(13) | BIT(14))
-// Each retry attempt sleep for 100ms(BOOT_STATUS_SLEEP)
+/* Each retry attempt sleep for 100ms(BOOT_STATUS_SLEEP) */
 #define LOAD_IMAGE_RETRY_COUNT 20
-// Each retry attempt sleep for 100ms(BOOT_STATUS_SLEEP)
+/* Each retry attempt sleep for 100ms(BOOT_STATUS_SLEEP) */
 #define BOOT1_STARTUP_RETRY_COUNT 50
 #define BOOT_STATUS_SLEEP (HZ / 10)
 #define TENJIN_M7_RESET_TIME_MS 10
@@ -101,7 +103,7 @@ static DEFINE_IDA(tenjin_ida);
 #define FW_LOADER_ACK_RCVD_ALL_DATA BIT(20)
 #define BOOT1_STATUS_THERMAL_TRAP_MODE_MASK BIT(0)
 
-// Enum defining reset reason values reported by FW
+/* Enum defining reset reason values reported by FW */
 enum fbv_reset_reason {
 	POWER_CYCLE = 0,
 	M7_MAILBOX_RESET,
@@ -146,18 +148,18 @@ static const char *const fbv_reset_reason_str[] = {
 	 (1 << L0_SYSTEM_RESET) | (1 << RISCV_WATCH_DOG_RESET) |               \
 	 (1 << UNKNOWN_RESET))
 
-// Coredump status
+/* Coredump status */
 enum fba_coredump_status {
 	FBA_COREDUMP_STATUS_NONE = 0,
-	// Driver is polling coredump area
+	/* Driver is polling coredump area */
 	FBA_COREDUMP_STATUS_POLLING,
-	// Driver detected coredump trigger from device
+	/* Driver detected coredump trigger from device */
 	FBA_COREDUMP_STATUS_STARTED,
-	// Driver detected coredump completion by device
+	/* Driver detected coredump completion by device */
 	FBA_COREDUMP_STATUS_COMPLETED,
-	// Driver timed out waiting for coredump completion
+	/* Driver timed out waiting for coredump completion */
 	FBA_COREDUMP_STATUS_TIMEDOUT,
-	// Coredump event is notified
+	/* Coredump event is notified */
 	FBA_COREDUMP_STATUS_NOTIFIED,
 };
 
@@ -191,13 +193,13 @@ static const struct coredump_region tenjin_coredump_regions[] = {
 #define MAX_COREDUMP_SIZE (COREDUMP_M7_SIZE + COREDUMP_CCP_SIZE)
 
 struct fbv_coredump {
-	// To check if coredump init is called
+	/* To check if coredump init is called */
 	uint32_t initialized;
 	bool coredump_disabled;
 
 	struct delayed_work coredump_work;
 	struct completion coredump_ready;
-	// CPU status
+	/* CPU status */
 	enum fba_coredump_status cpu_status[N_COREDUMP_CPUS];
 
 	struct fba_shared regions[MAX_REGION_COUNT][N_COREDUMP_CPUS];
@@ -266,8 +268,10 @@ static inline int tenjin_wait_for_status(struct fba_device *fba_dev,
 	return -ETIMEDOUT;
 }
 
-// This function reads the register over BAR and Checks if the bit is set
-// from the mask provided in the bit_mask.
+/*
+ * This function reads the register over BAR and Checks if the bit is set
+ * from the mask provided in the bit_mask.
+ */
 static inline int tenjin_wait_for_bit_set(struct fba_device *fba_dev,
 					  uint32_t bar, uint64_t offset,
 					  uint32_t bit_mask, uint32_t *value,
@@ -335,7 +339,7 @@ static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
 		break;
 	}
 
-	// Generate udev event KOBJ_CHANGE
+	/* Generate udev event KOBJ_CHANGE */
 	mutex_lock(&fba_dev->coredump_mutex);
 	if (!fba_dev->coredump_disabled)
 		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
@@ -346,7 +350,7 @@ static void tenjin_log_reset_reason(struct fba_device *fba_dev)
 {
 	uint32_t value;
 
-	// Read and log reset reason
+	/* Read and log reset reason */
 	value = fba_read_bar(fba_dev, BAR_0, FBV_RESET_REASON_REG);
 	value = FIELD_GET(FBV_RESET_REASON_MASK, value);
 	if (RESET_REASON_LOG_MASK & (1 << value)) {
@@ -387,12 +391,12 @@ static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 
 	switch (*status) {
 	case FBA_COREDUMP_STATUS_NONE:
-		// Check if CPU has initialized the coredump region
+		/* Check if CPU has initialized the coredump region */
 		if (hdr.cookie == COREDUMP_COOKIE)
 			*status = FBA_COREDUMP_STATUS_POLLING;
 		break;
 	case FBA_COREDUMP_STATUS_POLLING:
-		// Check if coredump is triggered by CPU
+		/* Check if coredump is triggered by CPU */
 		if (hdr.started == 1) {
 			*status = FBA_COREDUMP_STATUS_STARTED;
 
@@ -401,7 +405,7 @@ static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 		}
 		break;
 	case FBA_COREDUMP_STATUS_STARTED:
-		// Check if coredump is completed. If not then signal timeout
+		/* Check if coredump is completed. If not then signal timeout */
 		if (hdr.completed == 1)
 			*status = FBA_COREDUMP_STATUS_COMPLETED;
 		else
@@ -432,17 +436,19 @@ static void coredump_work_handler(struct work_struct *work)
 		container_of(coredump, struct tenjin_priv, coredump);
 	struct fba_device *fba_dev = priv->fba_dev;
 
-	// Check for coredump triggers from all CPUs.
-	// If any one of them has started the coredump, set a timeout and come back again.
-	// If coredump is completed or timeout reached then notify the users about the dump.
-	// Check CPU core dump status
+	/*
+	 * Check for coredump triggers from all CPUs.
+	 * If any one of them has started the coredump, set a timeout and come back again.
+	 * If coredump is completed or timeout reached then notify the users about the dump.
+	 * Check CPU core dump status
+	 */
 	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
 		cpu_status = &coredump->cpu_status[cpu_id];
 
 		coredump_check_cpu(fba_dev, 0, cpu_id, cpu_status);
 
 		if (*cpu_status == FBA_COREDUMP_STATUS_NOTIFIED) {
-			// Skip coredump polling for this CPU
+			/* Skip coredump polling for this CPU */
 			continue;
 		}
 
@@ -450,7 +456,7 @@ static void coredump_work_handler(struct work_struct *work)
 			fba_dev_err(fba_dev,
 				    "Coredump trigger detected for CPU id %d",
 				    cpu_id);
-			// Wait for the coredump to complete
+			/* Wait for the coredump to complete */
 			schedule_delayed_work(&coredump->coredump_work,
 					      COREDUMP_TIME_OUT_TIME_HZ);
 			return;
@@ -467,7 +473,7 @@ static void coredump_work_handler(struct work_struct *work)
 			      COREDUMP_POLLING_TIME_HZ);
 }
 
-// Get size of coredump region for a CPU
+/* Get size of coredump region for a CPU */
 static int coredump_get_size(struct fba_device *fba_dev, int region_id,
 			     int cpu_id)
 {
@@ -476,7 +482,7 @@ static int coredump_get_size(struct fba_device *fba_dev, int region_id,
 
 	ret = coredump_get_hdr(fba_dev, region_id, cpu_id, &cpu_hdr);
 	if (ret != 0) {
-		// Region is not initialized
+		/* Region is not initialized */
 		return 0;
 	} else if (cpu_hdr.cookie != COREDUMP_COOKIE) {
 		fba_dev_dbg(
@@ -520,8 +526,10 @@ int fbv_coredump_init(struct fba_device *fba_dev)
 	struct fba_shared *region;
 	int cpu_id;
 
-	// Called from probe()
-	// Only initialize the device allocated region here.
+	/*
+	 * Called from probe()
+	 * Only initialize the device allocated region here.
+	 */
 	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
 		region = &coredump->regions[HOST_REGION][cpu_id];
 		memset(region, 0, sizeof(struct fba_shared));
@@ -549,7 +557,7 @@ void fbv_coredump_exit(struct fba_device *fba_dev)
 	struct fba_shared *region;
 	int cpu_id;
 
-	// Called from remove()
+	/* Called from remove() */
 	if (coredump->initialized) {
 		cancel_delayed_work_sync(&coredump->coredump_work);
 		coredump_notify(fba_dev);
@@ -581,7 +589,7 @@ int fbv_coredump_get_status(struct fba_device *fba_dev,
 			started = true;
 	}
 
-	// Coredump polling is not started
+	/* Coredump polling is not started */
 	if (!started) {
 		fba_dev_err(
 			fba_dev,
@@ -649,7 +657,7 @@ int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
 			cpu_data_size =
 				coredump_get_size(fba_dev, region_id, cpu_id);
 			if (cpu_data_size + offset > size) {
-				// Partial reading of coredump is not supported
+				/* Partial reading of coredump is not supported */
 				fba_dev_err(
 					fba_dev,
 					"Error in reading coredump data, not enough memory to read full buffer");
@@ -770,10 +778,10 @@ static int tenjin_boot1(struct fba_device *fba_dev)
 
 	tenjin_log_reset_reason(fba_dev);
 
-	// Trigger M7 reset to start from a clean state
+	/* Trigger M7 reset to start from a clean state */
 	fba_write_bar(fba_dev, M7_RESET_MAILBOX_VAL, M7_RESET_BAR,
 		      M7_RESET_OFFSET);
-	// Allow some time for M7 to reboot
+	/* Allow some time for M7 to reboot */
 	msleep(TENJIN_M7_RESET_TIME_MS);
 
 	/*
@@ -823,10 +831,12 @@ static int tenjin_boot1(struct fba_device *fba_dev)
 		fba_dev_err(fba_dev, "Timeout waiting for boot1 to start");
 		goto out_release_fw;
 	}
-	// At this stage boot1 is booted.
-	// Check Boot1 status
-	// In normal boot1 -  DDR_OPEN bit is set indicating boot1 is done and ready to receive boot2 image
-	// In flasher boot1 -  FLASHER_BOOTED bt is set indicating flashing is started
+	/*
+	 * At this stage boot1 is booted.
+	 * Check Boot1 status
+	 * In normal boot1 -  DDR_OPEN bit is set indicating boot1 is done and ready to receive boot2 image
+	 * In flasher boot1 -  FLASHER_BOOTED bt is set indicating flashing is started
+	 */
 	ret = tenjin_wait_for_bit_set(fba_dev, BAR_0, BOOT1_STATUS_REG,
 				      FB_BOOT1_STATUS, &value,
 				      BOOT1_STARTUP_RETRY_COUNT);
@@ -838,7 +848,7 @@ static int tenjin_boot1(struct fba_device *fba_dev)
 	}
 
 	if (value & FLASHER_BOOTED) {
-		// Wait for flasher to complete the QSPI write
+		/* Wait for flasher to complete the QSPI write */
 		ret = tenjin_wait_for_status(fba_dev, BAR_0, BAR_QSPI_STATUS,
 					     FLASHER_COMPLETED,
 					     FLASHER_COMPLETED,
@@ -888,10 +898,10 @@ static int tenjin_load_ccp(struct fba_device *fba_dev)
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
-	// Copy boot args
+	/* Copy boot args */
 	args_bufp =
 		fba_dev->bars[RISCV_BOOT_ARGS_BAR] + RISCV_BOOT_ARGS_BAR_OFFSET;
-	// Reset boot arg string in device
+	/* Reset boot arg string in device */
 	memset_io(args_bufp, 0, RISCV_BOOT_ARGS_REGION_SIZE);
 	boot_arg_len = strlen(tenjin_boot_args);
 	WARN_ON(boot_arg_len >= RISCV_BOOT_ARGS_REGION_SIZE);
@@ -949,12 +959,14 @@ static int tenjin_load_ccp(struct fba_device *fba_dev)
 	memcpy(bufp, fw->data, fw->size);
 	fba_dev_dbg(fba_dev, "size=0x%zx", fw->size);
 
-	// Clear the mailbox before we start loading/booting ccp
-	// WARNING: Be careful in moving below code. The mailbox registers
-	// mapped over PCIe IMAP need to be opened for Non Secure access
-	// before Host can set it to zero.
-	// Boot1 does this before indicating the DDR_OPEN. So this place
-	// is safe to set mailbox to zero.
+	/*
+	 * Clear the mailbox before we start loading/booting ccp
+	 * WARNING: Be careful in moving below code. The mailbox registers
+	 * mapped over PCIe IMAP need to be opened for Non Secure access
+	 * before Host can set it to zero.
+	 * Boot1 does this before indicating the DDR_OPEN. So this place
+	 * is safe to set mailbox to zero.
+	 */
 	set_mailbox(fba_dev, SAIL_RDY, 0);
 	fba_write_bar(fba_dev, codepush, BAR_0, offset_codepush);
 

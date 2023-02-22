@@ -225,7 +225,7 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 	struct fba_submission sub = {
 		.header = { .opcode = opcode },
 		.va_dma = { .flags_size = size | AT_DMA_OPSZ |
-				      AT_DMA_TO_DEVICE, },
+					  AT_DMA_TO_DEVICE, },
 	};
 	struct device *dev = &fba_dev->pdev->dev;
 	uint16_t status;

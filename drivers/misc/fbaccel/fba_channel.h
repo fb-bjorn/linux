@@ -23,12 +23,12 @@ struct fba_queue_info {
  * implementation, depending on resource availability and performance.
  */
 struct fba_queue {
-	struct fba_shared *area; // Memory area containing ring buffer
-	uint64_t offset; // Ring buffer starting offset in memory area
-	uint32_t head; // Next entry for consumer to read.
-	uint32_t tail; // Next entry for consumer to write.
-	uint32_t entries; // Size of ring buffer, as number of entries
-	uint32_t fill_watermark; // High fill level watermark.
+	struct fba_shared *area; /* Memory area containing ring buffer */
+	uint64_t offset; /* Ring buffer starting offset in memory area */
+	uint32_t head; /* Next entry for consumer to read. */
+	uint32_t tail; /* Next entry for consumer to write. */
+	uint32_t entries; /* Size of ring buffer, as number of entries */
+	uint32_t fill_watermark; /* High fill level watermark. */
 };
 
 /*
@@ -46,14 +46,14 @@ struct fba_queue {
 struct fba_channel {
 	struct work_struct work;
 	struct fba_device *fba_dev;
-	struct fba_poller poller; // Monitors the channel with heartbeat
+	struct fba_poller poller; /* Monitors the channel with heartbeat */
 	struct fba_limits *limits;
 	uint64_t max_job_subs;
-	struct fba_limits usage; // Counts used by this channel.
+	struct fba_limits usage; /* Counts used by this channel. */
 
-	spinlock_t lock; // queue lock
-	struct fba_queue squeue; // Submission queue
-	struct fba_queue cqueue; // Completion queue
+	spinlock_t lock; /* queue lock */
+	struct fba_queue squeue; /* Submission queue */
+	struct fba_queue cqueue; /* Completion queue */
 	uint8_t phase;
 	uint8_t chan_id;
 	unsigned int irq;
@@ -83,9 +83,11 @@ struct fba_channel_req {
 	struct fba_completion cmp;
 };
 
-//
-// Channel Functions.
-//
+/*
+ *
+ * Channel Functions.
+ *
+ */
 int fba_channel_init(struct fba_device *fba_dev, int id, unsigned int irq,
 		     struct fba_queue_info *sqinfo,
 		     struct fba_queue_info *cqinfo, struct fba_limits *limits,
@@ -99,16 +101,16 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req);
 bool fba_channel_has_space(struct fba_channel *chan);
 uint64_t fba_channel_max_job_subs(struct fba_channel *chan);
 void fba_channel_shutdown(struct fba_channel *chan);
-// Start heartbeat monitors for all channels in a device
+/* Start heartbeat monitors for all channels in a device */
 void fba_channel_start_heartbeats(struct fba_device *fba_dev);
-// Stop heartbeat monitors for all channels in a device
+/* Stop heartbeat monitors for all channels in a device */
 void fba_channel_stop_heartbeats(struct fba_device *fba_dev);
-// Set the polling period for channel hb
+/* Set the polling period for channel hb */
 void fba_channel_set_hb_mon_period(void *obj);
-// Get watermarks
+/* Get watermarks */
 void fba_channel_get_fill_watermarks(struct fba_channel *chan,
 				     uint32_t *sq_watermark,
 				     uint32_t *cq_watermark);
 
-// Default channel heartbeat period
+/* Default channel heartbeat period */
 #define CHAN_HEARTBEAT_PERIOD_MS 60000

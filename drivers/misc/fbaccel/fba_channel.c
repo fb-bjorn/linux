@@ -55,9 +55,11 @@ static uint32_t queue_get_used(struct fba_queue *queue)
 
 static uint32_t queue_get_space(struct fba_queue *queue)
 {
-	// Capacity of the queue will always be queue->entries-1. We can't let the
-	// queue hold queue->entries items, because it would make the queue empty
-	// and full conditions be the same.
+	/*
+	 * Capacity of the queue will always be queue->entries-1. We can't let the
+	 * queue hold queue->entries items, because it would make the queue empty
+	 * and full conditions be the same.
+	 */
 	return (queue->entries - 1) - queue_get_used(queue);
 }
 
@@ -157,7 +159,7 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 		return false;
 	}
 
-	// Check if the submission queue has enough space.
+	/* Check if the submission queue has enough space. */
 	space = queue_get_space(sq);
 	if (req->sub_cnt > space) {
 		/* Not enough space in submission queue yet, bail */
@@ -289,8 +291,10 @@ out_unlock_pending:
 /* XXX - add to constants.h? */
 #define PACKET_FAIL (1 << 7)
 
-// Purge all packets from a channel. This is in place of
-// channel packet completions if FW went down.
+/*
+ * Purge all packets from a channel. This is in place of
+ * channel packet completions if FW went down.
+ */
 static void fba_channel_purge_pending(struct fba_channel *chan)
 {
 	struct fba_channel_req *req;
@@ -438,14 +442,18 @@ static int get_completion(struct fba_channel *chan, struct fba_completion *cmp)
 		chan->cqueue.head = 0;
 	}
 
-	// Update channel with new device reported submission head.  Since the
-	// reported head is 16b not 32b, we need to handle roll over.
+	/*
+	 * Update channel with new device reported submission head.  Since the
+	 * reported head is 16b not 32b, we need to handle roll over.
+	 */
 	sq_space_before = queue_get_space(&chan->squeue);
 	chan->squeue.head = (uint16_t)tmp->sq_head;
 	sq_space_after = queue_get_space(&chan->squeue);
 
-	// When the device moves the SQ head (consumes submission entries),
-	// check that the free space did not decrease.
+	/*
+	 * When the device moves the SQ head (consumes submission entries),
+	 * check that the free space did not decrease.
+	 */
 	if (sq_space_after < sq_space_before) {
 		/* Device has given us an invalid sq_head value. */
 		spin_unlock(&chan->lock);
@@ -502,20 +510,24 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 	}
 
 	if (ncmp > 0) {
-		// Every time the while loop above runs, it drains everything
-		// it available out of the completion queue. Therefore, the
-		// amount that it drained is equal to the cqueue fill level.
+		/*
+		 * Every time the while loop above runs, it drains everything
+		 * it available out of the completion queue. Therefore, the
+		 * amount that it drained is equal to the cqueue fill level.
+		 */
 		spin_lock(&chan->lock);
 		if (ncmp > chan->cqueue.fill_watermark)
 			chan->cqueue.fill_watermark = ncmp;
 		spin_unlock(&chan->lock);
-		// Let the device know we've drained the completion queue.
+		/* Let the device know we've drained the completion queue. */
 		fba_channel_set_cqueue_head(fba_dev, chan->chan_id,
 					    cqueue_head);
-		// Signal to any process waiting on this read wait queue that
-		// there is data available to read from this device.
+		/*
+		 * Signal to any process waiting on this read wait queue that
+		 * there is data available to read from this device.
+		 */
 		wake_up_interruptible(&fba_dev->read_q);
-		// If there's space in the squeue then wake up any process waiting on this.
+		/* If there's space in the squeue then wake up any process waiting on this. */
 		if (fba_channel_has_space(chan))
 			wake_up_interruptible(&fba_dev->write_q);
 	}
@@ -585,8 +597,10 @@ void fba_channel_set_hb_mon_period(void *obj)
 	struct fba_channel *chan = obj;
 
 	if (chan_hb_period_ms == 0) {
-		// Go back to default polling period, disable the
-		// monitor from sending the heartbeat
+		/*
+		 * Go back to default polling period, disable the
+		 * monitor from sending the heartbeat
+		 */
 		chan->poller.period_ms = CHAN_HEARTBEAT_PERIOD_MS;
 		if (chan->poller.enabled)
 			fba_dev_err(chan->fba_dev,

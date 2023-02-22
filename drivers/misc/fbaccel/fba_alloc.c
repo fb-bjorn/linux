@@ -31,9 +31,11 @@ struct fba_alloc *fba_alloc_get(struct fba_alloc *alloc)
 	return alloc;
 }
 
-// Dereference an allocation.
-// The calling function must not re-use the alloc ptr once it
-// called deref on it. The pointer passed could have been freed.
+/*
+ * Dereference an allocation.
+ * The calling function must not re-use the alloc ptr once it
+ * called deref on it. The pointer passed could have been freed.
+ */
 void fba_alloc_put(struct fba_alloc *alloc)
 {
 	WARN_ON(alloc == NULL);
@@ -74,7 +76,7 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 	uint64_t alloc_size;
 	struct fba_alloc *alloc = NULL;
 
-	// Skip NULL IDs.
+	/* Skip NULL IDs. */
 	if (rid == 0)
 		return NULL;
 
@@ -90,7 +92,7 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 	}
 	alloc_size = alloc->size;
 
-	// End location in range must be within size.
+	/* End location in range must be within size. */
 	if (offs >= alloc_size || size > alloc_size - offs) {
 		fba_dev_err(
 			fba_dev,
@@ -100,12 +102,12 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 		return ERR_PTR(-EINVAL);
 	}
 
-	// translate the address
+	/* translate the address */
 	*val = alloc->addr + offs;
 	return alloc;
 }
 
-// Convert to alloc and add to those tracked by job
+/* Convert to alloc and add to those tracked by job */
 static int fba_alloc_convert_job(struct fba_job *job, uint64_t rid,
 				 uint64_t size, uint64_t *val)
 {
@@ -167,7 +169,6 @@ static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 					       struct fba_job *job,
 					       uintptr_t buf_addr,
 					       uint64_t enc_size)
-
 {
 	size_t size = enc_size & AT_DMA_SIZE_MASK;
 	enum dma_data_direction dir;
@@ -215,7 +216,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			break;
 
 		case AT_RID_ARG32:
-			// ARG32 not available when last arg.
+			/* ARG32 not available when last arg. */
 			if (i == SUBMISSION_ENTRY_ARGS - 1)
 				return -EINVAL;
 
@@ -224,7 +225,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			break;
 
 		case AT_ARG32_RID:
-			// ARG32 not available when first arg.
+			/* ARG32 not available when first arg. */
 			if (i == 0)
 				return -EINVAL;
 			size = iargs[i - 1] >> 32;
@@ -232,7 +233,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			break;
 
 		case AT_ARG64_RID:
-			// ARG64 not available when first arg.
+			/* ARG64 not available when first arg. */
 			if (i == 0)
 				return -EINVAL;
 			size = iargs[i - 1];
@@ -244,7 +245,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 		case AT_VA_DMA64: {
 			struct fba_dma *dma;
 
-			// VA_DMA64 not available when last arg.
+			/* VA_DMA64 not available when last arg. */
 			if (i == SUBMISSION_ENTRY_ARGS - 1)
 				return -EINVAL;
 
@@ -265,7 +266,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 		}
 
 		case AT_P2P_DMA64: {
-			// P2P_DMA64 not available when last arg.
+			/* P2P_DMA64 not available when last arg. */
 			if (i == SUBMISSION_ENTRY_ARGS - 1)
 				return -EINVAL;
 

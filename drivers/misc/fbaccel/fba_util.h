@@ -2,7 +2,7 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
 #pragma once
 
-// Utility functions
+/* Utility functions */
 void set_mailbox(struct fba_device *fba_dev, int mbox, uint32_t value);
 void set_mailbox64(struct fba_device *fba_dev, int mbox, uint64_t value);
 uint32_t get_mailbox(struct fba_device *fba_dev, int mbox);
@@ -20,7 +20,7 @@ void fba_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
 void __iomem *fba_util_get_bar_ptr(struct fba_device *fba_dev, int bar,
 				   uint64_t offset);
 
-// Update usage counts
+/* Update usage counts */
 int fba_util_inc_usage(struct fba_device *fba_dev, const struct fba_limits *max,
 		       struct fba_limits *src, uint32_t sub_cnt);
 void fba_util_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,

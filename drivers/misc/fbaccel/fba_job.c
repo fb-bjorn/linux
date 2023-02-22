@@ -11,7 +11,7 @@
 
 static void fba_job_channel_cb(bool completed, struct fba_channel_req *req);
 
-// Allocate a job and its resource usage array
+/* Allocate a job and its resource usage array */
 struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 			      const struct fba_submission __user *subs,
 			      size_t n_subs, uint64_t user_data)
@@ -46,7 +46,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 	INIT_LIST_HEAD(&job->dma_list);
 	INIT_LIST_HEAD(&job->dma_buf_list);
 
-	// User submitted packets must be copied in.
+	/* User submitted packets must be copied in. */
 	if (copy_from_user(job->sub_array, subs, size)) {
 		ret = -EFAULT;
 		goto err_put_job;
@@ -62,7 +62,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 		if (ret < 0)
 			goto err_put_job;
 	}
-	// Setup tail, and assign context ID.
+	/* Setup tail, and assign context ID. */
 	for (i = 0; i < job->req.sub_cnt; i++) {
 		job->sub_array[i].header.context_id = ctx_id;
 		job->sub_array[i].header.packet_tail = job->req.sub_cnt - i - 1;
@@ -76,8 +76,10 @@ err_put_job:
 	return ERR_PTR(ret);
 }
 
-// Dereference all allocs used by the job.
-// Free all dma associated resources.
+/*
+ * Dereference all allocs used by the job.
+ * Free all dma associated resources.
+ */
 void fba_job_release_resources(struct fba_job *job)
 {
 	struct fba_dma *dma, *tmp;
@@ -107,19 +109,19 @@ void fba_job_set_callback(struct fba_job *job, fba_job_cb_t cb, void *cb_data)
 	job->callback_data = cb_data;
 }
 
-// Set user provided key
+/* Set user provided key */
 void fba_job_set_job_key(struct fba_job *job, void *job_key)
 {
 	job->user_job_key = job_key;
 }
 
-// Get user provded key
+/* Get user provded key */
 void *fba_job_get_job_key(struct fba_job *job)
 {
 	return job->user_job_key;
 }
 
-// Add an alloc to the job
+/* Add an alloc to the job */
 void fba_job_add_alloc(struct fba_job *job, struct fba_alloc *alloc)
 {
 	job->allocs[job->alloc_cnt++] = alloc;
@@ -132,7 +134,7 @@ static void fba_job_channel_cb(bool completed, struct fba_channel_req *req)
 	fba_job_complete(job);
 }
 
-// Submit a job to the specified channel
+/* Submit a job to the specified channel */
 int fba_job_channel_post(struct fba_channel *chan, struct fba_job *job)
 {
 	int ret;
@@ -145,8 +147,10 @@ int fba_job_channel_post(struct fba_channel *chan, struct fba_job *job)
 	return ret;
 }
 
-// Notify anyone interested in the job and move it to
-// ctx completed list. If no one is interested, free it.
+/*
+ * Notify anyone interested in the job and move it to
+ * ctx completed list. If no one is interested, free it.
+ */
 void fba_job_complete(struct fba_job *job)
 {
 	struct fba_ctx *ctx = job->ctx;
@@ -158,10 +162,12 @@ void fba_job_complete(struct fba_job *job)
 
 	int ctx_id = fba_ctx_get_id(ctx);
 
-	// Release all the resources for the job once completed.
-	// We dont have to wait for the application to read the
-	// Job before we release the resources used by the job.
-	// This provides resources immediately for other jobs.
+	/*
+	 * Release all the resources for the job once completed.
+	 * We dont have to wait for the application to read the
+	 * Job before we release the resources used by the job.
+	 * This provides resources immediately for other jobs.
+	 */
 	fba_job_release_resources(job);
 
 	fba_ctx_complete_job(ctx, job);
@@ -178,7 +184,7 @@ void fba_job_complete(struct fba_job *job)
 	fba_job_put(job);
 }
 
-// NEVER to be called outside of fba_job_put
+/* NEVER to be called outside of fba_job_put */
 static void fba_job_free(struct kref *ref)
 {
 	struct fba_job *job = container_of(ref, struct fba_job, ref);
@@ -187,7 +193,7 @@ static void fba_job_free(struct kref *ref)
 	kfree(job);
 }
 
-// Increment reference count to job
+/* Increment reference count to job */
 
 struct fba_job *fba_job_get(struct fba_job *job)
 {
@@ -195,9 +201,11 @@ struct fba_job *fba_job_get(struct fba_job *job)
 	return job;
 }
 
-// Dereference the job.
-// The calling function must not re-use the job ptr once it
-// called deref. The job could have been freed.
+/*
+ * Dereference the job.
+ * The calling function must not re-use the job ptr once it
+ * called deref. The job could have been freed.
+ */
 void fba_job_put(struct fba_job *job)
 {
 	kref_put(&job->ref, fba_job_free);
@@ -215,7 +223,7 @@ void fba_job_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,
 	fba_util_dec_usage(fba_dev, src, job->req.sub_cnt);
 }
 
-// Map a DMA buffer and add it to the list of DMAs tracked by the job
+/* Map a DMA buffer and add it to the list of DMAs tracked by the job */
 struct fba_dma *fba_job_dma_map(struct fba_ctx *ctx, struct fba_job *job,
 				void *data, size_t size, int dir,
 				bool force_prp)
@@ -226,7 +234,7 @@ struct fba_dma *fba_job_dma_map(struct fba_ctx *ctx, struct fba_job *job,
 	if (IS_ERR(dma))
 		return dma;
 
-	// Success, append dma object
+	/* Success, append dma object */
 	job->dma_cnt++;
 	list_add_tail(&dma->item, &job->dma_list);
 

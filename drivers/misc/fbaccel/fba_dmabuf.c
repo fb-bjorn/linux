@@ -244,7 +244,7 @@ fba_dmabuf_ops_map(struct dma_buf_attachment *dmabuf_attach,
 	sgt->nents = 1;
 	sgt->orig_nents = 1;
 
-	// disabled for now since somce lab kernels don't implement dma_max_seg_size
+	/* disabled for now since somce lab kernels don't implement dma_max_seg_size */
 #if 0
 	dma_max_seg_size = dma_get_max_seg_size(dmabuf_attach->dev);
 	if (dma_max_seg_size < fba_dmabuf_attach->size) {
@@ -301,7 +301,7 @@ int fba_get_dmabuf(struct fba_ctx *ctx, uint64_t rid, int *rfd)
 	if (fba_dev->cfg->p2p_bar == -1)
 		return -EOPNOTSUPP;
 
-	// Skip NULL IDs.
+	/* Skip NULL IDs. */
 	if (rid == 0)
 		return ret;
 
@@ -321,7 +321,7 @@ int fba_get_dmabuf(struct fba_ctx *ctx, uint64_t rid, int *rfd)
 
 	alloc_size = alloc->size;
 
-	// End location in range must be within size.
+	/* End location in range must be within size. */
 	if (offset >= alloc_size) {
 		fba_dev_err(
 			fba_dev,

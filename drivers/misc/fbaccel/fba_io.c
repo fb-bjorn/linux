@@ -74,7 +74,7 @@ static void fba_eventfd_cb(int completed, void *data)
 {
 	struct eventfd_ctx *ectx = (struct eventfd_ctx *)data;
 
-	// TODO: T84471228 check return value of eventfd_signal
+	/* TODO: T84471228 check return value of eventfd_signal */
 	if (completed)
 		eventfd_signal(ectx, 1);
 	eventfd_ctx_put(ectx);
@@ -105,7 +105,7 @@ static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
 
 	trace_fba_post_cmd(fba_dev->name, post_req->count, post_req->user_data);
 
-	// Allocate the job.
+	/* Allocate the job. */
 	job = fba_job_alloc(ctx, post_req->subs, post_req->count,
 			    post_req->user_data);
 	if (IS_ERR(job))
@@ -242,7 +242,7 @@ static long fba_ioctl_resource_alloc(struct fba_ctx *ctx, uint16_t type,
 		return ret;
 	}
 
-	// Convert ID to RID.
+	/* Convert ID to RID. */
 	*rid = ((uint64_t)ret << RID_ID_SHIFT);
 	*addr = fba_alloc_get_addr(alloc);
 
@@ -253,7 +253,7 @@ static long fba_ioctl_resource_alloc(struct fba_ctx *ctx, uint16_t type,
 
 static long fba_ioctl_resource_free(struct fba_ctx *ctx, uint64_t rid)
 {
-	// RID should only contain ID not offset.
+	/* RID should only contain ID not offset. */
 	if (rid & RID_OFFS_MASK)
 		return -EINVAL;
 
@@ -350,13 +350,13 @@ static long __fba_ioctl_access_scratch(struct fba_ctx *ctx,
 	void *scratch_va;
 	long ret;
 
-	// Ref RID and return address as 64b value;
+	/* Ref RID and return address as 64b value; */
 	alloc = fba_alloc_convert(ctx, scratch_req->rid, scratch_req->len,
 				  &scratch);
 	if (IS_ERR(alloc))
 		return PTR_ERR(alloc);
 
-	// Convert from DMA addr to VA
+	/* Convert from DMA addr to VA */
 	scratch_va = fba_alloc_map_to_va(alloc, scratch);
 
 	if (scratch_req->type == FBA_ACCESS_READ)
@@ -366,7 +366,7 @@ static long __fba_ioctl_access_scratch(struct fba_ctx *ctx,
 	if (ret)
 		ret = -EFAULT;
 
-	// Release the alloc
+	/* Release the alloc */
 	fba_alloc_put(alloc);
 
 	return ret;
@@ -474,7 +474,7 @@ static int fba_mon_defs_ioctl(struct fba_device *fba_dev, void __user *data)
 
 static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 {
-	struct mon_data_ioctl mon_data_req = {}; // Users's request
+	struct mon_data_ioctl mon_data_req = {}; /* Users's request */
 	uint32_t *ids;
 	void *data;
 	int16_t *errors;
@@ -547,7 +547,7 @@ out_free:
 static int fba_mon_data_set_ioctl(struct fba_device *fba_dev,
 				  void __user *data_req)
 {
-	struct mon_data_ioctl mon_data_req; // Users's request
+	struct mon_data_ioctl mon_data_req; /* Users's request */
 	uint32_t *ids;
 	void *data;
 	size_t data_size = 0;
@@ -608,7 +608,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	long ret;
 
-	// All IOCTLS take a struct *, so ensure it's non-zero.
+	/* All IOCTLS take a struct *, so ensure it's non-zero. */
 	if (data == NULL)
 		return -EINVAL;
 
@@ -630,7 +630,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_RESOURCE_ALLOC: {
 		struct res_alloc_ioctl alloc_req;
 
-#ifdef NOTYET // Not needed?  If needed, alloc is racy?
+#ifdef NOTYET /* Not needed?  If needed, alloc is racy? */
 		if (!fba_ctx_is_open(ctx))
 			return -EACCES;
 #endif

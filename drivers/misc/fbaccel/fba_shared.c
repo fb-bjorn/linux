@@ -21,13 +21,15 @@ int fba_shared_alloc_coherent(struct fba_device *fba_dev,
 	*mem = (struct fba_shared){};
 
 	if (size == 0 || (size & (PAGE_SIZE - 1))) {
-		// Expecting PAGE sized allocations, remove if we determine
-		// this expectation is invalid.
+		/*
+		 * Expecting PAGE sized allocations, remove if we determine
+		 * this expectation is invalid.
+		 */
 		fba_dev_err(fba_dev, "Invalid size request %zu.", size);
 		return -EINVAL;
 	}
 
-	// Allocate temp pages for Admin and misc use.
+	/* Allocate temp pages for Admin and misc use. */
 	data = dma_alloc_coherent(&fba_dev->pdev->dev, size, &addr, GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
@@ -48,7 +50,7 @@ bool fba_shared_is_valid(struct fba_shared *mem)
 
 void fba_shared_free(struct fba_device *fba_dev, struct fba_shared *mem)
 {
-	// Not dma_coherent if ADDR is not set, like points to a BAR.
+	/* Not dma_coherent if ADDR is not set, like points to a BAR. */
 	if (mem->addr == 0)
 		return;
 

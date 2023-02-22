@@ -145,34 +145,38 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 	bool force_prp = false;
 	struct fba_dma_prp_node *node;
 
-	// disallow odd user addresses
+	/* disallow odd user addresses */
 	if ((uintptr_t)user_data & 1) {
 		fba_dev_err(fba_dev, "Invalid user address");
 		return ERR_PTR(-EINVAL);
 	}
 
-	// disallow zero-length mappings
+	/* disallow zero-length mappings */
 	if (size == 0)
 		return ERR_PTR(-EINVAL);
 
-	// Force PRP if request is permitted to force PRP and 'test_force_prp' module
-	// parameter set.
+	/*
+	 * Force PRP if request is permitted to force PRP and 'test_force_prp' module
+	 * parameter set.
+	 */
 	if (force_prp_ok && test_force_prp)
 		force_prp = true;
 
-	// We zero fill the DMA object so that we can correctly free it via
-	// fba_dma_free regardless of how far into the process we go.
+	/*
+	 * We zero fill the DMA object so that we can correctly free it via
+	 * fba_dma_free regardless of how far into the process we go.
+	 */
 	dma = kzalloc(sizeof(*dma), GFP_KERNEL);
 	if (dma == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	// Initialize dma object.
+	/* Initialize dma object. */
 	INIT_LIST_HEAD(&dma->item);
 	dma->size = size;
 	dma->user_data = user_data;
 	dma->flags = dir;
 
-	// Compute number of pages
+	/* Compute number of pages */
 	overflow = dma->size + (dma->user_addr & ~PAGE_MASK);
 	npages = DIV_ROUND_UP(overflow, PAGE_SIZE);
 
@@ -182,7 +186,7 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 	if (dma->pages == NULL)
 		goto err_dma_free;
 
-	// Get pages, set WRITE if direction includes FROM_DEVICE.
+	/* Get pages, set WRITE if direction includes FROM_DEVICE. */
 	gup_flags = (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) ?
 				  FOLL_WRITE :
 				  0;
@@ -250,8 +254,10 @@ void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma)
 		free_prp_list(dev, &dma->prp_list_head);
 	}
 
-	// NOTE: If we are reading from device, always set pages dirty even on
-	// failure in case we want to examine whatever we managed to get.
+	/*
+	 * NOTE: If we are reading from device, always set pages dirty even on
+	 * failure in case we want to examine whatever we managed to get.
+	 */
 	unpin_user_pages_dirty_lock(dma->pages, dma->get_cnt,
 				    dma->flags == DMA_FROM_DEVICE ||
 					    dma->flags == DMA_BIDIRECTIONAL);

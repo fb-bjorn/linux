@@ -33,7 +33,7 @@ struct fba_resource *fba_resource_get(struct fba_resource *res)
 
 static int granularity_to_order(struct fba_device *fba_dev, uint64_t size)
 {
-	// For debugging only.
+	/* For debugging only. */
 	if (size == 0) {
 		fba_dev_err(fba_dev, "Unexpected size 0 granularity.");
 		return 0;
@@ -219,7 +219,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 	int idx, r_total;
 	int ret = -ENOMEM;
 
-	// Capture current value of INFO_WORDS
+	/* Capture current value of INFO_WORDS */
 	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_INFO_WORDS,
 				     INFO_WORD_FIRST, INFO_WORD_APP_START);
 	if (ret) {
@@ -270,7 +270,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 		cnt += len;
 	}
 
-	// Capture resource data.
+	/* Capture resource data. */
 	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_RESOURCES, 0,
 				     words[INFO_RESOURCE_MAX_COUNT]);
 	if (ret) {
@@ -278,7 +278,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 		goto err_put_resources;
 	}
 
-	// Create array of resources, including 1 extra for scratch area.
+	/* Create array of resources, including 1 extra for scratch area. */
 	r_total = words[INFO_RESOURCE_MAX_COUNT] + 1;
 	resources = kcalloc(r_total, sizeof(*resources), GFP_KERNEL);
 	if (resources == NULL) {
@@ -286,13 +286,13 @@ int fba_resource_init(struct fba_device *fba_dev)
 		goto err_put_resources;
 	}
 
-	// Add Scratch area.
+	/* Add Scratch area. */
 	scratch_def = (struct resource_def){
 		.type = RT_MEMORY,
 		.subtype = MT_SCRATCH,
 		.start = (uint64_t)fba_dev->scratch_area.addr,
 		.count = fba_dev->scratch_area.size,
-		.gran = 64, // Cache-line sized.
+		.gran = 64, /* Cache-line sized. */
 	};
 	res = build_resource(fba_dev, &scratch_def, fba_dev->scratch_area.data);
 	if (IS_ERR(res)) {
@@ -302,7 +302,7 @@ int fba_resource_init(struct fba_device *fba_dev)
 	res->index = 0;
 	resources[res->index] = res;
 
-	// Add FW areas.
+	/* Add FW areas. */
 	for (idx = 0; idx < r_total - 1; idx++) {
 		struct resource_def *defs = (struct resource_def *)temp_data;
 

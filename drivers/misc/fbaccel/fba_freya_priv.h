@@ -5,7 +5,7 @@
 
 #pragma once
 
-// Note: Trust Zone are minimum 4K in size
+/* Note: Trust Zone are minimum 4K in size */
 #define REGION_SIDEBAND_SIZE (4 * 1024)
 #define REGION_INBAND_SIZE (4 * 1024)
 #define REGION_UPGRADE_MEM_SIZE (520 * 1024)
@@ -33,9 +33,11 @@
 #define FW_IMAGE_DST_MASK GENMASK(15, 8)
 #define FW_IMAGE_SRC_MASK GENMASK(7, 0)
 
-// Device power cycle persistent error signals
-// For detailed sideband structure details please take a look at:
-// https://drive.google.com/file/d/1RlBzqMTK4mSNchBS2XEVeXMc1Jttbcrr/view
+/*
+ * Device power cycle persistent error signals
+ * For detailed sideband structure details please take a look at:
+ * https://drive.google.com/file/d/1RlBzqMTK4mSNchBS2XEVeXMc1Jttbcrr/view
+ */
 #define SB_ASIC_ERROR_TYPE_OFS 0x78
 #define ASIC_ERROR_TYPE_MASK GENMASK(31, 24)
 
@@ -99,7 +101,7 @@
 #define FREYA_DEF_SECURE_DBG_FILENAME "secdbg.hbin"
 #define FREYA_DEF_PROVISIONING_FILENAME "provision.hbin"
 
-// timeouts conservatively set based on measured ASIC boot times
+/* timeouts conservatively set based on measured ASIC boot times */
 #define RDY_FOR_IMG_XFER_TIMEOUT_MS 1000
 #define IMAGE_RECEIVED_TIMEOUT_MS 100
 #define BOOT1_LOAD_TIMEOUT_MS 1000
@@ -121,7 +123,7 @@
 #define WAIT_FOR_CCP_BOOT_RETRIES 20
 #define WAIT_FOR_M7_DMA_COMPLETION 100
 
-// Sideband Definitions
+/* Sideband Definitions */
 enum image_location {
 	LOCATION_SRAM = 0,
 	LOCATION_ITCM = 1,
@@ -140,27 +142,31 @@ enum image_location {
 
 /* from fbia/common/includes/cfg.h */
 
-//
-// Mailbox
+/*
+ *
+ * Mailbox
+ */
 
-// Currently Freya is using the first mailbox group for SAIL communication
-// and second mailbox group is used for sq/cq doorbells and last mailbox
-// group is dedicated to M7 which is used for signalling M7 to reset CCP and CIP
-//
-// Number of total mailbox groups.
+/*
+ * Currently Freya is using the first mailbox group for SAIL communication
+ * and second mailbox group is used for sq/cq doorbells and last mailbox
+ * group is dedicated to M7 which is used for signalling M7 to reset CCP and CIP
+ *
+ * Number of total mailbox groups.
+ */
 #define HW_MBOX_GROUP_COUNT 32
-// Number of entries per group.
+/* Number of entries per group. */
 #define HW_MBOX_GROUP_SIZE 32
 
-// CCP mailbox group offset and length
+/* CCP mailbox group offset and length */
 #define CPP_MBOX_GROUP_OFFS 0
 #define CCP_MBOX_GROUP_COUNT 31
 
-// PCIe UART mailbox group offset and length
+/* PCIe UART mailbox group offset and length */
 #define UART_MBOX_GROUP_OFFS 30
 #define UART_MBOX_GROUP_COUNT 1
 
-// M7 mailbox group offset and length
+/* M7 mailbox group offset and length */
 #define M7_MBOX_GROUP_OFFS 31
 #define M7_MBOX_GROUP_COUNT 1
 
@@ -197,19 +203,23 @@ enum image_location {
 #define CCP_LOGBUF_SIZE_MBOX (LOGBUF_MBOX_GROUP_START + 1)
 #define CCP_LOGBUF_OFFSET_MBOX (LOGBUF_MBOX_GROUP_START + 2)
 
-// Number of total entries
-// Byte stride between mailbox entries
+/*
+ * Number of total entries
+ * Byte stride between mailbox entries
+ */
 #define HW_MBOX_ENTRY_STRIDE 8
 
-//
-// Feature BAR Settings
-//
+/*
+ *
+ * Feature BAR Settings
+ *
+ */
 #define HOST_IPC_BAR 1
 #define HOST_IPC_STRIDE HW_MBOX_ENTRY_STRIDE
 #define HOST_IPC_BAR_OFF 0
 #define HOST_IPC_BAR_IDX (BAR_TO_IDX(HOST_IPC_BAR))
 
-// Doorbell mailbox offset
+/* Doorbell mailbox offset */
 #define DB_MAILBOX_BASE HW_MBOX_GROUP_SIZE
 
 #define FREYA_USOC_BAR 1
@@ -227,13 +237,15 @@ enum image_location {
 
 #define DRAM_ECC_REGION_GRANULARITY_MB (16)
 
-// Max number of `struct fba_submission` per context.
+/* Max number of `struct fba_submission` per context. */
 #define CONTEXT_SUB_CAP 4096
 
-// Ultrasoc AXI Communicator
+/* Ultrasoc AXI Communicator */
 
-// Use low vector numbers for fixed functionality
-// The rest of the vectors are designated for completion queues
+/*
+ * Use low vector numbers for fixed functionality
+ * The rest of the vectors are designated for completion queues
+ */
 #define USOC_DS_MSIX_VECTOR 0
 #define USOC_US_MSIX_VECTOR 1
 #define UART_TX_MSIX_VECTOR 2
@@ -265,7 +277,7 @@ struct fbia_coredump_info {
 
 /* From fbia/freya/freya_cxram.h: */
 
-// Freya boot parameter offset index in CXRAM
+/* Freya boot parameter offset index in CXRAM */
 #define GDB_ON_BOOT_CXRAM_INDEX 0
 #define LLC_CONFIG_CXRAM_INDEX 1
 #define PE_PRINT_MODE_CXRAM_INDEX 2
@@ -276,56 +288,60 @@ struct fbia_coredump_info {
 #define CXRAM_BOOT_PARAM_MAX_INDEX 15
 #define PL330_MAX_PROGBUF_SIZE 0x40
 
-// CXRAM offsets for storing boot parameters
+/* CXRAM offsets for storing boot parameters */
 #define CXRAM_BOOT_PARAM_OFFSET PL330_MAX_PROGBUF_SIZE
 
-// CXRAM offset for storing gdb on Zephyr start up enablement with boot
-// parameter
+/*
+ * CXRAM offset for storing gdb on Zephyr start up enablement with boot
+ * parameter
+ */
 #define CXRAM_GDB_ON_BOOT_OFFSET                                               \
 	(CXRAM_BOOT_PARAM_OFFSET + GDB_ON_BOOT_CXRAM_INDEX)
-// CXRAM offset for storing llc configuration setting through boot parameter
+/* CXRAM offset for storing llc configuration setting through boot parameter */
 #define CXRAM_LLC_CONFIG_OFFSET                                                \
 	(CXRAM_BOOT_PARAM_OFFSET + (LLC_CONFIG_CXRAM_INDEX * 0x4))
-// CXRAM offset for storing PE lossless print mode enablement through boot
-// parameter
+/*
+ * CXRAM offset for storing PE lossless print mode enablement through boot
+ * parameter
+ */
 #define CXRAM_PE_PRINT_MODE_OFFSET                                             \
 	(CXRAM_BOOT_PARAM_OFFSET + (PE_PRINT_MODE_CXRAM_INDEX * 0x4))
-// CXRAM offset for storing PCIe console enable boot parameter
+/* CXRAM offset for storing PCIe console enable boot parameter */
 #define CXRAM_ENABLE_PCIE_CONSOLE_OFFSET                                       \
 	(CXRAM_BOOT_PARAM_OFFSET + (ENABLE_PCIE_CONSOLE_CXRAM_INDEX * 0x4))
-// CXRAM offset for storing PE icache dcache disable config
+/* CXRAM offset for storing PE icache dcache disable config */
 #define CXRAM_PE_IDCACHE_CONFIG_OFFSET                                         \
 	(CXRAM_BOOT_PARAM_OFFSET + (CXRAM_PE_IDCACHE_CONFIG_INDEX * 0x4))
 
-// CXRAM offset for storing ECC Region Size
+/* CXRAM offset for storing ECC Region Size */
 #define CXRAM_ECC_REGION_SIZE_OFFSET                                           \
 	(CXRAM_BOOT_PARAM_OFFSET + (ECC_REGION_SIZE_CXRAM_INDEX * 0x4))
 
-// CXRAM offset for storing ECC Region Size
+/* CXRAM offset for storing ECC Region Size */
 #define CXRAM_P2P_ECC_SIZE_OFFSET                                              \
 	(CXRAM_BOOT_PARAM_OFFSET + (P2P_ECC_SIZE_CXRAM_INDEX * 0x4))
 
-// CXRAM offset for storing core dump region specification
+/* CXRAM offset for storing core dump region specification */
 #define CXRAM_CCP_CRASH_STATUS_OFFSET                                          \
 	(CXRAM_BOOT_PARAM_OFFSET + ((CXRAM_BOOT_PARAM_MAX_INDEX + 1) * 0x4))
 
-// CXRAM offset for storing latest core dump CRC code
+/* CXRAM offset for storing latest core dump CRC code */
 #define CXRAM_CCP_CORE_DUMP_CRC_OFFSET (CXRAM_CCP_CRASH_STATUS_OFFSET + 0x4)
 
-// CXRAM offset for storing core dump region specification
+/* CXRAM offset for storing core dump region specification */
 #define CXRAM_CORE_DUMP_OFFSET (CXRAM_CCP_CORE_DUMP_CRC_OFFSET + 0x4)
 
-// CXRAM offset for storing core dump number of regions
+/* CXRAM offset for storing core dump number of regions */
 #define CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET (CXRAM_CORE_DUMP_OFFSET + 0x4)
 
-// CXRAM offset for storing core dump region info
+/* CXRAM offset for storing core dump region info */
 #define CXRAM_CORE_DUMP_REGION_INFO_OFFSET                                     \
 	(CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET + 0x4)
 
 #define FREYA_LOGGER_SRCS 2
 
-// Offset for boot arguments in CXRAM.
+/* Offset for boot arguments in CXRAM. */
 #define CXRAM_BOOT_ARGS_OFFSET 0x8000
 
-// Max size of boot args in CXRAM.
+/* Max size of boot args in CXRAM. */
 #define CXRAM_BOOT_ARGS_MAX_SIZE 0x400

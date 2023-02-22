@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
-//
-// Generic Driver Funcs
-//
-// Functions for ringing oorbells, changing controller state, etc...
-//
+/*
+ *
+ * Generic Driver Funcs
+ *
+ * Functions for ringing oorbells, changing controller state, etc...
+ *
+ */
 #include <linux/device.h>
 #include <linux/ktime.h>
 #include <linux/types.h>
@@ -14,44 +16,46 @@
 #include "fba_admin.h"
 
 enum fba_ctx_state {
-	FBA_CTX_CLOSED = 0, // Closed in host. Closed or Closing in device.
-	FBA_CTX_VALID, // Opened in host but not device. Accepts non FW requests.
-	FBA_CTX_OPEN, // Opened in host and device. Accepts FW jobs.
-	FBA_CTX_STOPPED, // Reject any new work, disallow transition to open.
+	FBA_CTX_CLOSED = 0, /* Closed in host. Closed or Closing in device. */
+	FBA_CTX_VALID, /* Opened in host but not device. Accepts non FW requests. */
+	FBA_CTX_OPEN, /* Opened in host and device. Accepts FW jobs. */
+	FBA_CTX_STOPPED, /* Reject any new work, disallow transition to open. */
 };
 
 struct fba_ctx {
-	// Device that this context belongs to.
+	/* Device that this context belongs to. */
 	struct fba_device *fba_dev;
-	// Default channel to use.
+	/* Default channel to use. */
 	struct fba_channel *chan;
-	// Reference count.
+	/* Reference count. */
 	struct kref ref;
-	// ID for this context.
+	/* ID for this context. */
 	int id;
 
-	// Each context keeps track of resource allocations by id
+	/* Each context keeps track of resource allocations by id */
 	struct mutex allocs_mutex;
 	struct idr allocs_idr;
 
-	// Owned by device.
-	// This context in the device context list.
+	/*
+	 * Owned by device.
+	 * This context in the device context list.
+	 */
 	struct list_head dev_item;
 
-	// Lock for state, usage, and job lists.
+	/* Lock for state, usage, and job lists. */
 	struct mutex ctx_mtx;
-	// Current state of this context.
+	/* Current state of this context. */
 	enum fba_ctx_state ctx_state;
-	// Current usage of all added jobs for this context
+	/* Current usage of all added jobs for this context */
 	struct fba_limits usage;
-	// Jobs submitted to device but not yet complete
+	/* Jobs submitted to device but not yet complete */
 	struct list_head sub_list;
-	// Jobs completed by the device
+	/* Jobs completed by the device */
 	struct list_head cmp_list;
-	// Completion used to signal idle
+	/* Completion used to signal idle */
 	struct completion ctx_idle;
 
-	// Back pointer to parent ctx that owns the streaming ctx
+	/* Back pointer to parent ctx that owns the streaming ctx */
 	struct fba_ctx *parent_ctx;
 };
 
@@ -72,7 +76,7 @@ static void fba_ctx_init(struct fba_device *fba_dev, struct fba_ctx *ctx,
 	idr_init(&ctx->allocs_idr);
 }
 
-// Allocate per-file context.
+/* Allocate per-file context. */
 struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,
 			      struct fba_ctx *parent)
 {
@@ -108,7 +112,7 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,
 
 	fba_ctx_init(fba_dev, ctx, chan);
 
-	// Add to context list.
+	/* Add to context list. */
 	fba_device_add_ctx(fba_dev, &ctx->dev_item);
 
 	return ctx;
@@ -125,8 +129,10 @@ static void fba_ctx_free(struct kref *ref)
 	struct fba_ctx *ctx = container_of(ref, struct fba_ctx, ref);
 	struct fba_device *fba_dev = ctx->fba_dev;
 
-	// If the application closes the context without
-	// freeing all the resources, free them now.
+	/*
+	 * If the application closes the context without
+	 * freeing all the resources, free them now.
+	 */
 	idr_for_each_entry(&ctx->allocs_idr, alloc, id)
 		fba_alloc_put(alloc);
 	idr_destroy(&ctx->allocs_idr);
@@ -139,8 +145,10 @@ static void fba_ctx_free(struct kref *ref)
 
 	fba_device_put(fba_dev);
 
-	// Verify the ref & job/submission count logic is working.
-	// Verify that everything was removed from submitted/completed
+	/*
+	 * Verify the ref & job/submission count logic is working.
+	 * Verify that everything was removed from submitted/completed
+	 */
 	WARN_ON(ctx->usage.sub_cnt != 0);
 	WARN_ON(!list_empty(&ctx->cmp_list));
 	WARN_ON(!list_empty(&ctx->sub_list));
@@ -225,16 +233,18 @@ out_unlock:
 	return ret;
 }
 
-// Increment reference count to context
+/* Increment reference count to context */
 struct fba_ctx *fba_ctx_get(struct fba_ctx *ctx)
 {
 	kref_get(&ctx->ref);
 	return ctx;
 }
 
-// Dereference the Context.
-// The calling function must not re-use the ctx ptr once it
-// called deref. The ctx could have been freed.
+/*
+ * Dereference the Context.
+ * The calling function must not re-use the ctx ptr once it
+ * called deref. The ctx could have been freed.
+ */
 void fba_ctx_put(struct fba_ctx *ctx)
 {
 	kref_put(&ctx->ref, fba_ctx_free);
@@ -319,7 +329,7 @@ struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item)
 	return list_entry(item, struct fba_ctx, dev_item);
 }
 
-// Purge the cmp jobs
+/* Purge the cmp jobs */
 static void fba_ctx_purge_cmp(struct fba_ctx *ctx)
 {
 	struct fba_job *job, *tmp;
@@ -395,12 +405,14 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 	mutex_unlock(&ctx->allocs_mutex);
 
 	if (was_open) {
-		// Not checking the return here as the device is aborted, if the device
-		// returns an error or the protocol fails. If the device is not aborted
-		// it makes sense to fba_ctx_wait_idle to get completion notification
-		// for the jobs. If the device is aborted it still makes sense to call
-		// delete_context_end() as it would fail quickly because the channels
-		// are stopped.
+		/*
+		 * Not checking the return here as the device is aborted, if the device
+		 * returns an error or the protocol fails. If the device is not aborted
+		 * it makes sense to fba_ctx_wait_idle to get completion notification
+		 * for the jobs. If the device is aborted it still makes sense to call
+		 * delete_context_end() as it would fail quickly because the channels
+		 * are stopped.
+		 */
 		fba_admin_delete_context_begin(ctx->fba_dev, ctx->id);
 		fba_ctx_wait_idle(ctx);
 		ret = fba_admin_delete_context_end(ctx->fba_dev, ctx->id);
@@ -409,7 +421,7 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 	}
 }
 
-// Close the context
+/* Close the context */
 int fba_ctx_close(struct fba_ctx *ctx)
 {
 	struct fba_device *fba_dev = ctx->fba_dev;
@@ -454,7 +466,7 @@ bool fba_ctx_has_completions(struct fba_ctx *ctx)
 	return result;
 }
 
-// Complete a job associated with this ctx.
+/* Complete a job associated with this ctx. */
 void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job)
 {
 	mutex_lock(&ctx->ctx_mtx);
@@ -480,20 +492,22 @@ int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job)
 		goto out_unlock;
 	}
 
-	// Update counters and verify we don't exceed per CTX limit.
+	/* Update counters and verify we don't exceed per CTX limit. */
 	ret = fba_job_inc_usage(fba_dev, &fba_dev->cfg->ctx_limits, &ctx->usage,
 				job);
 	if (ret != 0)
 		goto out_unlock;
 
-	// Post the job to the channel.
+	/* Post the job to the channel. */
 	ret = fba_job_channel_post(ctx->chan, job);
 	if (ret == 0) {
 		list_add_tail(&job->ctx_item, &ctx->sub_list);
 	} else {
-		// Posting to the firmware failed. The firmware will not
-		// dereference the job, and the application will not read it.
-		// Caller will dereference to free it.
+		/*
+		 * Posting to the firmware failed. The firmware will not
+		 * dereference the job, and the application will not read it.
+		 * Caller will dereference to free it.
+		 */
 		fba_job_dec_usage(fba_dev, &ctx->usage, job);
 		fba_dev_err(fba_dev, "Failed add to channel, ERR=%d.", ret);
 	}
@@ -521,7 +535,7 @@ int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res, void *job_key)
 
 	mutex_unlock(&ctx->ctx_mtx);
 
-	// If we reached the end, we didn't find a match.
+	/* If we reached the end, we didn't find a match. */
 	if (match == NULL)
 		return -EWOULDBLOCK;
 

@@ -19,7 +19,7 @@ int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
 int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 			    void *dst, uint32_t size);
 
-// Set CLOCK_REALTIME on device
+/* Set CLOCK_REALTIME on device */
 int fba_admin_time_set(struct fba_device *fba_dev, int64_t time);
 
 bool fba_admin_poll_channel(void *obj);

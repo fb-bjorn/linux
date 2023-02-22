@@ -16,7 +16,7 @@
 #define DRV_NAME "fbalogger"
 #define LOGGER_PCI_MINORS 12
 
-// Device buffer header offsets
+/* Device buffer header offsets */
 #define READ_PTR_OFFSET 0
 #define WRITE_PTR_OFFSET 4
 #define DROP_COUNT_OFFSET 8

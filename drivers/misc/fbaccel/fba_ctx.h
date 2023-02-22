@@ -24,19 +24,21 @@
 struct fba_job;
 struct fba_job_result;
 
-// Allocate and initialize a dynamic context object.
+/* Allocate and initialize a dynamic context object. */
 struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,
 			      struct fba_ctx *parent);
 
-// Send open admin message and promote the state to allow FW transactions.
+/* Send open admin message and promote the state to allow FW transactions. */
 int fba_ctx_open(struct fba_ctx *ctx);
 
-// Send a close admin message (if appropriate) and release any resources
-// associated with this context as it will no longer be valid.
-// NOTE:  This does not deref the ctx.
+/*
+ * Send a close admin message (if appropriate) and release any resources
+ * associated with this context as it will no longer be valid.
+ * NOTE:  This does not deref the ctx.
+ */
 int fba_ctx_close(struct fba_ctx *ctx);
 
-// Check state of ctx.
+/* Check state of ctx. */
 bool fba_ctx_is_valid(struct fba_ctx *ctx);
 bool fba_ctx_is_open(struct fba_ctx *ctx);
 
@@ -67,28 +69,28 @@ bool fba_ctx_has_space(struct fba_ctx *ctx);
 /* Returns max number of submission entries per job for this ctx */
 uint64_t fba_ctx_max_job_subs(struct fba_ctx *ctx);
 
-// Complete a job associated with this ctx.  Returns true if callback called.
+/* Complete a job associated with this ctx.  Returns true if callback called. */
 void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job);
 
-// Returns true if there are any completed jobs.
+/* Returns true if there are any completed jobs. */
 bool fba_ctx_has_completions(struct fba_ctx *ctx);
 
-// Add a job and submit to the associated channel
+/* Add a job and submit to the associated channel */
 int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job);
 
-// Attempt to read one matching result from the context.
+/* Attempt to read one matching result from the context. */
 int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res,
 		 void *job_key);
 
-// Increment reference count of a context
+/* Increment reference count of a context */
 struct fba_ctx *fba_ctx_get(struct fba_ctx *ctx);
-// Decrement reference count of a context.
+/* Decrement reference count of a context. */
 void fba_ctx_put(struct fba_ctx *ctx);
-// Post an admin command through the admin channel
+/* Post an admin command through the admin channel */
 int fba_ctx_post_admin(struct fba_ctx *ctx, struct fba_submission *sub,
 		       uint16_t *stat);
 
-// Prevent new jobs from being submitted to associated channel.
+/* Prevent new jobs from being submitted to associated channel. */
 void fba_ctx_stop(struct fba_ctx *ctx);
 
 /* After ctx has been stopped, wait for all jobs to complete (or timeout) */

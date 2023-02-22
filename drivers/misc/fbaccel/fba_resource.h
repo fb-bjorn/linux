@@ -19,17 +19,19 @@ struct fba_resource {
 	int index;
 	uint16_t type;
 	uint16_t subtype;
-	// Start of generic address (Device Address).
+	/* Start of generic address (Device Address). */
 	uint64_t start;
-	// Host virtual address (where applicable)
+	/* Host virtual address (where applicable) */
 	void *va;
-	// While the genpool subsystem is a lock-free structure which can be
-	// safely called concurrently, for our specific use case though there
-	// are instances when multiple parallel invocations to gen_pool_add can
-	// result in unexpected fragmentation which can prevent later
-	// alloctions from being satisfied.
-	// To avoid this we serialize operations by ensuring that all calls to
-	// gen_pool_create and gen_pool_free are locked in our driver.
+	/*
+	 * While the genpool subsystem is a lock-free structure which can be
+	 * safely called concurrently, for our specific use case though there
+	 * are instances when multiple parallel invocations to gen_pool_add can
+	 * result in unexpected fragmentation which can prevent later
+	 * alloctions from being satisfied.
+	 * To avoid this we serialize operations by ensuring that all calls to
+	 * gen_pool_create and gen_pool_free are locked in our driver.
+	 */
 	spinlock_t pool_lock;
 	struct gen_pool *pool;
 	struct kref ref;
@@ -41,15 +43,15 @@ void fba_resource_pool_free(struct fba_resource *res, uint64_t addr,
 struct fba_resource *fba_resource_get(struct fba_resource *res);
 void fba_resource_put(struct fba_resource *res);
 
-// Resource Operations
+/* Resource Operations */
 int fba_resource_init(struct fba_device *fba_dev);
 void fba_resource_exit(struct fba_device *fba_dev);
 
-// Return information about the specified resource.
+/* Return information about the specified resource. */
 int fba_resource_info(struct fba_device *fba_dev, struct resource_info *info,
 		      size_t offs);
 
-// Operations relevant to the resource tracker struct fba_alloc (alloc).
+/* Operations relevant to the resource tracker struct fba_alloc (alloc). */
 struct fba_resource *fba_resource_find(struct fba_device *fba_dev,
 				       uint16_t index, uint16_t type,
 				       uint16_t subtype);

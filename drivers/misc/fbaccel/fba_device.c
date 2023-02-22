@@ -343,8 +343,10 @@ static int __fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg,
 		if (val == state)
 			return 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		// TODO: T85229364 T85229365 Reduce this to something more sensible, but
-		// emulation can be slow.
+		/*
+		 * TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		 * emulation can be slow.
+		 */
 		schedule_timeout(HZ);
 	}
 	fba_dev_err(fba_dev, "Failed state %d = %x.", reg, val);
@@ -380,8 +382,10 @@ static int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
 		if (val == state)
 			return 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		// TODO: T85229364 T85229365 Reduce this to something more sensible, but
-		// emulation can be slow.
+		/*
+		 * TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		 * emulation can be slow.
+		 */
 		schedule_timeout(HZ);
 	}
 	fba_dev_err(fba_dev, "Failed status ready = %x.", val);
@@ -514,7 +518,7 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 	fba_dev->streaming_chan_limits.sub_cnt =
 		fba_dev->streaming_channel_entries;
 
-	// Allocate enough space for all submission queues.
+	/* Allocate enough space for all submission queues. */
 	q_size = SAIL_SQ_BYTES(cdes) +
 		 fba_dev->streaming_channel_cnt *
 			 fba_dev->streaming_channel_entries *
@@ -524,7 +528,7 @@ static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 	if (ret)
 		return ret;
 
-	// Allocate enough space for all completion queues.
+	/* Allocate enough space for all completion queues. */
 	q_size = SAIL_CQ_BYTES(cdes) +
 		 fba_dev->streaming_channel_cnt *
 			 fba_dev->streaming_channel_entries *
@@ -651,7 +655,7 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 	int i, ret = 0;
 
 	if (!atomic_read(&fba_dev->has_failed)) {
-		// disable sail through mailbox registers
+		/* disable sail through mailbox registers */
 		set_mailbox(fba_dev, SAIL_CTRL, SAIL_DISABLED);
 		/* Use _nobail so we do actually wait for state change. */
 		ret = fba_wait_for_state_nobail(fba_dev, SAIL_STAT,
@@ -703,7 +707,7 @@ static int fba_device_enable_sail(struct fba_device *fba_dev)
 			    "Failed waiting for status memory signature.");
 		return ret;
 	}
-	// Resetting the ACK signal
+	/* Resetting the ACK signal */
 	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
 			  sizeof(uint32_t));
 
@@ -757,7 +761,7 @@ static int fba_device_fw_init(struct fba_device *fba_dev)
 	if (IS_ERR(fba_dev->logger_dev))
 		fba_dev->logger_dev = NULL;
 
-	// Setup Resources
+	/* Setup Resources */
 	ret = fba_resource_init(fba_dev);
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to init resources.");
@@ -772,7 +776,7 @@ static int fba_device_fw_init(struct fba_device *fba_dev)
 		goto err_resource_exit;
 	}
 
-	// coredump and mon init must be after fba_resource_init()
+	/* coredump and mon init must be after fba_resource_init() */
 	if (fba_dev->cfg->impl_ops->coredump_init)
 		fba_dev->cfg->impl_ops->coredump_init(fba_dev);
 
@@ -892,7 +896,7 @@ static int fba_pci_init(struct fba_device *fba_dev)
 	pci_set_drvdata(pdev, fba_dev);
 	pci_enable_pcie_error_reporting(pdev);
 
-	// Disable relaxed ordering on the device.
+	/* Disable relaxed ordering on the device. */
 	ret = pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
 					 PCI_EXP_DEVCTL_RELAX_EN);
 	if (ret) {
@@ -951,25 +955,27 @@ static int fba_shared_area_init(struct fba_device *fba_dev)
 {
 	int ret;
 
-	// Add a dma_alloc_coherent() to provide some mapped in DMA space.
-	// We already do something like that in fba_resource to get back
-	// info words and resource data.  We could just have a generic
-	// block allocate here for use by the driver, and add an IOCTL to
-	// read/write into it from user space.
+	/*
+	 * Add a dma_alloc_coherent() to provide some mapped in DMA space.
+	 * We already do something like that in fba_resource to get back
+	 * info words and resource data.  We could just have a generic
+	 * block allocate here for use by the driver, and add an IOCTL to
+	 * read/write into it from user space.
+	 */
 
-	// Debug Area pages.
+	/* Debug Area pages. */
 	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->debug_area,
 					SAIL_DEBUG_SIZE);
 	if (ret)
 		return ret;
 
-	// Temp Area pages.
+	/* Temp Area pages. */
 	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
 					SAIL_SCRATCH_SIZE);
 	if (ret)
 		goto err_free_debug;
 
-	// Allocate Host Status pages.
+	/* Allocate Host Status pages. */
 	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
 					SAIL_STATUS_SIZE);
 	if (ret)
@@ -1098,7 +1104,7 @@ static int fba_device_init(struct fba_device *fba_dev)
 	if (ret)
 		goto err_pci_exit;
 
-	// Driver is now available for IOCTL communication.
+	/* Driver is now available for IOCTL communication. */
 	fba_dev_info(fba_dev, "Done connecting BARs.");
 
 	ret = fba_mon_init(fba_dev);

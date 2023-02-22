@@ -8,11 +8,13 @@
  * Copyright (c) 2008 James Bottomley <James.Bottomley@HansenPartnership.com>
  * Copyright (C) 2017 Christoph Hellwig.
  */
-//
-// Generic Driver Funcs
-//
-// Functions for ringing doorbells, changing controller state, etc...
-//
+/*
+ *
+ * Generic Driver Funcs
+ *
+ * Functions for ringing doorbells, changing controller state, etc...
+ *
+ */
 #include <linux/device.h>
 #include <linux/types.h>
 
@@ -108,10 +110,10 @@ int fba_util_inc_usage(struct fba_device *fba_dev, const struct fba_limits *max,
 {
 	struct fba_limits tmp = *src;
 
-	// Add in values of src job to curent values.
+	/* Add in values of src job to curent values. */
 	tmp.sub_cnt += sub_cnt;
 
-	// Check if we exceed cmp limits.
+	/* Check if we exceed cmp limits. */
 	if (tmp.sub_cnt > max->sub_cnt) {
 		fba_dev_err(
 			fba_dev,

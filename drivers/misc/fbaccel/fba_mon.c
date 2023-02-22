@@ -28,41 +28,45 @@ MODULE_PARM_DESC(
 
 #define MON_NAME_LEN (120)
 
-// TODO: hide from user space
-// The value’s buffer is sufficiently large to hold the value of any item.
-// In the future we may want to optimize the value’s size for values
-// that need smaller space. For simplicity, first iteration will use this
-// constant size definition.
+/*
+ * TODO: hide from user space
+ * The value’s buffer is sufficiently large to hold the value of any item.
+ * In the future we may want to optimize the value’s size for values
+ * that need smaller space. For simplicity, first iteration will use this
+ * constant size definition.
+ */
 struct mon_data {
-	// To simplicity, when value encodes a string, they must terminate
-	// with a null.
+	/*
+	 * To simplicity, when value encodes a string, they must terminate
+	 * with a null.
+	 */
 	char value[MON_VALUE_SIZE];
-	int16_t ret; // sail_err_t
-	int8_t is_init; // value was updated at least once.
+	int16_t ret; /* sail_err_t */
+	int8_t is_init; /* value was updated at least once. */
 	int8_t reserved;
 };
 static_assert((sizeof(struct mon_data) % 32) == 0);
 
 struct mon_data_set {
-	// When value is a string, it should be null terminated
+	/* When value is a string, it should be null terminated */
 	char value[MON_VALUE_SIZE];
-	// The monitoring item with the specified index will be set to value
+	/* The monitoring item with the specified index will be set to value */
 	int16_t index;
 	int8_t reserved[2];
 };
 static_assert((sizeof(struct mon_data_set) % 32) == 0);
 
-// Describe an item to be monitored.
+/* Describe an item to be monitored. */
 struct mon_item {
-	char name[MON_NAME_LEN]; // Name of the item.
+	char name[MON_NAME_LEN]; /* Name of the item. */
 	uint16_t group;
-	uint16_t size; // data value size in bytes
-	uint8_t raw_type; // enum sail_raw_type
-	uint8_t unit; // sail_unit_t
+	uint16_t size; /* data value size in bytes */
+	uint8_t raw_type; /* enum sail_raw_type */
+	uint8_t unit; /* sail_unit_t */
 	uint8_t is_static;
-	uint8_t source; // enum mon_source
+	uint8_t source; /* enum mon_source */
 };
-// Ensure struct is 4-byte aligned.
+/* Ensure struct is 4-byte aligned. */
 static_assert((sizeof(struct mon_item) % 32) == 0);
 
 /* Describe grouping of monitoring items. */
@@ -74,45 +78,49 @@ struct mon_group {
 };
 static_assert((sizeof(struct mon_group) % 32) == 0);
 
-// Measurement's unit in the physical world.
-// Currently unused. Intended to be used for pretty printing of the value by
-// the application in user space.
+/*
+ * Measurement's unit in the physical world.
+ * Currently unused. Intended to be used for pretty printing of the value by
+ * the application in user space.
+ */
 enum mon_unit {
 	SAIL_MTU_UNKNOWN = 0,
-	SAIL_MTU_NONE, // An index or count.
-	SAIL_MTU_AMP, // AMPs.
-	SAIL_MTU_HEX, // Hex data.
-	SAIL_MTU_RPM, // Revolutions per minute.
-	SAIL_MTU_PERC, // Percentage.
-	SAIL_MTU_TEMP_C, // Temperature in Celsius.
-	SAIL_MTU_TEMP_F, // Temperature in Fahrenheit.
-	SAIL_MTU_VOLT_M, // Voltage in mV.
-	SAIL_MTU_TIME_S, //Time in seconds
-	SAIL_MTU_FREQ_MHZ, //Freq in Mega HZ
-	SAIL_MTU_MW, // Power in mW
-	SAIL_MTU_OPS, // Operations per second
+	SAIL_MTU_NONE, /* An index or count. */
+	SAIL_MTU_AMP, /* AMPs. */
+	SAIL_MTU_HEX, /* Hex data. */
+	SAIL_MTU_RPM, /* Revolutions per minute. */
+	SAIL_MTU_PERC, /* Percentage. */
+	SAIL_MTU_TEMP_C, /* Temperature in Celsius. */
+	SAIL_MTU_TEMP_F, /* Temperature in Fahrenheit. */
+	SAIL_MTU_VOLT_M, /* Voltage in mV. */
+	SAIL_MTU_TIME_S, /*Time in seconds */
+	SAIL_MTU_FREQ_MHZ, /*Freq in Mega HZ */
+	SAIL_MTU_MW, /* Power in mW */
+	SAIL_MTU_OPS, /* Operations per second */
 	SAIL_MTU_MAX
 };
 
-// The raw C type used for encoding/decoding the raw data.
+/* The raw C type used for encoding/decoding the raw data. */
 enum mon_raw_type {
-	SAIL_MTT_UNKNOWN = 0, // Int (8, 16, 32, 64)
-	SAIL_MTT_INT, // Signed int (8, 16, 32, 64)
-	SAIL_MTT_UINT, // Unsigned int (8, 16, 32, 64)
-	// SAIL_MTT_FIXP ecodes fractions as fixed point value since floating point is
-	// not supported on Zephyr CCP and has weak linux kernel support.
-	// The format is: int32_t val[2] , such that the equivalent float
-	// value is: val[0] + val[1] * 10e-6
-	// See: https://docs.zephyrproject.org/latest/reference/peripherals/sensor.html#c.sensor_value
+	SAIL_MTT_UNKNOWN = 0, /* Int (8, 16, 32, 64) */
+	SAIL_MTT_INT, /* Signed int (8, 16, 32, 64) */
+	SAIL_MTT_UINT, /* Unsigned int (8, 16, 32, 64) */
+	/*
+	 * SAIL_MTT_FIXP ecodes fractions as fixed point value since floating point is
+	 * not supported on Zephyr CCP and has weak linux kernel support.
+	 * The format is: int32_t val[2] , such that the equivalent float
+	 * value is: val[0] + val[1] * 10e-6
+	 * See: https://docs.zephyrproject.org/latest/reference/peripherals/sensor.html#c.sensor_value
+	 */
 	SAIL_MTT_FIXP,
-	SAIL_MTT_CSTR, // NUL terminated C string.
-	SAIL_MTT_RAW, // Raw bytes.
-	SAIL_MTT_DATETIME, // Timestamp time, date, month, year
+	SAIL_MTT_CSTR, /* NUL terminated C string. */
+	SAIL_MTT_RAW, /* Raw bytes. */
+	SAIL_MTT_DATETIME, /* Timestamp time, date, month, year */
 	SAIL_MTT_BOOL,
 	SAIL_MTT_MAX,
 };
 
-// Helper for MON_ITM_CB()
+/* Helper for MON_ITM_CB() */
 #define MON_ITM(name_, group_, source_, raw_type_, size_, unit_, is_static_)   \
 	{                                                                      \
 		.name = (name_), .group = (group_), .source = (source_),       \
@@ -120,7 +128,7 @@ enum mon_raw_type {
 		.is_static = (is_static_),                                     \
 	}
 
-// Helper for populating item definitions
+/* Helper for populating item definitions */
 #define MON_ITM_CB(name_, group_, source_, raw_type_, size_, unit_,            \
 		   is_static_, user_data_, get_value_cb_)                      \
 	{                                                                      \
@@ -154,12 +162,12 @@ enum mon_raw_type {
 #define MON_FIXP_SIZE (sizeof(int32_t) * 2)
 #define MON_VER_TYPE uint64_t
 
-// Static uint32_t
+/* Static uint32_t */
 #define MON_U32(name_, group_, source_, user_data_, get_value_cb_)             \
 	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t),    \
 		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
 
-// Define a monitored item of type string
+/* Define a monitored item of type string */
 #define MON_STR(name_, group_, source_, user_data_, get_value_cb_)             \
 	MON_ITM_CB(name_, group_, source_, SAIL_MTT_CSTR,                      \
 		   (MON_VALUE_SIZE - 1), SAIL_MTU_NONE, MON_ITM_STATIC,        \
@@ -169,24 +177,28 @@ enum mon_raw_type {
 	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t),    \
 		   SAIL_MTU_HEX, MON_ITM_DYNAMIC, user_data_, get_value_cb_)
 
-// Used to define a group. Example:
-// const mon_group_t groups[] = {
-//  MON_GRP(SAIL_MTG_xxx, "group_name"),
-// }
-//
-// SAIL_MTG_xxx: MTG stands for MoniToring Group. It is defined by caller
-// to uniqley identify groups.
+/*
+ * Used to define a group. Example:
+ * const mon_group_t groups[] = {
+ *  MON_GRP(SAIL_MTG_xxx, "group_name"),
+ * }
+ *
+ * SAIL_MTG_xxx: MTG stands for MoniToring Group. It is defined by caller
+ * to uniqley identify groups.
+ */
 #define MON_GRP(id_, name_)                                                    \
 	{                                                                      \
 		.id = (id_), .name = (name_),                                  \
 	}
 
-// Callback for reading monitoring values from the driver. The callback writes
-// upto buffer_size bytes into the buffer.
-// dev - fba_device that reads the value.
-// user_data - additional context for the callback.
-// buffer - points to the value field.
-// buffer_size - same as item.size
+/*
+ * Callback for reading monitoring values from the driver. The callback writes
+ * upto buffer_size bytes into the buffer.
+ * dev - fba_device that reads the value.
+ * user_data - additional context for the callback.
+ * buffer - points to the value field.
+ * buffer_size - same as item.size
+ */
 typedef int16_t (*fba_mon_cb_t)(struct fba_device * /*dev*/,
 				void * /*user_data*/, void * /*buf*/,
 				size_t /*buf_size*/);
@@ -198,22 +210,22 @@ struct fba_mon_item_w_cb {
 	fba_mon_cb_t set_value_cb;
 };
 
-// Monitoring group ids
+/* Monitoring group ids */
 enum {
 	MTG_ASIC_INFO,
 	MTG_CARD_ALERTS,
 };
 
 enum fba_mon_alerts {
-	// Alert for DDR Un-correctable error detection
+	/* Alert for DDR Un-correctable error detection */
 	FBA_MON_ALERT_DDR_UCE = 0,
-	// Alert for Internal memory Un-correctable error detection
+	/* Alert for Internal memory Un-correctable error detection */
 	FBA_MON_ALERT_INTERNAL_MEM_UCE,
-	// Alert for device FW fatal error/crash/hang
+	/* Alert for device FW fatal error/crash/hang */
 	FBA_MON_ALERT_DEVICE_FATAL_ERR,
-	// Alert for Heart Beat failure
+	/* Alert for Heart Beat failure */
 	FBA_MON_ALERT_HEART_BEAT_FAILURE,
-	// Alert for Control core WDT failure
+	/* Alert for Control core WDT failure */
 	FBA_MON_ALERT_CCP_WDT_FAILURE
 };
 
@@ -542,7 +554,7 @@ static int update_device_data(struct fba_device *fba_dev)
 	struct mon_data *data = mon->src_info[SAIL_MTS_CCP].data;
 	int ret = 0;
 
-	// Requires caller to lock the mon->mutex
+	/* Requires caller to lock the mon->mutex */
 	WARN_ON(!mutex_is_locked(&mon->mutex));
 
 	if (!mon->src_info[SAIL_MTS_CCP].item_cnt)
@@ -561,10 +573,12 @@ static int update_device_data(struct fba_device *fba_dev)
 	return ret;
 }
 
-// Returns polling frequency in jiffies.
-// Freq is set by the mon_poll_freq_ms module params.
-// Sets disable to true iff mon_poll_freq_ms==0.
-// Logs a msg when mon_poll_freq_ms has changed since last invocation.
+/*
+ * Returns polling frequency in jiffies.
+ * Freq is set by the mon_poll_freq_ms module params.
+ * Sets disable to true iff mon_poll_freq_ms==0.
+ * Logs a msg when mon_poll_freq_ms has changed since last invocation.
+ */
 static unsigned int get_polling_freq_jiffies(struct fba_device *fba_dev,
 					     bool *disable)
 {
@@ -590,8 +604,10 @@ static unsigned int get_polling_freq_jiffies(struct fba_device *fba_dev,
 	}
 
 	*disable = true;
-	// When mon_poll_freq_jiffies=0 we want to still poll
-	// for an update of mon_poll_freq_jiffies.
+	/*
+	 * When mon_poll_freq_jiffies=0 we want to still poll
+	 * for an update of mon_poll_freq_jiffies.
+	 */
 	return msecs_to_jiffies(5000);
 }
 
@@ -614,10 +630,12 @@ static void fba_mon_work_handler(struct work_struct *work)
 	}
 }
 
-// - Copy and offset driver_mon_groups and driver_mon_items_w_cb definition
-//   into mon->groups and mon->items respectively.
-// - Add the offset to the ids.
-// - Force name length to < MON_NAME_LEN.
+/*
+ * - Copy and offset driver_mon_groups and driver_mon_items_w_cb definition
+ *   into mon->groups and mon->items respectively.
+ * - Add the offset to the ids.
+ * - Force name length to < MON_NAME_LEN.
+ */
 static void set_driver_items_and_groups(struct fba_mon *mon)
 {
 	const int src = SAIL_MTS_DRIVER;
@@ -629,7 +647,7 @@ static void set_driver_items_and_groups(struct fba_mon *mon)
 
 		*cur = driver_mon_groups[i];
 		cur->id += mon->src_info[src].group_offset;
-		// Force group name length to be < MON_NAME_LEN
+		/* Force group name length to be < MON_NAME_LEN */
 		cur->name[MON_NAME_LEN - 1] = 0;
 	}
 
@@ -638,7 +656,7 @@ static void set_driver_items_and_groups(struct fba_mon *mon)
 
 		*cur = driver_mon_items_w_cb[i].item;
 		cur->group += group_offset;
-		// Force item name length to be < MON_NAME_LEN
+		/* Force item name length to be < MON_NAME_LEN */
 		cur->name[MON_NAME_LEN - 1] = 0;
 	}
 }
@@ -653,10 +671,10 @@ static int read_and_offset_device_items(struct fba_device *fba_dev,
 		mon->src_info[src].item_cnt * sizeof(struct mon_item);
 	int ret = 0;
 
-	if (size == 0) // driver_test support
+	if (size == 0) /* driver_test support */
 		return 0;
 
-	// Read items from device into the local buffer + offset
+	/* Read items from device into the local buffer + offset */
 	ret = fba_admin_dma_from_device(fba_dev, ADMIN_MON_READ_ITEMS,
 					&mon->src_info[src].items[0], size);
 	if (ret != 0) {
@@ -676,7 +694,7 @@ static int read_and_offset_device_items(struct fba_device *fba_dev,
 	return 0;
 }
 
-// Returns zero on success or error code otherwise.
+/* Returns zero on success or error code otherwise. */
 static int read_and_offset_device_groups(struct fba_device *fba_dev,
 					 struct fba_mon *mon)
 {
@@ -685,10 +703,10 @@ static int read_and_offset_device_groups(struct fba_device *fba_dev,
 		mon->src_info[src].group_cnt * sizeof(struct mon_group);
 	int i, ret = 0;
 
-	if (size == 0) // driver_test support
+	if (size == 0) /* driver_test support */
 		return 0;
 
-	// Read groups from device
+	/* Read groups from device */
 	ret = fba_admin_dma_from_device(fba_dev, ADMIN_MON_READ_GROUPS,
 					&mon->src_info[src].groups[0], size);
 	if (ret != 0) {
@@ -729,7 +747,7 @@ size_t fba_mon_get_group_cnt(struct fba_mon *mon)
 	return group_cnt;
 }
 
-// Returns zero on success or error code otherwise.
+/* Returns zero on success or error code otherwise. */
 static int alloc_items_groups_and_data(struct fba_mon *mon, enum mon_source src)
 {
 	size_t items_size = 0;
@@ -738,12 +756,14 @@ static int alloc_items_groups_and_data(struct fba_mon *mon, enum mon_source src)
 	size_t data_set_size = 0;
 	int ret = 0;
 
-	// user views the items and groups as single array which
-	// includes data from all mon sources.
-	// Use offsets calculated below to decide the array index
-	// for items and groups as index in single array view.
-	// src = 0, all offsets are 0
-	// src = n, offset offset[n-1]+item_cnt[n-1]
+	/*
+	 * user views the items and groups as single array which
+	 * includes data from all mon sources.
+	 * Use offsets calculated below to decide the array index
+	 * for items and groups as index in single array view.
+	 * src = 0, all offsets are 0
+	 * src = n, offset offset[n-1]+item_cnt[n-1]
+	 */
 	if (src != 0) {
 		mon->src_info[src].item_offset =
 			mon->src_info[src - 1].item_offset +
@@ -835,7 +855,7 @@ void fba_mon_exit(struct fba_mon *mon)
 	if (!mon_disable_polling)
 		destroy_workqueue(mon->workq);
 
-	// call device exit to make sure fba_mon device resources are freed.
+	/* call device exit to make sure fba_mon device resources are freed. */
 	fba_mon_device_exit(mon);
 	fba_mon_driver_exit(mon);
 }
@@ -853,7 +873,7 @@ int fba_mon_init(struct fba_device *fba_dev)
 		fba_dev_err(fba_dev, "Failed to start monitoring workqueue");
 		return -ENOMEM;
 	}
-	// Only initialize the driver provided fba_mon items on probe.
+	/* Only initialize the driver provided fba_mon items on probe. */
 	ret = fba_mon_driver_init(fba_dev);
 	if (ret != 0) {
 		fba_dev_err(fba_dev,
@@ -939,10 +959,12 @@ static int fba_mon_get_src_from_id(struct fba_mon *mon, uint32_t id)
 	uint32_t end;
 	int src;
 
-	// ids from src_info[SAIL_MTS_DRIVER].offset=0 to
-	// src_info[SAIL_MTS_DRIVER].item_cnt are for SAIL_MTS_DRIVER.
-	// ids are from src_info[SAIL_MTS_CCP].offset to
-	// src_info[SAIL_MTS_CCP].item_cnt are for SAIL_MTS_CCP.
+	/*
+	 * ids from src_info[SAIL_MTS_DRIVER].offset=0 to
+	 * src_info[SAIL_MTS_DRIVER].item_cnt are for SAIL_MTS_DRIVER.
+	 * ids are from src_info[SAIL_MTS_CCP].offset to
+	 * src_info[SAIL_MTS_CCP].item_cnt are for SAIL_MTS_CCP.
+	 */
 	for (src = 0; src < SAIL_MTS_MAX; ++src) {
 		start = mon->src_info[src].item_offset;
 		end = start + mon->src_info[src].item_cnt;
@@ -980,7 +1002,7 @@ int fba_mon_get_defs(struct fba_device *fba_dev,
 
 	mon_defs_req->items_bytes_written = 0;
 	mon_defs_req->groups_bytes_written = 0;
-	// Get items and groups from all mon sources
+	/* Get items and groups from all mon sources */
 	for (src = 0; src < SAIL_MTS_MAX; src++) {
 		if (mon->src_info[src].is_init) {
 			size_t items_size = mon->src_info[src].item_cnt *
@@ -1035,10 +1057,10 @@ int fba_mon_get_data(struct fba_device *fba_dev, uint32_t *ids,
 	int ret = 0;
 
 	mutex_lock(&mon->mutex);
-	// Read driver mon data every time user request is made.
+	/* Read driver mon data every time user request is made. */
 	update_driver_data(fba_dev);
 
-	// Update device data synchronously, if requested.
+	/* Update device data synchronously, if requested. */
 	if (mon_disable_polling) {
 		ret = update_device_data(fba_dev);
 		if (ret != 0)
@@ -1114,7 +1136,7 @@ int fba_mon_set_data(struct fba_device *fba_dev, uint32_t *ids,
 			goto out_unlock;
 		}
 
-		if (src == SAIL_MTS_DRIVER) { // TODO(T112986964)
+		if (src == SAIL_MTS_DRIVER) { /* TODO(T112986964) */
 			ret = -EINVAL;
 			goto out_unlock;
 		}

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
-//
-// Freya Driver
-//
+/*
+ *
+ * Freya Driver
+ *
+ */
 
 #include <asm/byteorder.h>
 #include <linux/delay.h>
@@ -41,7 +43,7 @@ static int pe_idcache_disable;
 static int ecc_region_size_mb;
 static int p2p_ecc_region_size_mb;
 
-// Firmware boot parameters as a string.
+/* Firmware boot parameters as a string. */
 static char *freya_boot_args = "";
 
 module_param(gdb_on_boot, bool, 0444);
@@ -149,8 +151,10 @@ static void freya_m7_set_hb_mon_period(void *obj)
 	if (!fba_dev->pcie_boot_en)
 		return;
 	if (m7_hb_period_ms == 0) {
-		// Go back to default polling period, disable the
-		// monitor from sending the heartbeat
+		/*
+		 * Go back to default polling period, disable the
+		 * monitor from sending the heartbeat
+		 */
 		fba_dev->m7_health_poller->period_ms = M7_HEARTBEAT_PERIOD_MS;
 		if (fba_dev->m7_health_poller->enabled)
 			fba_dev_err(fba_dev,
@@ -167,22 +171,24 @@ static void freya_m7_set_hb_mon_period(void *obj)
 	}
 }
 
-// The overall design document for M7 heartbeat/watchdog:
-// Driver would poll on M7 health every m7_hb_period_ms
-//		1- Driver writes to M7_HEARTBEAT_CTRL_ENTRY mailbox to trigger an
-//			interrupt on M7
-//		2- M7 Handler of that interrupts checks the health of all the M7
-//			threads and writes to M7_HEARTBEAT_STATUS_ENTRY mailbox
-//		3- Driver sleeps for M7_HEARTBEAT_TIMEOUT_MS to check the
-//			M7_HEARTBEAT_STATUS_ENTRY mailbox
-//		4- Driver sets m7_health monitoring key based on mailbox value:
-//			-  0:
-//					M7 was outright hang and it couldn't update the mailbox
-//			- M7_HEALTHY:
-//					M7 was healthy and updated the mailbox with the M7_HEALTHY
-//					value
-//			- Thread bit mask:
-//					Some of the M7 threads were unhealthy
+/*
+ * The overall design document for M7 heartbeat/watchdog:
+ * Driver would poll on M7 health every m7_hb_period_ms
+ *	1- Driver writes to M7_HEARTBEAT_CTRL_ENTRY mailbox to trigger an
+ *		interrupt on M7
+ *	2- M7 Handler of that interrupts checks the health of all the M7
+ *		threads and writes to M7_HEARTBEAT_STATUS_ENTRY mailbox
+ *	3- Driver sleeps for M7_HEARTBEAT_TIMEOUT_MS to check the
+ *		M7_HEARTBEAT_STATUS_ENTRY mailbox
+ *	4- Driver sets m7_health monitoring key based on mailbox value:
+ *		-  0:
+ *				M7 was outright hang and it couldn't update the mailbox
+ *		- M7_HEALTHY:
+ *				M7 was healthy and updated the mailbox with the M7_HEALTHY
+ *				value
+ *		- Thread bit mask:
+ *				Some of the M7 threads were unhealthy
+ */
 static bool freya_m7_hb_poll(void *obj)
 {
 	struct fba_device *fba_dev = obj;
@@ -190,14 +196,14 @@ static bool freya_m7_hb_poll(void *obj)
 
 	if (!fba_dev->pcie_boot_en)
 		return true;
-	// Reset M7_HEARTBEAT_STATUS_ENTRY mailbox
+	/* Reset M7_HEARTBEAT_STATUS_ENTRY mailbox */
 	set_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY, 0);
-	// Triggering heartbeat interrupt to M7
+	/* Triggering heartbeat interrupt to M7 */
 	set_mailbox(fba_dev, M7_HEARTBEAT_CTRL_ENTRY, M7_WATCHDOG);
-	// Wait for M7 to signal it's health
+	/* Wait for M7 to signal it's health */
 	msleep(M7_HEARTBEAT_TIMEOUT_MS);
 
-	// Read M7 status
+	/* Read M7 status */
 	m7_status = get_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY);
 	if (m7_status == M7_HEALTHY) {
 		if (fba_dev->m7_health != HEALTHY) {
@@ -209,7 +215,6 @@ static bool freya_m7_hb_poll(void *obj)
 			}
 			fba_dev->m7_health = HEALTHY;
 		}
-
 	} else if (m7_status == 0) {
 		if (fba_dev->m7_health != UNHEALTHY) {
 			fba_dev->m7_health = UNHEALTHY;
@@ -300,7 +305,7 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 
 	store_boot_args(fba_dev);
 
-	// Ensure ECC regions are a multiple of 16MB
+	/* Ensure ECC regions are a multiple of 16MB */
 	if (IS_ALIGNED(ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
 		fba_write_bar(fba_dev, ecc_region_size_mb, BAR_CXRAM,
 			      CXRAM_ECC_REGION_SIZE_OFFSET);
@@ -358,7 +363,7 @@ static int fbia_coredump_init(struct fba_device *fba_dev)
 		fba_dev_err(fba_dev, "fba_request_irq failed for tx irq");
 		return ret;
 	}
-	// Only set the coredump exit function when coredump init is successful
+	/* Only set the coredump exit function when coredump init is successful */
 	fba_dev->coredump_init = true;
 	return ret;
 }
@@ -479,7 +484,7 @@ static int fbia_coredump_get_regions(struct fba_device *fba_dev,
 	regions_size = fbia_coredump_get_num_regions(fba_dev) *
 		       sizeof(struct coredump_region);
 	if (size < regions_size) {
-		// Partial reading of coredump info is not supported
+		/* Partial reading of coredump info is not supported */
 		fba_dev_err(
 			fba_dev,
 			"Error in reading coredump region info, not enough memory to read full buffer");
@@ -646,16 +651,22 @@ static void freya_boot_error_signal_print(struct fba_device *fba_dev)
 
 static void freya_boot_error_signal_reset(struct fba_device *fba_dev)
 {
-	// This will reset all ERROR_CODE, CERT1_ERROR_CODE, CERT2_ERROR_CODE,
-	// CERT3_ERROR_CODE
+	/*
+	 * This will reset all ERROR_CODE, CERT1_ERROR_CODE, CERT2_ERROR_CODE,
+	 * CERT3_ERROR_CODE
+	 */
 	freya_write_cxram_sb(fba_dev, 0, SB_ERROR_CODE_OFS);
 
-	// This will reset all ASIC_ERROR_TYPE, MODULE_ERROR_TYPE, WARNING_FLAG,
-	// INTERRUPT_FLAG
+	/*
+	 * This will reset all ASIC_ERROR_TYPE, MODULE_ERROR_TYPE, WARNING_FLAG,
+	 * INTERRUPT_FLAG
+	 */
 	freya_write_cxram_sb(fba_dev, 0, SB_ASIC_ERROR_TYPE_OFS);
 
-	// This will reset all MAX_ASIC_TEMP, INT_MEM_ERR_CNT, EXT_MEM_ERR_CNT,
-	// SMBUS_ERROR
+	/*
+	 * This will reset all MAX_ASIC_TEMP, INT_MEM_ERR_CNT, EXT_MEM_ERR_CNT,
+	 * SMBUS_ERROR
+	 */
 	freya_write_cxram_sb(fba_dev, 0, SB_MAX_ASIC_TEMP_OFS);
 }
 
@@ -670,15 +681,17 @@ static int freya_download_image(struct fba_device *fba_dev,
 	uint32_t val;
 	int ret;
 
-	// Print and reset the persistent error code as M7 would not reset these on
-	// any type of reset
+	/*
+	 * Print and reset the persistent error code as M7 would not reset these on
+	 * any type of reset
+	 */
 	freya_boot_error_signal_print(fba_dev);
 	freya_boot_error_signal_reset(fba_dev);
 
-	// Clearing handshaking bits
+	/* Clearing handshaking bits */
 	cxram_sideband_clearbit(fba_dev, CONTROL_CLEAR_MASK, SB_FW_UPDATE_OFS);
 
-	// Verify bits were cleared
+	/* Verify bits were cleared */
 	val = freya_read_cxram_sb(fba_dev, SB_FW_UPDATE_OFS);
 	if ((val & CONTROL_CLEAR_MASK) != 0) {
 		fba_dev_err(fba_dev,
@@ -686,33 +699,37 @@ static int freya_download_image(struct fba_device *fba_dev,
 		return -EIO;
 	}
 
-	// Setting up the location of the image source (it can only be SRAM)
-	// and image final destination
+	/*
+	 * Setting up the location of the image source (it can only be SRAM)
+	 * and image final destination
+	 */
 	cxram_sideband_set_mask(fba_dev, FW_IMAGE_SRC_MASK | FW_IMAGE_DST_MASK,
 				FIELD_PREP(FW_IMAGE_SRC_MASK, LOCATION_SRAM) |
 					FIELD_PREP(FW_IMAGE_DST_MASK,
 						   image_destination),
 				SB_FW_IMAGE_TARGET_CMD_OFS);
 
-	// Setting the initiate download bit from host
+	/* Setting the initiate download bit from host */
 	cxram_sideband_setbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
 	fba_dev_info(fba_dev, "Initiate download");
 	timeout = priv->boot_timeouts->rdy_for_img_xfer_ms;
 
-	// Waiting for the device to respond that it is ready for image transfer
+	/* Waiting for the device to respond that it is ready for image transfer */
 	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
 				    READY_FOR_FW_IMAGE, READY_FOR_FW_IMAGE,
 				    timeout);
 	if (ret < 0) {
-		// Timeout while waiting for the device to respond
+		/* Timeout while waiting for the device to respond */
 		fba_dev_err(fba_dev, "Ready for FW image timeout");
 		goto err_out;
 	}
 	fba_dev_info(fba_dev, "Device ready for FW image");
 
-	// Transfer the image to context SRAM using BAR 2(a portion right at the
-	// beginning of this BAR is mapped to CxRAM during boot0 initialization,
-	// so the offset from CxRAM start address is the same offset of this BAR)
+	/*
+	 * Transfer the image to context SRAM using BAR 2(a portion right at the
+	 * beginning of this BAR is mapped to CxRAM during boot0 initialization,
+	 * so the offset from CxRAM start address is the same offset of this BAR)
+	 */
 	bufp = (void __iomem *)(fba_dev->bars[BAR_CXRAM] +
 				priv->cxram_upgrade_ofs);
 	max_buf = priv->cxram_upgrade_sz;
@@ -724,17 +741,17 @@ static int freya_download_image(struct fba_device *fba_dev,
 		goto err_out;
 	}
 
-	// Signal to the device that the image transfer is done
+	/* Signal to the device that the image transfer is done */
 	cxram_sideband_setbit(fba_dev, TRANSFER_DONE, SB_FW_UPDATE_OFS);
 	fba_dev_info(fba_dev, "Device is notified that transfer is done");
 	timeout = priv->boot_timeouts->img_received_ms;
 
-	// Waiting for the device to acknowledge the transfer
+	/* Waiting for the device to acknowledge the transfer */
 	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
 				    UPDATE_IN_PROGRESS, UPDATE_IN_PROGRESS,
 				    timeout);
 
-	// Timeout while waiting for the device to respond
+	/* Timeout while waiting for the device to respond */
 	if (ret < 0) {
 		fba_dev_err(fba_dev, "Image received timeout");
 		goto err_out;
@@ -742,10 +759,10 @@ static int freya_download_image(struct fba_device *fba_dev,
 	fba_dev_info(fba_dev,
 		     "Device is in progress of authenticating the image");
 
-	// Clearing the transfer done signal
+	/* Clearing the transfer done signal */
 	cxram_sideband_clearbit(fba_dev, TRANSFER_DONE, SB_FW_UPDATE_OFS);
 
-	// Verify the transfer done signal was cleared
+	/* Verify the transfer done signal was cleared */
 	val = freya_read_cxram_sb(fba_dev, SB_FW_UPDATE_OFS);
 	if ((val & TRANSFER_DONE) != 0) {
 		fba_dev_err(fba_dev,
@@ -757,8 +774,10 @@ static int freya_download_image(struct fba_device *fba_dev,
 		fba_dev,
 		"Transfer done flag is cleared, waiting for update complete");
 
-	// Waiting for the device to complete image verification and transfer to
-	// the destination location
+	/*
+	 * Waiting for the device to complete image verification and transfer to
+	 * the destination location
+	 */
 	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS, UPDATE_COMPLETE,
 				    UPDATE_COMPLETE, load_timeout);
 
@@ -775,10 +794,12 @@ static int freya_download_image(struct fba_device *fba_dev,
 	return ret;
 
 err_out:
-	// This is needed when we want to abort the boot flow from host side if host
-	// didn't receive the required response from the device in a timely manner.
+	/*
+	 * This is needed when we want to abort the boot flow from host side if host
+	 * didn't receive the required response from the device in a timely manner.
+	 */
 	cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
-	// Print the debug signals for further investigation
+	/* Print the debug signals for further investigation */
 	freya_boot_error_signal_print(fba_dev);
 	return ret;
 }
@@ -800,11 +821,11 @@ static int freya_boot(struct fba_device *fba_dev,
 	ret = freya_download_image(fba_dev, image_destination, file_name,
 				   load_timeout);
 	if (ret == 0) {
-		// Signal the device to boot the new image
+		/* Signal the device to boot the new image */
 		cxram_sideband_setbit(fba_dev, BOOT_CMD,
 				      SB_FW_IMAGE_TARGET_CMD_OFS);
 		fba_dev_info(fba_dev, "Boot request sent to the device");
-		// Clear the request initiating the firmware download
+		/* Clear the request initiating the firmware download */
 		cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD,
 					SB_FW_UPDATE_OFS);
 		cxram_sideband_clearbit(fba_dev, READY_FOR_FW_IMAGE,
@@ -820,7 +841,7 @@ static int freya_boot1(struct fba_device *fba_dev)
 	unsigned long timeout;
 	struct freya_priv *priv = fba_dev->impl_priv;
 
-	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
@@ -889,7 +910,7 @@ static int freya_load_mbist(struct fba_device *fba_dev)
 	int ret;
 	uint32_t result;
 
-	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
@@ -928,11 +949,11 @@ static int freya_load_ccp(struct fba_device *fba_dev)
 	unsigned long timeout;
 	struct freya_priv *priv = fba_dev->impl_priv;
 
-	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
-	//Clear the mailbox before we start loading/booting ccp
+	/*Clear the mailbox before we start loading/booting ccp */
 	set_mailbox(fba_dev, SAIL_RDY, 0);
 
 	timeout = priv->boot_timeouts->ccp_load_ms;
@@ -971,7 +992,7 @@ static int freya_secure_dbg_unlock(struct fba_device *fba_dev)
 	struct freya_priv *priv = fba_dev->impl_priv;
 	int ret;
 
-	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
@@ -997,7 +1018,7 @@ static int freya_provision(struct fba_device *fba_dev)
 	int ret;
 	int result;
 
-	// Assume CCP FW is loaded if PCIe Boot is not enabled
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
 	if (!fba_dev->pcie_boot_en)
 		return 0;
 
@@ -1079,9 +1100,11 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 	return freya_boot_ccp(fba_dev);
 }
 
-// Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
-// callback is set to reset CCP and CIP. The second entry serves as a status
-// to let the driver know that the CCP CIP reset is done
+/*
+ * Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
+ * callback is set to reset CCP and CIP. The second entry serves as a status
+ * to let the driver know that the CCP CIP reset is done
+ */
 static int reset_ccp(struct fba_device *fba_dev)
 {
 	int ret;
