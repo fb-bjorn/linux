@@ -82,6 +82,17 @@
 #define LCS_STATE_MASK GENMASK(26, 24)
 #define LCS_STATE_SECURE 5
 
+#define SB_TRANSFER_HEADER_MODE_OFS 0xC4
+#define PAYLOAD_EXEC_FUNC_MODE BIT(1)
+#define PAYLOAD_EXEC_CUSTOM_ARGS BIT(31)
+
+#define SB_TRANSFER_DATA_PACKET_DATA_OFS 0xC8
+#define SB_TRANSFER_DATA_PACKET_UID 0x08E83A39
+#define SB_TRANSFER_DATA_PACKET_VERSION 1
+
+#define SB_LPDDR_ECC_CONFIG_OFS 0xF0
+#define LPDDR_INLINE_ECC_ENABLED_MASK GENMASK(25, 24)
+
 #define SB_EXEC_STATUS_OFS 0xE8
 #define EXEC_STATUS_MASK GENMASK(31, 24)
 #define EXEC_STATUS_IDLE 0x00
@@ -138,6 +149,28 @@ enum image_location {
 	LOCATION_A55_CORE1 = 10,
 	LOCATION_DEBUG_CERTIFICATE = 11,
 	LOCATION_UKNOWN = 12,
+};
+
+struct payload_exec_data {
+	__le32 uid;
+	__le32 version;
+	__le32 func;
+	__le32 arg1;
+	__le32 arg2;
+	__le32 arg3;
+	__le32 packet_xor;
+	__le32 unused;
+};
+
+struct payload_exec_result {
+	__le32 uid;
+	__le32 version;
+	__le32 ret_buf_addr_low;
+	__le32 ret_buf_addr_high;
+	__le32 ret_buf_size_low;
+	__le32 ret_buf_size_high;
+	__le32 packet_xor;
+	__le32 unused;
 };
 
 /* from fbia/common/includes/cfg.h */

@@ -1013,6 +1013,228 @@ static int freya_secure_dbg_unlock(struct fba_device *fba_dev)
 	return ret;
 }
 
+static void payload_exec_send_input(struct fba_device *fba_dev,
+				    const struct payload_exec_ioctl *params,
+				    void __iomem *device_packet_buf)
+{
+	struct payload_exec_data data_packet;
+	uint32_t data2;
+	uint32_t parity;
+
+	if (params->use_default_args && params->use_default_func) {
+		cxram_sideband_clearbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
+					SB_TRANSFER_HEADER_MODE_OFS);
+		data2 = 0;
+	} else {
+		cxram_sideband_setbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
+				      SB_TRANSFER_HEADER_MODE_OFS);
+		data2 = params->func;
+		if (params->use_default_args == 0)
+			data2 |= PAYLOAD_EXEC_CUSTOM_ARGS;
+	}
+
+	/* FW XORs first 6 dwords and verifies it matches parity bits from the host */
+	parity = SB_TRANSFER_DATA_PACKET_UID ^ SB_TRANSFER_DATA_PACKET_VERSION ^
+		 data2 ^ params->arg1 ^ params->arg2 ^ params->arg3;
+
+	data_packet = (struct payload_exec_data){
+		cpu_to_le32(SB_TRANSFER_DATA_PACKET_UID),
+		cpu_to_le32(SB_TRANSFER_DATA_PACKET_VERSION),
+		cpu_to_le32(data2),
+		cpu_to_le32(params->arg1),
+		cpu_to_le32(params->arg2),
+		cpu_to_le32(params->arg3),
+		cpu_to_le32(parity),
+		0
+	};
+
+	memcpy_toio(device_packet_buf, &data_packet, sizeof(data_packet));
+}
+
+static int payload_exec_read_result_data(
+	struct fba_device *fba_dev, const struct payload_exec_ioctl *params,
+	void __iomem *device_packet_buf, uint64_t *results_buf,
+	uint64_t *actual_results_size)
+{
+	struct payload_exec_result result_info;
+	uint64_t output_data_size;
+	uint64_t output_data_addr;
+	void __iomem *device_results_buf;
+	int copy_size;
+
+	memcpy_fromio(&result_info, device_packet_buf, sizeof(result_info));
+
+	output_data_size =
+		((uint64_t)le32_to_cpu(result_info.ret_buf_size_high) << 32) |
+		le32_to_cpu(result_info.ret_buf_size_low);
+	output_data_addr =
+		((uint64_t)le32_to_cpu(result_info.ret_buf_addr_high) << 32) |
+		le32_to_cpu(result_info.ret_buf_addr_low);
+	fba_dev_dbg(
+		fba_dev,
+		"Payload HBIN execution complete. Results buffer - Size: 0x%llx Addr: 0x%llx",
+		output_data_size, output_data_addr);
+
+	if ((output_data_size > 0) && (params->results_buf_size > 0)) {
+		/* Ensure we don't overflow the userspace buffer if it's undersized */
+		if (output_data_size < params->results_buf_size)
+			copy_size = output_data_size;
+		else
+			copy_size = params->results_buf_size;
+
+		if ((output_data_addr < FREYA_CXRAM_BASE) ||
+		    (output_data_addr + output_data_size >
+		     FREYA_CXRAM_BASE + FREYA_CXRAM_SIZE)) {
+			fba_dev_err(
+				fba_dev,
+				"Output data buffer not contained in CXRAM");
+			return -EIO;
+		}
+
+		/* Translate device's output data address to host virtual address */
+		device_results_buf = fba_util_get_bar_ptr(
+			fba_dev, BAR_CXRAM,
+			output_data_addr - FREYA_CXRAM_BASE);
+		fba_dev_dbg(
+			fba_dev,
+			"params->results_buf: 0x%p device_buf: 0x%p copy_size: %i",
+			results_buf, device_results_buf, copy_size);
+
+		memcpy_fromio(results_buf, device_results_buf, copy_size);
+	}
+
+	*actual_results_size = output_data_size;
+	return 0;
+}
+
+static int freya_payload_exec(struct fba_device *fba_dev,
+			      const struct payload_exec_ioctl *params,
+			      char *hbin_filename, uint64_t *results_buf,
+			      uint64_t *actual_results_size)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	void __iomem *device_packet_buf;
+	int result;
+	int ret;
+
+	mutex_lock(&priv->download_mtx);
+
+	ret = freya_download_image(fba_dev, LOCATION_MBIST, hbin_filename,
+				   params->exec_timeout);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Executable HBIN load failed.");
+		goto out_unlock;
+	}
+
+	device_packet_buf = fba_util_get_bar_ptr(
+		fba_dev, BAR_CXRAM, SB_TRANSFER_DATA_PACKET_DATA_OFS);
+	payload_exec_send_input(fba_dev, params, device_packet_buf);
+
+	/* Set the boot flag and clear init_download to signal
+	 * Boot1 to begin executing the payload
+	 */
+	cxram_sideband_setbit(fba_dev, BOOT_CMD, SB_FW_IMAGE_TARGET_CMD_OFS);
+	cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
+
+	fba_dev_dbg(fba_dev,
+		    "Payload HBIN execution started, waiting for result.");
+
+	ret = freya_wait_for_status(
+		fba_dev, SB_EXEC_STATUS_OFS, EXEC_STATUS_MASK,
+		FIELD_PREP(EXEC_STATUS_MASK, EXEC_STATUS_COMPLETE),
+		params->exec_timeout);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Payload HBIN execution timed out");
+		goto out_unlock;
+	}
+
+	result = FIELD_GET(EXEC_RESULT_MASK,
+			   freya_read_cxram_sb(fba_dev, SB_EXEC_RESULT_OFS));
+	if (result == EXEC_RESULT_PASS) {
+		ret = payload_exec_read_result_data(fba_dev, params,
+						    device_packet_buf,
+						    results_buf,
+						    actual_results_size);
+	} else {
+		ret = -EBADE;
+		fba_dev_err(fba_dev, "Payload HBIN execution failed");
+	}
+
+out_unlock:
+	mutex_unlock(&priv->download_mtx);
+	return ret;
+}
+
+static int fbia_ioctl_payload_exec(struct fba_device *fba_dev,
+				   void __user *data)
+{
+	struct payload_exec_ioctl params;
+	uint64_t *results_buf = NULL;
+	uint64_t actual_results_size = 0;
+	void __user *user_results_buf;
+	void __user *user_actual_results_size;
+	char __user *user_hbin_filename;
+	char *hbin_filename;
+	int ret;
+
+	if (copy_from_user(&params, data, sizeof(params)))
+		return -EFAULT;
+
+	/* Copy the HBIN filename into the driver. */
+	hbin_filename = kzalloc(NAME_MAX + 1, GFP_KERNEL);
+	if (hbin_filename == NULL)
+		return -ENOMEM;
+
+	if (params.user_hbin_filename_ptr != 0) {
+		user_hbin_filename =
+			u64_to_user_ptr(params.user_hbin_filename_ptr);
+		ret = strncpy_from_user(hbin_filename, user_hbin_filename,
+					NAME_MAX);
+		if (ret < 0) {
+			fba_dev_err(fba_dev, "HBIN filename strncpy failed.");
+			goto out_free_buf;
+		}
+	}
+
+	/* Allocate a results buffer in the kernel, and save the userspace ptr for later */
+	if (params.results_buf_size > 0) {
+		results_buf = kvzalloc(params.results_buf_size, GFP_KERNEL);
+		if (results_buf == NULL) {
+			ret = -ENOMEM;
+			goto out_free_buf;
+		}
+	}
+
+	ret = freya_payload_exec(fba_dev, &params, hbin_filename, results_buf,
+				 &actual_results_size);
+	if (ret != 0)
+		goto out_free_buf;
+
+	if ((params.results_buf_size > 0) && (actual_results_size > 0)) {
+		user_results_buf = u64_to_user_ptr(params.user_results_buf_ptr);
+		ret = copy_to_user(user_results_buf, results_buf,
+				   params.results_buf_size);
+		if (ret != 0) {
+			ret = -EFAULT;
+			goto out_free_buf;
+		}
+	}
+
+	if (params.user_actual_results_size_ptr != 0) {
+		user_actual_results_size =
+			u64_to_user_ptr(params.user_actual_results_size_ptr);
+		ret = copy_to_user(user_actual_results_size,
+				   &actual_results_size,
+				   sizeof(actual_results_size));
+		if (ret != 0)
+			ret = -EFAULT;
+	}
+out_free_buf:
+	kfree(results_buf);
+	kfree(hbin_filename);
+	return ret;
+}
+
 static int freya_provision(struct fba_device *fba_dev)
 {
 	int ret;
@@ -1210,6 +1432,8 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	}
 	case FBA_IOCTL_SECURE_DBG_UNLOCK:
 		return freya_secure_dbg_unlock(fba_dev);
+	case FBA_IOCTL_PAYLOAD_EXEC:
+		return fbia_ioctl_payload_exec(fba_dev, data);
 	default:
 		return -EINVAL;
 	}
