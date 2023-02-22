@@ -223,64 +223,64 @@ static struct mon_group driver_mon_groups[] = {
 };
 #define N_DRIVER_MON_GROUPS ARRAY_SIZE(driver_mon_groups)
 
-static int16_t get_pci_addr(struct fba_device *dev, void *user_data, void *buf,
-			    size_t buf_size)
+static int16_t get_pci_addr(struct fba_device *fba_dev, void *user_data,
+			    void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 
 	snprintf((char *)buf, buf_size, "%s", dev_name(&pdev->dev));
 
 	return 0;
 }
 
-static int16_t get_pci_class(struct fba_device *dev, void *user_data, void *buf,
-			     size_t buf_size)
+static int16_t get_pci_class(struct fba_device *fba_dev, void *user_data,
+			     void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 
 	snprintf((char *)buf, buf_size, "%04x", pdev->class >> 8);
 
 	return 0;
 }
 
-static int16_t get_reset_supported(struct fba_device *dev, void *user_data,
+static int16_t get_reset_supported(struct fba_device *fba_dev, void *user_data,
 				   void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 	bool *is_supported = buf;
 
 	*is_supported = ((pdev->class >> 8) != 0);
 	return 0;
 }
 
-static int16_t get_pci_device_id(struct fba_device *dev, void *user_data,
+static int16_t get_pci_device_id(struct fba_device *fba_dev, void *user_data,
 				 void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 
 	snprintf((char *)buf, buf_size, "%04x", pdev->device);
 
 	return 0;
 }
 
-static int16_t get_device_id(struct fba_device *dev, void *user_data, void *buf,
-			     size_t buf_size)
+static int16_t get_device_id(struct fba_device *fba_dev, void *user_data,
+			     void *buf, size_t buf_size)
 {
 	uint32_t *data = (uint32_t *)buf;
 
 	if (buf_size < sizeof(uint32_t)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
-	*data = dev->id;
+	*data = fba_dev->id;
 
 	return 0;
 }
 
-static int16_t get_pci_vendor_id(struct fba_device *dev, void *user_data,
+static int16_t get_pci_vendor_id(struct fba_device *fba_dev, void *user_data,
 				 void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 
 	snprintf((char *)buf, buf_size, "%04x", pdev->vendor);
 
@@ -308,10 +308,10 @@ static const char *const pcie_speeds[] = {
 };
 
 /* based on current_link_speed_show() in drivers/pci/pci-sysfs.c */
-static int16_t get_pcie_link_speed(struct fba_device *dev, void *user_data,
+static int16_t get_pcie_link_speed(struct fba_device *fba_dev, void *user_data,
 				   void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 	uint16_t linkstat;
 	int err;
 
@@ -326,10 +326,10 @@ static int16_t get_pcie_link_speed(struct fba_device *dev, void *user_data,
 }
 
 /* based on current_link_width_show() in drivers/pci/pci-sysfs.c */
-static int16_t get_pcie_link_width(struct fba_device *dev, void *user_data,
+static int16_t get_pcie_link_width(struct fba_device *fba_dev, void *user_data,
 				   void *buf, size_t buf_size)
 {
-	struct pci_dev *pdev = dev->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 	uint16_t linkstat;
 	int err;
 
@@ -343,14 +343,14 @@ static int16_t get_pcie_link_width(struct fba_device *dev, void *user_data,
 	return 0;
 }
 
-static int16_t get_driver_version(struct fba_device *dev, void *user_data,
+static int16_t get_driver_version(struct fba_device *fba_dev, void *user_data,
 				  void *buf, size_t buf_size)
 {
 	snprintf(buf, buf_size, "%s", FBACCEL_VERSION);
 	return 0;
 }
 
-static int16_t get_alert_mon_value(struct fba_device *dev, void *user_data,
+static int16_t get_alert_mon_value(struct fba_device *fba_dev, void *user_data,
 				   void *buf, size_t buf_size)
 {
 	enum fba_mon_alerts alert_type =
@@ -358,60 +358,60 @@ static int16_t get_alert_mon_value(struct fba_device *dev, void *user_data,
 	uint32_t *data = (uint32_t *)buf;
 
 	if (buf_size < sizeof(uint32_t)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
 
 	switch (alert_type) {
 	case FBA_MON_ALERT_DDR_UCE:
-		*data = dev->ddr_uce_detected;
+		*data = fba_dev->ddr_uce_detected;
 		break;
 	case FBA_MON_ALERT_INTERNAL_MEM_UCE:
-		*data = dev->internal_mem_uce_detected;
+		*data = fba_dev->internal_mem_uce_detected;
 		break;
 	case FBA_MON_ALERT_DEVICE_FATAL_ERR:
-		*data = dev->device_fatal_err_detected;
+		*data = fba_dev->device_fatal_err_detected;
 		break;
 	case FBA_MON_ALERT_HEART_BEAT_FAILURE:
-		*data = dev->heart_beat_failed;
+		*data = fba_dev->heart_beat_failed;
 		break;
 	case FBA_MON_ALERT_CCP_WDT_FAILURE:
-		*data = dev->ccp_wdt_failed;
+		*data = fba_dev->ccp_wdt_failed;
 		break;
 	default:
-		fba_dev_err(dev, "%s: Invalid alert type", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid alert type", __func__);
 		return -EINVAL;
 	}
 	return 0;
 }
 
-static int16_t get_ready_status(struct fba_device *dev, void *user_data,
+static int16_t get_ready_status(struct fba_device *fba_dev, void *user_data,
 				void *buf, size_t buf_size)
 {
 	bool *data = (bool *)buf;
 
 	if (buf_size < sizeof(bool)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
 	*data = false;
-	if (!atomic_read(&dev->has_failed))
+	if (!atomic_read(&fba_dev->has_failed))
 		*data = true;
 
 	return 0;
 }
 
-static int16_t get_m7_health(struct fba_device *dev, void *user_data, void *buf,
-			     size_t buf_size)
+static int16_t get_m7_health(struct fba_device *fba_dev, void *user_data,
+			     void *buf, size_t buf_size)
 {
 	int16_t err = 0;
 	char *m7_health;
 
-	if (dev->cfg->impl_ops->boot_health_check != NULL) {
-		m7_health = dev->cfg->impl_ops->boot_health_check(dev);
+	if (fba_dev->cfg->impl_ops->boot_health_check != NULL) {
+		m7_health = fba_dev->cfg->impl_ops->boot_health_check(fba_dev);
 		if (m7_health) {
 			if (buf_size < sizeof(m7_health)) {
-				fba_dev_err(dev, "%s: Invalid buf size",
+				fba_dev_err(fba_dev, "%s: Invalid buf size",
 					    __func__);
 				return -EFAULT;
 			}
@@ -421,55 +421,56 @@ static int16_t get_m7_health(struct fba_device *dev, void *user_data, void *buf,
 	return err;
 }
 
-static int16_t did_ccp_panic(struct fba_device *dev, void *user_data, void *buf,
-			     size_t buf_size)
+static int16_t did_ccp_panic(struct fba_device *fba_dev, void *user_data,
+			     void *buf, size_t buf_size)
 {
 	bool *ccp_panic_sts = buf;
 
 	if (buf_size < sizeof(bool)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
-	if (dev->cfg->impl_ops->did_ccp_panic != NULL)
-		*ccp_panic_sts = dev->cfg->impl_ops->did_ccp_panic(dev);
+	if (fba_dev->cfg->impl_ops->did_ccp_panic != NULL)
+		*ccp_panic_sts = fba_dev->cfg->impl_ops->did_ccp_panic(fba_dev);
 	else
 		return -EOPNOTSUPP;
 
 	return 0;
 }
 
-static int16_t get_cxram_ccp_coredump_crc_offset(struct fba_device *dev,
+static int16_t get_cxram_ccp_coredump_crc_offset(struct fba_device *fba_dev,
 						 void *user_data, void *buf,
 						 size_t buf_size)
 {
 	uint32_t *cxram_ccp_coredump_crc_offset = buf;
 
 	if (buf_size < sizeof(uint32_t)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
-	if (dev->cfg->impl_ops->coredump_get_cxram_crc_offset != NULL)
+	if (fba_dev->cfg->impl_ops->coredump_get_cxram_crc_offset != NULL)
 		*cxram_ccp_coredump_crc_offset =
-			dev->cfg->impl_ops->coredump_get_cxram_crc_offset(dev);
+			fba_dev->cfg->impl_ops->coredump_get_cxram_crc_offset(
+				fba_dev);
 	else
 		return -EOPNOTSUPP;
 
 	return 0;
 }
 
-static int16_t get_latest_ccp_coredump_crc(struct fba_device *dev,
+static int16_t get_latest_ccp_coredump_crc(struct fba_device *fba_dev,
 					   void *user_data, void *buf,
 					   size_t buf_size)
 {
 	uint32_t *latest_ccp_coredump_crc = buf;
 
 	if (buf_size < sizeof(uint32_t)) {
-		fba_dev_err(dev, "%s: Invalid buf size", __func__);
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
 		return -EFAULT;
 	}
-	if (dev->cfg->impl_ops->coredump_get_crc != NULL)
+	if (fba_dev->cfg->impl_ops->coredump_get_crc != NULL)
 		*latest_ccp_coredump_crc =
-			dev->cfg->impl_ops->coredump_get_crc(dev);
+			fba_dev->cfg->impl_ops->coredump_get_crc(fba_dev);
 	else
 		return -EOPNOTSUPP;
 
@@ -517,9 +518,9 @@ static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 };
 #define N_DRIVER_MON_ITEMS ARRAY_SIZE(driver_mon_items_w_cb)
 
-static void update_driver_data(struct fba_device *dev)
+static void update_driver_data(struct fba_device *fba_dev)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	struct mon_data *data = mon->src_info[SAIL_MTS_DRIVER].data;
 	int i = 0;
 
@@ -530,14 +531,14 @@ static void update_driver_data(struct fba_device *dev)
 			continue;
 
 		data->err =
-			item_cb->get_value_cb(dev, item_cb->user_data,
+			item_cb->get_value_cb(fba_dev, item_cb->user_data,
 					      data->value, item_cb->item.size);
 	}
 }
 
-static int update_device_data(struct fba_device *dev)
+static int update_device_data(struct fba_device *fba_dev)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	struct mon_data *data = mon->src_info[SAIL_MTS_CCP].data;
 	int err = 0;
 
@@ -547,15 +548,15 @@ static int update_device_data(struct fba_device *dev)
 	if (!mon->src_info[SAIL_MTS_CCP].item_cnt)
 		return 0;
 
-	if ((!atomic_read(&dev->has_failed)) &&
+	if ((!atomic_read(&fba_dev->has_failed)) &&
 	    (mon->src_info[SAIL_MTS_CCP].is_init)) {
 		/* Stop polling for device data  if device has failed. */
 		err = fba_admin_dma_from_device(
-			dev, ADMIN_MON_READ_DATA, data,
+			fba_dev, ADMIN_MON_READ_DATA, data,
 			mon->src_info[SAIL_MTS_CCP].item_cnt * sizeof(*data));
 		if (err != 0)
-			fba_dev_err(dev, "%s failed to read data %d.", __func__,
-				    err);
+			fba_dev_err(fba_dev, "%s failed to read data %d.",
+				    __func__, err);
 	}
 	return err;
 }
@@ -564,28 +565,28 @@ static int update_device_data(struct fba_device *dev)
 // Freq is set by the mon_poll_freq_ms module params.
 // Sets disable to true iff mon_poll_freq_ms==0.
 // Logs a msg when mon_poll_freq_ms has changed since last invocation.
-static unsigned int get_polling_freq_jiffies(struct fba_device *dev,
+static unsigned int get_polling_freq_jiffies(struct fba_device *fba_dev,
 					     bool *disable)
 {
-	if (dev->mon.mon_poll_freq_jiffies !=
+	if (fba_dev->mon.mon_poll_freq_jiffies !=
 	    msecs_to_jiffies(mon_poll_freq_ms)) {
-		dev->mon.mon_poll_freq_jiffies =
+		fba_dev->mon.mon_poll_freq_jiffies =
 			msecs_to_jiffies(mon_poll_freq_ms);
 		if (mon_poll_freq_ms > 0) {
 			fba_dev_info(
-				dev,
+				fba_dev,
 				"sail monitoring polling frequency is now set to %u milliseconds.",
 				mon_poll_freq_ms);
 		} else {
 			fba_dev_info(
-				dev,
+				fba_dev,
 				"sail monitoring polling is now disabled.");
 		}
 	}
 
-	if (dev->mon.mon_poll_freq_jiffies > 0) {
+	if (fba_dev->mon.mon_poll_freq_jiffies > 0) {
 		*disable = false;
-		return dev->mon.mon_poll_freq_jiffies;
+		return fba_dev->mon.mon_poll_freq_jiffies;
 	}
 
 	*disable = true;
@@ -599,16 +600,16 @@ static void fba_mon_work_handler(struct work_struct *work)
 	struct delayed_work *dwork =
 		container_of(work, struct delayed_work, work);
 	struct fba_mon *mon = container_of(dwork, struct fba_mon, dwork);
-	struct fba_device *dev = container_of(mon, struct fba_device, mon);
+	struct fba_device *fba_dev = container_of(mon, struct fba_device, mon);
 	bool disable = false;
 
 	queue_delayed_work(mon->workq, &mon->dwork,
-			   get_polling_freq_jiffies(dev, &disable));
+			   get_polling_freq_jiffies(fba_dev, &disable));
 
 	if (!disable) {
 		mutex_lock(&mon->mutex);
 
-		update_device_data(dev);
+		update_device_data(fba_dev);
 		mutex_unlock(&mon->mutex);
 	}
 }
@@ -642,7 +643,7 @@ static void set_driver_items_and_groups(struct fba_mon *mon)
 	}
 }
 
-static int read_and_offset_device_items(struct fba_device *dev,
+static int read_and_offset_device_items(struct fba_device *fba_dev,
 					struct fba_mon *mon)
 {
 	const int src = SAIL_MTS_CCP;
@@ -656,11 +657,11 @@ static int read_and_offset_device_items(struct fba_device *dev,
 		return 0;
 
 	// Read items from device into the local buffer + offset
-	err = fba_admin_dma_from_device(dev, ADMIN_MON_READ_ITEMS,
+	err = fba_admin_dma_from_device(fba_dev, ADMIN_MON_READ_ITEMS,
 					&mon->src_info[src].items[0], size);
 	if (err != 0) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"%s failed to read device_items of size %zu with error %d.",
 			__func__, size, err);
 		return err;
@@ -676,7 +677,7 @@ static int read_and_offset_device_items(struct fba_device *dev,
 }
 
 // Returns zero on success or error code otherwise.
-static int read_and_offset_device_groups(struct fba_device *dev,
+static int read_and_offset_device_groups(struct fba_device *fba_dev,
 					 struct fba_mon *mon)
 {
 	const int src = SAIL_MTS_CCP;
@@ -688,11 +689,11 @@ static int read_and_offset_device_groups(struct fba_device *dev,
 		return 0;
 
 	// Read groups from device
-	err = fba_admin_dma_from_device(dev, ADMIN_MON_READ_GROUPS,
+	err = fba_admin_dma_from_device(fba_dev, ADMIN_MON_READ_GROUPS,
 					&mon->src_info[src].groups[0], size);
 	if (err != 0) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"%s failed to read groups of size %zu with error %d.",
 			__func__, size, err);
 		return err;
@@ -794,23 +795,23 @@ err_free_info:
 	return err;
 }
 
-static int fba_mon_driver_init(struct fba_device *dev)
+static int fba_mon_driver_init(struct fba_device *fba_dev)
 {
 	int rv = 0;
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 
 	mon->src_info[SAIL_MTS_DRIVER].item_cnt = N_DRIVER_MON_ITEMS;
 	mon->src_info[SAIL_MTS_DRIVER].group_cnt = N_DRIVER_MON_GROUPS;
 
 	rv = alloc_items_groups_and_data(mon, SAIL_MTS_DRIVER);
 	if (rv != 0) {
-		fba_dev_err(dev, "Failed to alloc driver items and groups");
+		fba_dev_err(fba_dev, "Failed to alloc driver items and groups");
 		return rv;
 	}
 	set_driver_items_and_groups(mon);
 	mutex_lock(&mon->mutex);
 	mon->src_info[SAIL_MTS_DRIVER].is_init = true;
-	update_driver_data(dev);
+	update_driver_data(fba_dev);
 	mutex_unlock(&mon->mutex);
 	return 0;
 }
@@ -839,23 +840,24 @@ void fba_mon_exit(struct fba_mon *mon)
 	fba_mon_driver_exit(mon);
 }
 
-int fba_mon_init(struct fba_device *dev)
+int fba_mon_init(struct fba_device *fba_dev)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	int rv = 0;
 
 	memset(mon, 0, sizeof(*mon));
 	mutex_init(&mon->mutex);
 
-	mon->workq = alloc_workqueue("%s_mon", 0, 0, dev->name);
+	mon->workq = alloc_workqueue("%s_mon", 0, 0, fba_dev->name);
 	if (mon->workq == NULL) {
-		fba_dev_err(dev, "Failed to start monitoring workqueue");
+		fba_dev_err(fba_dev, "Failed to start monitoring workqueue");
 		return -ENOMEM;
 	}
 	// Only initialize the driver provided fba_mon items on probe.
-	rv = fba_mon_driver_init(dev);
+	rv = fba_mon_driver_init(fba_dev);
 	if (rv != 0) {
-		fba_dev_err(dev, "Failed to initialize fba_mon driver data");
+		fba_dev_err(fba_dev,
+			    "Failed to initialize fba_mon driver data");
 		goto err_destroy_wq;
 	}
 
@@ -873,26 +875,26 @@ err_destroy_wq:
 	return rv;
 }
 
-int fba_mon_device_init(struct fba_device *dev)
+int fba_mon_device_init(struct fba_device *fba_dev)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	int err;
 
 	err = alloc_items_groups_and_data(mon, SAIL_MTS_CCP);
 	if (err != 0)
 		goto err_device_exit;
 
-	err = read_and_offset_device_items(dev, mon);
+	err = read_and_offset_device_items(fba_dev, mon);
 	if (err != 0)
 		goto err_device_exit;
 
-	err = read_and_offset_device_groups(dev, mon);
+	err = read_and_offset_device_groups(fba_dev, mon);
 	if (err != 0)
 		goto err_device_exit;
 
 	mutex_lock(&mon->mutex);
 	mon->src_info[SAIL_MTS_CCP].is_init = true;
-	err = update_device_data(dev);
+	err = update_device_data(fba_dev);
 	mutex_unlock(&mon->mutex);
 	if (err != 0)
 		goto err_device_exit;
@@ -950,19 +952,19 @@ static int fba_mon_get_src_from_id(struct fba_mon *mon, uint32_t id)
 	return -EINVAL;
 }
 
-int fba_mon_get_defs(struct fba_device *dev,
+int fba_mon_get_defs(struct fba_device *fba_dev,
 		     struct mon_defs_ioctl *mon_defs_req)
 {
 	int src;
 	int err = 0;
 	size_t max_items_size;
 	size_t max_groups_size;
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 
 	mutex_lock(&mon->mutex);
 	max_items_size = fba_mon_get_item_cnt(mon) * sizeof(struct mon_item);
 	if (mon_defs_req->max_items_size < max_items_size) {
-		fba_dev_err(dev, "invalid item buffer size %zu",
+		fba_dev_err(fba_dev, "invalid item buffer size %zu",
 			    (size_t)mon_defs_req->max_items_size);
 		err = -EINVAL;
 		goto out_unlock;
@@ -970,7 +972,7 @@ int fba_mon_get_defs(struct fba_device *dev,
 
 	max_groups_size = fba_mon_get_group_cnt(mon) * sizeof(struct mon_group);
 	if (mon_defs_req->max_groups_size < max_groups_size) {
-		fba_dev_err(dev, "invalid group buffer size %zu",
+		fba_dev_err(fba_dev, "invalid group buffer size %zu",
 			    (size_t)mon_defs_req->max_groups_size);
 		err = -EINVAL;
 		goto out_unlock;
@@ -1017,14 +1019,14 @@ int fba_mon_get_defs(struct fba_device *dev,
 	}
 
 out_unlock:
-	mutex_unlock(&dev->mon.mutex);
+	mutex_unlock(&fba_dev->mon.mutex);
 	return err;
 }
 
-int fba_mon_get_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
-		     void *data_arr, int16_t *err_arr)
+int fba_mon_get_data(struct fba_device *fba_dev, uint32_t *ids,
+		     uint32_t id_count, void *data_arr, int16_t *err_arr)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	char *dst_data_buf = (char *)data_arr;
 	int i = 0;
 	int src;
@@ -1034,11 +1036,11 @@ int fba_mon_get_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
 
 	mutex_lock(&mon->mutex);
 	// Read driver mon data every time user request is made.
-	update_driver_data(dev);
+	update_driver_data(fba_dev);
 
 	// Update device data synchronously, if requested.
 	if (mon_disable_polling) {
-		err = update_device_data(dev);
+		err = update_device_data(fba_dev);
 		if (err != 0)
 			goto out_unlock;
 	}
@@ -1050,20 +1052,21 @@ int fba_mon_get_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
 		struct mon_item *item = NULL;
 
 		if (ids[i] >= all_item_cnt) {
-			fba_dev_err(dev, "%s invalid id %u", __func__, ids[i]);
+			fba_dev_err(fba_dev, "%s invalid id %u", __func__,
+				    ids[i]);
 			err = -EINVAL;
 			goto out_unlock;
 		}
 
 		src = fba_mon_get_src_from_id(mon, ids[i]);
 		if (src < 0) {
-			fba_dev_err(dev, "%s invalid src for id %u", __func__,
-				    ids[i]);
+			fba_dev_err(fba_dev, "%s invalid src for id %u",
+				    __func__, ids[i]);
 			err = -EINVAL;
 			goto out_unlock;
 		}
 
-		if (!dev->mon.src_info[src].is_init) {
+		if (!fba_dev->mon.src_info[src].is_init) {
 			err = -EFAULT;
 			goto out_unlock;
 		}
@@ -1079,10 +1082,10 @@ out_unlock:
 	return err;
 }
 
-int fba_mon_set_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
-		     void *data_arr)
+int fba_mon_set_data(struct fba_device *fba_dev, uint32_t *ids,
+		     uint32_t id_count, void *data_arr)
 {
-	struct fba_mon *mon = &dev->mon;
+	struct fba_mon *mon = &fba_dev->mon;
 	struct mon_data_set *data_set, *data_tmp;
 	char *src_data_buf = (char *)data_arr;
 	size_t all_item_cnt;
@@ -1097,15 +1100,16 @@ int fba_mon_set_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
 		struct mon_item *item = NULL;
 
 		if (ids[i] >= all_item_cnt) {
-			fba_dev_err(dev, "%s invalid id %u", __func__, ids[i]);
+			fba_dev_err(fba_dev, "%s invalid id %u", __func__,
+				    ids[i]);
 			err = -EINVAL;
 			goto out_unlock;
 		}
 
 		src = fba_mon_get_src_from_id(mon, ids[i]);
 		if (src < 0) {
-			fba_dev_err(dev, "%s invalid src for id %u", __func__,
-				    ids[i]);
+			fba_dev_err(fba_dev, "%s invalid src for id %u",
+				    __func__, ids[i]);
 			err = -EINVAL;
 			goto out_unlock;
 		}
@@ -1125,7 +1129,7 @@ int fba_mon_set_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
 		src_data_buf += MON_VALUE_SIZE;
 	}
 
-	err = fba_admin_dma_to_device(dev, ADMIN_MON_WRITE_DATA, data_set,
+	err = fba_admin_dma_to_device(fba_dev, ADMIN_MON_WRITE_DATA, data_set,
 				      id_count * sizeof(struct mon_data_set));
 
 out_unlock:

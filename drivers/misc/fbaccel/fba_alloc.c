@@ -118,7 +118,7 @@ static int fba_alloc_convert_job(struct fba_job *job, uint64_t rid,
 	return 0;
 }
 
-int fba_alloc_translate_setup(struct fba_device *dev, struct fba_job *job,
+int fba_alloc_translate_setup(struct fba_device *fba_dev, struct fba_job *job,
 			      size_t cnt)
 {
 	job->allocs = kcalloc(cnt * SUBMISSION_ENTRY_ARGS, sizeof(*job->allocs),
@@ -197,7 +197,7 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 {
 	int i, rc = 0;
 	uint64_t *iargs = sub->args;
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 
 	for (i = 0; i < SUBMISSION_ENTRY_ARGS; i++) {
 		uint64_t arg_type =
@@ -277,7 +277,8 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 		}
 
 		default:
-			fba_dev_err(dev, "Unknown ARG type %d.", (int)arg_type);
+			fba_dev_err(fba_dev, "Unknown ARG type %d.",
+				    (int)arg_type);
 			return -EINVAL;
 		}
 		if (rc != 0)

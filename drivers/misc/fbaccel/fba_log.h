@@ -11,5 +11,5 @@ void fba_logger_driver_exit(void);
 
 struct fba_logger_dev;
 
-struct fba_logger_dev *fba_logger_register(struct fba_device *dev);
+struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev);
 void fba_logger_unregister(struct fba_logger_dev *dev);

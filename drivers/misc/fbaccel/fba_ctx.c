@@ -22,7 +22,7 @@ enum fba_ctx_state {
 
 struct fba_ctx {
 	// Device that this context belongs to.
-	struct fba_device *dev;
+	struct fba_device *fba_dev;
 	// Default channel to use.
 	struct fba_channel *chan;
 	// Reference count.
@@ -55,7 +55,7 @@ struct fba_ctx {
 	struct fba_ctx *parent_ctx;
 };
 
-static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
+static void fba_ctx_init(struct fba_device *fba_dev, struct fba_ctx *ctx,
 			 struct fba_channel *chan)
 {
 	ctx->ctx_state = FBA_CTX_VALID;
@@ -73,7 +73,8 @@ static void fba_ctx_init(struct fba_device *dev, struct fba_ctx *ctx,
 }
 
 // Allocate per-file context.
-struct fba_ctx *fba_ctx_alloc(struct fba_device *dev, struct fba_ctx *parent)
+struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,
+			      struct fba_ctx *parent)
 {
 	struct fba_ctx *ctx;
 	struct fba_channel *chan;
@@ -81,34 +82,34 @@ struct fba_ctx *fba_ctx_alloc(struct fba_device *dev, struct fba_ctx *parent)
 	ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
 	if (ctx == NULL)
 		return ERR_PTR(-ENOMEM);
-	fba_dev_dbg(dev, "Allocated context.");
+	fba_dev_dbg(fba_dev, "Allocated context.");
 
 	/*
 	 * Callers of fba_ctx_alloc should have referenced dev,
 	 * we make ctx the new owner of that reference.
 	 */
-	ctx->dev = dev;
+	ctx->fba_dev = fba_dev;
 
 	if (parent)
-		chan = fba_allocate_streaming_channel(dev);
+		chan = fba_allocate_streaming_channel(fba_dev);
 	else
-		chan = fba_get_channel(dev, SAIL_CHANNEL_EXE);
+		chan = fba_get_channel(fba_dev, SAIL_CHANNEL_EXE);
 
 	if (chan == NULL) {
-		fba_dev_err(dev, "Failed to allocate channel.");
+		fba_dev_err(fba_dev, "Failed to allocate channel.");
 		kfree(ctx);
 		return ERR_PTR(-ENOMEM);
 	}
 
-	fba_dev_dbg(dev, "Allocated channel.");
+	fba_dev_dbg(fba_dev, "Allocated channel.");
 
 	if (parent)
 		ctx->parent_ctx = fba_ctx_get(parent);
 
-	fba_ctx_init(dev, ctx, chan);
+	fba_ctx_init(fba_dev, ctx, chan);
 
 	// Add to context list.
-	fba_device_add_ctx(dev, &ctx->dev_item);
+	fba_device_add_ctx(fba_dev, &ctx->dev_item);
 
 	return ctx;
 }
@@ -122,7 +123,7 @@ static void fba_ctx_free(struct kref *ref)
 	int id;
 	struct fba_alloc *alloc;
 	struct fba_ctx *ctx = container_of(ref, struct fba_ctx, ref);
-	struct fba_device *dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 
 	// If the application closes the context without
 	// freeing all the resources, free them now.
@@ -136,7 +137,7 @@ static void fba_ctx_free(struct kref *ref)
 		fba_ctx_put(ctx->parent_ctx);
 	}
 
-	fba_device_put(dev);
+	fba_device_put(fba_dev);
 
 	// Verify the ref & job/submission count logic is working.
 	// Verify that everything was removed from submitted/completed
@@ -182,7 +183,7 @@ bool fba_ctx_is_open(struct fba_ctx *ctx)
 
 int fba_ctx_open(struct fba_ctx *ctx)
 {
-	struct fba_device *dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	int rc, id;
 
 	mutex_lock(&ctx->ctx_mtx);
@@ -194,24 +195,24 @@ int fba_ctx_open(struct fba_ctx *ctx)
 	}
 
 	if (ctx->ctx_state == FBA_CTX_STOPPED) {
-		fba_dev_err(dev,
+		fba_dev_err(fba_dev,
 			    "Context promotion failed: context is stopped.");
 		rc = -EIO;
 		goto out_unlock;
 	}
-	id = ida_alloc_range(&dev->ctx_ids, 1, dev->n_ctxs, GFP_KERNEL);
+	id = ida_alloc_range(&fba_dev->ctx_ids, 1, fba_dev->n_ctxs, GFP_KERNEL);
 	if (id < 0) {
-		fba_dev_err(dev,
+		fba_dev_err(fba_dev,
 			    "Context promotion failed: context limit reached.");
 		rc = id;
 		goto out_unlock;
 	}
 
-	rc = fba_admin_create_context(dev, id);
+	rc = fba_admin_create_context(fba_dev, id);
 	if (rc) {
-		ida_free(&dev->ctx_ids, id);
+		ida_free(&fba_dev->ctx_ids, id);
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Context promotion failed: unable to create context in device.");
 		goto out_unlock;
 	}
@@ -241,7 +242,7 @@ void fba_ctx_put(struct fba_ctx *ctx)
 
 struct fba_device *fba_ctx_to_fba_device(struct fba_ctx *ctx)
 {
-	return ctx->dev;
+	return ctx->fba_dev;
 }
 
 /* Get parent context (or NULL if no parent.) */
@@ -253,7 +254,7 @@ struct fba_ctx *fba_ctx_get_parent(struct fba_ctx *ctx)
 /* Add alloc to context, and return unique id (or -ENOSPC if limit reached.) */
 int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc)
 {
-	struct fba_device *fba_dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	int rc;
 
 	mutex_lock(&ctx->allocs_mutex);
@@ -272,7 +273,7 @@ int fba_ctx_add_alloc(struct fba_ctx *ctx, struct fba_alloc *alloc)
 /* remove alloc with specified id from context. */
 int fba_ctx_remove_alloc(struct fba_ctx *ctx, int id)
 {
-	struct fba_device *fba_dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	struct fba_alloc *alloc;
 	int rc = 0;
 
@@ -322,20 +323,20 @@ struct fba_ctx *fba_dev_item_to_fba_ctx(struct list_head *item)
 static void fba_ctx_purge_cmp(struct fba_ctx *ctx)
 {
 	struct fba_job *job, *tmp;
-	struct fba_device *dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	int cnt = 0;
 	LIST_HEAD(jobs_to_delete);
 
 	mutex_lock(&ctx->ctx_mtx);
 	list_for_each_entry_safe(job, tmp, &ctx->cmp_list, ctx_item) {
-		fba_job_dec_usage(dev, &ctx->usage, job);
+		fba_job_dec_usage(fba_dev, &ctx->usage, job);
 		list_move(&job->ctx_item, &jobs_to_delete);
 	}
 	mutex_unlock(&ctx->ctx_mtx);
 
 	list_for_each_entry_safe(job, tmp, &jobs_to_delete, ctx_item) {
 		list_del_init(&job->ctx_item);
-		fba_dev_dbg(ctx->dev,
+		fba_dev_dbg(ctx->fba_dev,
 			    "Purged job %04Xh. ctx ID %d Num sub: %d ",
 			    job->sys_cmd_id, ctx->id, job->req.sub_cnt);
 		fba_job_put(job);
@@ -343,7 +344,7 @@ static void fba_ctx_purge_cmp(struct fba_ctx *ctx)
 	}
 
 	if (cnt)
-		fba_dev_dbg(ctx->dev, "Purged total %d jobs", cnt);
+		fba_dev_dbg(ctx->fba_dev, "Purged total %d jobs", cnt);
 }
 
 /* After ctx has been stopped, wait for all jobs to complete (or timeout) */
@@ -369,7 +370,8 @@ void fba_ctx_wait_idle(struct fba_ctx *ctx)
 		    &ctx->ctx_idle,
 		    msecs_to_jiffies(CHAN_HEARTBEAT_PERIOD_MS * 6 / 5)) == 0) {
 		/* Timed out, abort device and wait again for idle. */
-		fba_device_abort(ctx->dev, "timeout waiting for context idle");
+		fba_device_abort(ctx->fba_dev,
+				 "timeout waiting for context idle");
 		wait_for_completion(&ctx->ctx_idle);
 	}
 }
@@ -399,20 +401,20 @@ void fba_ctx_stop(struct fba_ctx *ctx)
 		// for the jobs. If the device is aborted it still makes sense to call
 		// delete_context_end() as it would fail quickly because the channels
 		// are stopped.
-		fba_admin_delete_context_begin(ctx->dev, ctx->id);
+		fba_admin_delete_context_begin(ctx->fba_dev, ctx->id);
 		fba_ctx_wait_idle(ctx);
-		rc = fba_admin_delete_context_end(ctx->dev, ctx->id);
+		rc = fba_admin_delete_context_end(ctx->fba_dev, ctx->id);
 		if (rc == 0)
-			ida_free(&ctx->dev->ctx_ids, ctx->id);
+			ida_free(&ctx->fba_dev->ctx_ids, ctx->id);
 	}
 }
 
 // Close the context
 int fba_ctx_close(struct fba_ctx *ctx)
 {
-	struct fba_device *dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 
-	fba_device_del_ctx(dev, &ctx->dev_item);
+	fba_device_del_ctx(fba_dev, &ctx->dev_item);
 
 	if (fba_ctx_is_open(ctx))
 		fba_ctx_stop(ctx);
@@ -469,7 +471,7 @@ void fba_ctx_complete_job(struct fba_ctx *ctx, struct fba_job *job)
 
 int fba_ctx_submit_job(struct fba_ctx *ctx, struct fba_job *job)
 {
-	struct fba_device *fba_dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	int rc;
 
 	mutex_lock(&ctx->ctx_mtx);
@@ -503,7 +505,7 @@ out_unlock:
 
 int fba_ctx_read(struct fba_ctx *ctx, struct fba_job_result *res, void *job_key)
 {
-	struct fba_device *fba_dev = ctx->dev;
+	struct fba_device *fba_dev = ctx->fba_dev;
 	struct fba_job *job, *tmp, *match = NULL;
 
 	mutex_lock(&ctx->ctx_mtx);

@@ -85,7 +85,7 @@ void fba_mon_device_stop(struct fba_mon *mon);
 // Device items and groups are not initialized as part of fba_mon_init().
 // fba_mon_device_init() needs to be called once device is active to access
 // device items and group data.
-int fba_mon_init(struct fba_device *dev);
+int fba_mon_init(struct fba_device *fba_dev);
 
 // Called from driver remove()
 // Free resources and kills the workqueue thread.
@@ -98,7 +98,7 @@ void fba_mon_exit(struct fba_mon *mon);
 // fba_mon_device_init is to be called once device is in ACTIVE state.
 // Device provided items and groups data can be read through ioctl after calling
 // fba_mon_device_init().
-int fba_mon_device_init(struct fba_device *dev);
+int fba_mon_device_init(struct fba_device *fba_dev);
 
 // Frees device item related resources
 // fba_mon_device_exit() should be called when device is transitioned to deactive state.
@@ -116,8 +116,8 @@ void fba_mon_device_exit(struct fba_mon *mon);
 // - -EAGAIN when data is not yet avialble. Data is available after first time
 //   that data is read for all items.
 // - -EINVAL for invalid ids.
-int fba_mon_get_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
-		     void *data_arr, int16_t *err_arr);
+int fba_mon_get_data(struct fba_device *fba_dev, uint32_t *ids,
+		     uint32_t id_count, void *data_arr, int16_t *err_arr);
 
 // Sets the values of the monitored items specified by ids into data_arr.
 // data_arr is assumed to be of size id_count * MON_VALUE_SIZE bytes
@@ -125,11 +125,11 @@ int fba_mon_get_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
 // - zero on success
 // - -EACCES on attempt to write to a monitoring entry that has no write callback
 // - -EINVAL for invalid ids.
-int fba_mon_set_data(struct fba_device *dev, uint32_t *ids, uint32_t id_count,
-		     void *data_arr);
+int fba_mon_set_data(struct fba_device *fba_dev, uint32_t *ids,
+		     uint32_t id_count, void *data_arr);
 
 // API to get the mon item defenition. This is called from FBA_IOCTL_MON_DEFS.
-int fba_mon_get_defs(struct fba_device *dev,
+int fba_mon_get_defs(struct fba_device *fba_dev,
 		     struct mon_defs_ioctl *mon_defs_req);
 
 size_t fba_mon_get_item_cnt(struct fba_mon *mon);

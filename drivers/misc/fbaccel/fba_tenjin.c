@@ -355,10 +355,10 @@ static void tenjin_log_reset_reason(struct fba_device *fba_dev)
 	}
 }
 
-static int coredump_get_hdr(struct fba_device *dev, int region_id, int cpu_id,
-			    struct coredump_hdr *hdr)
+static int coredump_get_hdr(struct fba_device *fba_dev, int region_id,
+			    int cpu_id, struct coredump_hdr *hdr)
 {
-	struct tenjin_priv *priv = dev->impl_priv;
+	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
 	struct fba_shared *region = &coredump->regions[region_id][cpu_id];
 
@@ -373,13 +373,13 @@ static int coredump_get_hdr(struct fba_device *dev, int region_id, int cpu_id,
 	return 0;
 }
 
-static void coredump_check_cpu(struct fba_device *dev, int region_id,
+static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 			       int cpu_id, enum fba_coredump_status *status)
 {
 	struct coredump_hdr hdr;
 	int rv;
 
-	rv = coredump_get_hdr(dev, region_id, cpu_id, &hdr);
+	rv = coredump_get_hdr(fba_dev, region_id, cpu_id, &hdr);
 	if (rv != 0) {
 		WARN_ON_ONCE(rv != 0);
 		return;
@@ -397,7 +397,7 @@ static void coredump_check_cpu(struct fba_device *dev, int region_id,
 			*status = FBA_COREDUMP_STATUS_STARTED;
 
 			/* Also signal that device has failed */
-			fba_device_abort(dev, "coredump triggered");
+			fba_device_abort(fba_dev, "coredump triggered");
 		}
 		break;
 	case FBA_COREDUMP_STATUS_STARTED:
@@ -430,7 +430,7 @@ static void coredump_work_handler(struct work_struct *work)
 		container_of(d_work, struct fbv_coredump, coredump_work);
 	struct tenjin_priv *priv =
 		container_of(coredump, struct tenjin_priv, coredump);
-	struct fba_device *dev = priv->fba_dev;
+	struct fba_device *fba_dev = priv->fba_dev;
 
 	// Check for coredump triggers from all CPUs.
 	// If any one of them has started the coredump, set a timeout and come back again.
@@ -439,7 +439,7 @@ static void coredump_work_handler(struct work_struct *work)
 	for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
 		cpu_status = &coredump->cpu_status[cpu_id];
 
-		coredump_check_cpu(dev, 0, cpu_id, cpu_status);
+		coredump_check_cpu(fba_dev, 0, cpu_id, cpu_status);
 
 		if (*cpu_status == FBA_COREDUMP_STATUS_NOTIFIED) {
 			// Skip coredump polling for this CPU
@@ -447,7 +447,7 @@ static void coredump_work_handler(struct work_struct *work)
 		}
 
 		if (*cpu_status == FBA_COREDUMP_STATUS_STARTED) {
-			fba_dev_err(dev,
+			fba_dev_err(fba_dev,
 				    "Coredump trigger detected for CPU id %d",
 				    cpu_id);
 			// Wait for the coredump to complete
@@ -455,10 +455,10 @@ static void coredump_work_handler(struct work_struct *work)
 					      COREDUMP_TIME_OUT_TIME_HZ);
 			return;
 		} else if (*cpu_status >= FBA_COREDUMP_STATUS_COMPLETED) {
-			fba_dev_err(dev, "Coredump completed by CPU id %d",
+			fba_dev_err(fba_dev, "Coredump completed by CPU id %d",
 				    cpu_id);
-			tenjin_coredump_handler(dev, cpu_id);
-			coredump_notify(dev);
+			tenjin_coredump_handler(fba_dev, cpu_id);
+			coredump_notify(fba_dev);
 			*cpu_status = FBA_COREDUMP_STATUS_NOTIFIED;
 		}
 	}
@@ -468,18 +468,19 @@ static void coredump_work_handler(struct work_struct *work)
 }
 
 // Get size of coredump region for a CPU
-static int coredump_get_size(struct fba_device *dev, int region_id, int cpu_id)
+static int coredump_get_size(struct fba_device *fba_dev, int region_id,
+			     int cpu_id)
 {
 	struct coredump_hdr cpu_hdr;
 	int rv;
 
-	rv = coredump_get_hdr(dev, region_id, cpu_id, &cpu_hdr);
+	rv = coredump_get_hdr(fba_dev, region_id, cpu_id, &cpu_hdr);
 	if (rv != 0) {
 		// Region is not initialized
 		return 0;
 	} else if (cpu_hdr.cookie != COREDUMP_COOKIE) {
 		fba_dev_dbg(
-			dev,
+			fba_dev,
 			"Coredump region %d for cpu %d not initalized by device",
 			region_id, cpu_id);
 		return 0;
@@ -512,9 +513,9 @@ int fbv_coredump_host_region_init(struct fba_device *fba_dev,
 	return 0;
 }
 
-int fbv_coredump_init(struct fba_device *dev)
+int fbv_coredump_init(struct fba_device *fba_dev)
 {
-	struct tenjin_priv *priv = dev->impl_priv;
+	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
 	struct fba_shared *region;
 	int cpu_id;
@@ -526,7 +527,7 @@ int fbv_coredump_init(struct fba_device *dev)
 		memset(region, 0, sizeof(struct fba_shared));
 
 		region = &coredump->regions[DEVICE_REGION][cpu_id];
-		fba_shared_alloc_iomem(dev, region,
+		fba_shared_alloc_iomem(fba_dev, region,
 				       tenjin_coredump_regions[cpu_id].bar,
 				       tenjin_coredump_regions[cpu_id].offset,
 				       tenjin_coredump_regions[cpu_id].size);
@@ -536,14 +537,14 @@ int fbv_coredump_init(struct fba_device *dev)
 	init_completion(&coredump->coredump_ready);
 	coredump->initialized = true;
 
-	fbv_coredump_start(dev);
+	fbv_coredump_start(fba_dev);
 
 	return 0;
 }
 
-void fbv_coredump_exit(struct fba_device *dev)
+void fbv_coredump_exit(struct fba_device *fba_dev)
 {
-	struct tenjin_priv *priv = dev->impl_priv;
+	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
 	struct fba_shared *region;
 	int cpu_id;
@@ -551,21 +552,21 @@ void fbv_coredump_exit(struct fba_device *dev)
 	// Called from remove()
 	if (coredump->initialized) {
 		cancel_delayed_work_sync(&coredump->coredump_work);
-		coredump_notify(dev);
+		coredump_notify(fba_dev);
 
 		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
 			region = &coredump->regions[DEVICE_REGION][cpu_id];
-			fba_shared_free(dev, region);
+			fba_shared_free(fba_dev, region);
 		}
 
 		coredump->initialized = false;
 	}
 }
 
-int fbv_coredump_get_status(struct fba_device *dev,
+int fbv_coredump_get_status(struct fba_device *fba_dev,
 			    struct coredump_status_ioctl *coredump_status)
 {
-	struct tenjin_priv *priv = dev->impl_priv;
+	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
 	int region;
 	int cpu_id;
@@ -583,7 +584,7 @@ int fbv_coredump_get_status(struct fba_device *dev,
 	// Coredump polling is not started
 	if (!started) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Error in getting coredump status, Coredump polling not yet started");
 		if (coredump_status->wait < 0) {
 			/* if less than 0, don't wait. */
@@ -608,17 +609,17 @@ int fbv_coredump_get_status(struct fba_device *dev,
 	for (region = 0; region < MAX_REGION_COUNT; region++) {
 		for (cpu_id = 0; cpu_id < N_COREDUMP_CPUS; cpu_id++) {
 			coredump_status->coredump_size +=
-				coredump_get_size(dev, region, cpu_id);
+				coredump_get_size(fba_dev, region, cpu_id);
 		}
 	}
 
 	return rv;
 }
 
-static int coredump_get_data(struct fba_device *dev, int region_id, int cpu_id,
-			     void *dst, uint32_t size)
+static int coredump_get_data(struct fba_device *fba_dev, int region_id,
+			     int cpu_id, void *dst, uint32_t size)
 {
-	struct tenjin_priv *priv = dev->impl_priv;
+	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
 	struct fba_shared *region;
 
@@ -634,7 +635,7 @@ static int coredump_get_data(struct fba_device *dev, int region_id, int cpu_id,
 	return 0;
 }
 
-int fbv_coredump_get_data(struct fba_device *dev, void *coredump_mem,
+int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
 			  uint32_t size)
 {
 	int offset = 0;
@@ -646,21 +647,22 @@ int fbv_coredump_get_data(struct fba_device *dev, void *coredump_mem,
 	for (cpu_id = N_COREDUMP_CPUS - 1; cpu_id >= 0; cpu_id--) {
 		for (region_id = 0; region_id < MAX_REGION_COUNT; region_id++) {
 			cpu_data_size =
-				coredump_get_size(dev, region_id, cpu_id);
+				coredump_get_size(fba_dev, region_id, cpu_id);
 			if (cpu_data_size + offset > size) {
 				// Partial reading of coredump is not supported
 				fba_dev_err(
-					dev,
+					fba_dev,
 					"Error in reading coredump data, not enough memory to read full buffer");
 				return -EINVAL;
 			}
 			if (cpu_data_size != 0) {
-				rv = coredump_get_data(dev, region_id, cpu_id,
+				rv = coredump_get_data(fba_dev, region_id,
+						       cpu_id,
 						       coredump_mem + offset,
 						       cpu_data_size);
 				if (rv != 0) {
 					fba_dev_err(
-						dev,
+						fba_dev,
 						"Error in reading data for region %d, cpu %d",
 						region_id, cpu_id);
 					return rv;
@@ -708,7 +710,7 @@ out_free_coredump_mem:
 static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	struct fba_ctx *ctx = fp->private_data;
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	void __user *data = (void __user *)arg;
 	long rc;
 
@@ -720,7 +722,7 @@ static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(struct coredump_status_ioctl))) {
 			return -EFAULT;
 		}
-		rc = fbv_coredump_get_status(dev, &coredump_status_req);
+		rc = fbv_coredump_get_status(fba_dev, &coredump_status_req);
 		if (rc != 0)
 			return rc;
 		if (copy_to_user(data, &coredump_status_req,
@@ -735,7 +737,7 @@ static long tenjin_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(struct get_coredump_ioctl))) {
 			return -EFAULT;
 		}
-		rc = fba_ioctl_get_coredump_data(dev, &coredump_data_req);
+		rc = fba_ioctl_get_coredump_data(fba_dev, &coredump_data_req);
 		if (rc != 0)
 			return rc;
 

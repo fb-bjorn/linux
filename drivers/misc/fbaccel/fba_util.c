@@ -56,54 +56,54 @@ void fba_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 	kfree(free_irq(pci_irq_vector(dev, nr), dev_id));
 }
 
-void __iomem *fba_util_get_bar_ptr(struct fba_device *dev, int bar,
+void __iomem *fba_util_get_bar_ptr(struct fba_device *fba_dev, int bar,
 				   uint64_t offset)
 {
-	WARN_ON(bar >= BAR_CNT || !dev->bars[bar]);
-	return (void __iomem *)(dev->bars[bar] + offset);
+	WARN_ON(bar >= BAR_CNT || !fba_dev->bars[bar]);
+	return (void __iomem *)(fba_dev->bars[bar] + offset);
 }
 
-static void __iomem *get_mbox_ptr(struct fba_device *dev, int mbox)
+static void __iomem *get_mbox_ptr(struct fba_device *fba_dev, int mbox)
 {
-	uint64_t off =
-		dev->cfg->host_ipc_offset + (mbox * dev->cfg->host_ipc_stride);
-	return fba_util_get_bar_ptr(dev, dev->cfg->host_ipc_bar, off);
+	uint64_t off = fba_dev->cfg->host_ipc_offset +
+		       (mbox * fba_dev->cfg->host_ipc_stride);
+	return fba_util_get_bar_ptr(fba_dev, fba_dev->cfg->host_ipc_bar, off);
 }
 
-uint32_t get_mailbox(struct fba_device *dev, int mbox)
+uint32_t get_mailbox(struct fba_device *fba_dev, int mbox)
 {
-	return ioread32(get_mbox_ptr(dev, mbox));
+	return ioread32(get_mbox_ptr(fba_dev, mbox));
 }
 
-void set_mailbox(struct fba_device *dev, int mbox, uint32_t val)
+void set_mailbox(struct fba_device *fba_dev, int mbox, uint32_t val)
 {
-	iowrite32(val, get_mbox_ptr(dev, mbox));
+	iowrite32(val, get_mbox_ptr(fba_dev, mbox));
 }
 
-uint64_t get_mailbox64(struct fba_device *dev, int mbox)
+uint64_t get_mailbox64(struct fba_device *fba_dev, int mbox)
 {
-	return (uint64_t)get_mailbox(dev, mbox + 1) << 32 |
-	       (uint64_t)get_mailbox(dev, mbox + 0);
+	return (uint64_t)get_mailbox(fba_dev, mbox + 1) << 32 |
+	       (uint64_t)get_mailbox(fba_dev, mbox + 0);
 }
 
-void set_mailbox64(struct fba_device *dev, int mbox, uint64_t val)
+void set_mailbox64(struct fba_device *fba_dev, int mbox, uint64_t val)
 {
-	iowrite32(lower_32_bits(val), get_mbox_ptr(dev, mbox + 0));
-	iowrite32(upper_32_bits(val), get_mbox_ptr(dev, mbox + 1));
+	iowrite32(lower_32_bits(val), get_mbox_ptr(fba_dev, mbox + 0));
+	iowrite32(upper_32_bits(val), get_mbox_ptr(fba_dev, mbox + 1));
 }
 
-uint32_t fba_read_bar(struct fba_device *dev, uint32_t bar, uint64_t offset)
+uint32_t fba_read_bar(struct fba_device *fba_dev, uint32_t bar, uint64_t offset)
 {
-	return ioread32(fba_util_get_bar_ptr(dev, bar, offset));
+	return ioread32(fba_util_get_bar_ptr(fba_dev, bar, offset));
 }
 
-void fba_write_bar(struct fba_device *dev, uint32_t val, uint32_t bar,
+void fba_write_bar(struct fba_device *fba_dev, uint32_t val, uint32_t bar,
 		   uint64_t offset)
 {
-	iowrite32(val, fba_util_get_bar_ptr(dev, bar, offset));
+	iowrite32(val, fba_util_get_bar_ptr(fba_dev, bar, offset));
 }
 
-int fba_util_inc_usage(struct fba_device *dev, const struct fba_limits *max,
+int fba_util_inc_usage(struct fba_device *fba_dev, const struct fba_limits *max,
 		       struct fba_limits *src, uint32_t sub_cnt)
 {
 	struct fba_limits tmp = *src;
@@ -114,7 +114,7 @@ int fba_util_inc_usage(struct fba_device *dev, const struct fba_limits *max,
 	// Check if we exceed cmp limits.
 	if (tmp.sub_cnt > max->sub_cnt) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Outstanding submissions exceeded (submitted:%d, max:%d).",
 			tmp.sub_cnt, max->sub_cnt);
 		return -EAGAIN;
@@ -123,11 +123,11 @@ int fba_util_inc_usage(struct fba_device *dev, const struct fba_limits *max,
 	return 0;
 }
 
-void fba_util_dec_usage(struct fba_device *dev, struct fba_limits *src,
+void fba_util_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,
 			uint32_t sub_cnt)
 {
 	if (src->sub_cnt < sub_cnt) {
-		fba_dev_err(dev, "%s: src->sub_cnt=%u sub_cnt=%u", __func__,
+		fba_dev_err(fba_dev, "%s: src->sub_cnt=%u sub_cnt=%u", __func__,
 			    src->sub_cnt, sub_cnt);
 	}
 	WARN_ON_ONCE(src->sub_cnt < sub_cnt);

@@ -45,7 +45,7 @@ struct fba_queue {
  */
 struct fba_channel {
 	struct work_struct work;
-	struct fba_device *dev;
+	struct fba_device *fba_dev;
 	struct fba_poller poller; // Monitors the channel with heartbeat
 	struct fba_limits *limits;
 	uint64_t max_job_subs;
@@ -86,7 +86,7 @@ struct fba_channel_req {
 //
 // Channel Functions.
 //
-int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
+int fba_channel_init(struct fba_device *fba_dev, int id, unsigned int irq,
 		     struct fba_queue_info *sqinfo,
 		     struct fba_queue_info *cqinfo, struct fba_limits *limits,
 		     uint64_t max_job_subs);
@@ -100,9 +100,9 @@ bool fba_channel_has_space(struct fba_channel *chan);
 uint64_t fba_channel_max_job_subs(struct fba_channel *chan);
 void fba_channel_shutdown(struct fba_channel *chan);
 // Start heartbeat monitors for all channels in a device
-void fba_channel_start_heartbeats(struct fba_device *dev);
+void fba_channel_start_heartbeats(struct fba_device *fba_dev);
 // Stop heartbeat monitors for all channels in a device
-void fba_channel_stop_heartbeats(struct fba_device *dev);
+void fba_channel_stop_heartbeats(struct fba_device *fba_dev);
 // Set the polling period for channel hb
 void fba_channel_set_hb_mon_period(void *obj);
 // Get watermarks

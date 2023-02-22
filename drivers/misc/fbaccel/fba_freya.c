@@ -124,21 +124,22 @@ struct freya_priv {
 	uint32_t cxram_upgrade_sz;
 };
 
-static uint32_t freya_read_cxram_sb(struct fba_device *dev, uint32_t sb_offset)
+static uint32_t freya_read_cxram_sb(struct fba_device *fba_dev,
+				    uint32_t sb_offset)
 {
-	struct freya_priv *priv = dev->impl_priv;
+	struct freya_priv *priv = fba_dev->impl_priv;
 	uint64_t offset = priv->data->cxram_sideband_ofs + sb_offset;
 
-	return fba_read_bar(dev, BAR_CXRAM, offset);
+	return fba_read_bar(fba_dev, BAR_CXRAM, offset);
 }
 
-static void freya_write_cxram_sb(struct fba_device *dev, uint32_t val,
+static void freya_write_cxram_sb(struct fba_device *fba_dev, uint32_t val,
 				 uint32_t sb_offset)
 {
-	struct freya_priv *priv = dev->impl_priv;
+	struct freya_priv *priv = fba_dev->impl_priv;
 	uint64_t offset = priv->data->cxram_sideband_ofs + sb_offset;
 
-	fba_write_bar(dev, val, BAR_CXRAM, offset);
+	fba_write_bar(fba_dev, val, BAR_CXRAM, offset);
 }
 
 static void freya_m7_set_hb_mon_period(void *obj)
@@ -244,11 +245,11 @@ static char *freya_m7_health(struct fba_device *fba_dev)
 	return "UNEXPECTED";
 }
 
-static bool did_ccp_panic(struct fba_device *dev)
+static bool did_ccp_panic(struct fba_device *fba_dev)
 {
 	uint32_t panic = 0;
 
-	panic = fba_read_bar(dev, BAR_CXRAM, CXRAM_CCP_CRASH_STATUS_OFFSET);
+	panic = fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CCP_CRASH_STATUS_OFFSET);
 	return panic ? true : false;
 }
 
@@ -325,40 +326,40 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 
 static irqreturn_t fbia_coredump_msix_handler(int irq, void *data)
 {
-	struct fba_device *dev = data;
+	struct fba_device *fba_dev = data;
 
-	fba_dev_err(dev, "CCP has crashed. Aborting device operations.");
-	fba_device_abort(dev, "CCP triggered coredump");
+	fba_dev_err(fba_dev, "CCP has crashed. Aborting device operations.");
+	fba_device_abort(fba_dev, "CCP triggered coredump");
 
-	mutex_lock(&dev->coredump_mutex);
-	if (!dev->coredump_disabled)
-		kobject_uevent(&dev->dev->kobj, KOBJ_CHANGE);
-	mutex_unlock(&dev->coredump_mutex);
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (!fba_dev->coredump_disabled)
+		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
+	mutex_unlock(&fba_dev->coredump_mutex);
 
 	return IRQ_HANDLED;
 }
 
-static void fbia_coredump_exit(struct fba_device *dev)
+static void fbia_coredump_exit(struct fba_device *fba_dev)
 {
-	if (dev->coredump_init) {
-		fba_free_irq(dev->pdev, COREDUMP_MSIX_VECTOR, dev);
-		dev->coredump_init = false;
+	if (fba_dev->coredump_init) {
+		fba_free_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, fba_dev);
+		fba_dev->coredump_init = false;
 	}
 }
 
-static int fbia_coredump_init(struct fba_device *dev)
+static int fbia_coredump_init(struct fba_device *fba_dev)
 {
 	int rc;
 
-	rc = fba_request_irq(dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
-			     fbia_coredump_msix_handler, dev, "%s%d-coredump",
-			     dev->cfg->name, dev->id);
+	rc = fba_request_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
+			     fbia_coredump_msix_handler, fba_dev,
+			     "%s%d-coredump", fba_dev->cfg->name, fba_dev->id);
 	if (rc) {
-		fba_dev_err(dev, "fba_request_irq failed for tx irq");
+		fba_dev_err(fba_dev, "fba_request_irq failed for tx irq");
 		return rc;
 	}
 	// Only set the coredump exit function when coredump init is successful
-	dev->coredump_init = true;
+	fba_dev->coredump_init = true;
 	return rc;
 }
 
@@ -427,24 +428,25 @@ out_unlock:
 	return rc;
 }
 
-static uint32_t fbia_coredump_get_num_regions(struct fba_device *dev)
+static uint32_t fbia_coredump_get_num_regions(struct fba_device *fba_dev)
 {
-	return fba_read_bar(dev, BAR_CXRAM, CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET);
+	return fba_read_bar(fba_dev, BAR_CXRAM,
+			    CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET);
 }
 
-static int fbia_coredump_get_info(struct fba_device *dev,
+static int fbia_coredump_get_info(struct fba_device *fba_dev,
 				  struct get_coredump_info_ioctl *coredump_info)
 {
 	int rc = 0;
 	uint32_t magic;
 
-	mutex_lock(&dev->coredump_mutex);
-	if (dev->coredump_disabled) {
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
 		rc = -ENODEV;
 		goto out_unlock;
 	}
 
-	magic = fba_read_bar(dev, BAR_CXRAM, CXRAM_CORE_DUMP_OFFSET);
+	magic = fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CORE_DUMP_OFFSET);
 	if (magic != MAGIC_NUMBER) {
 		coredump_info->validity = 0;
 		coredump_info->coredump_info_size = 0;
@@ -452,91 +454,91 @@ static int fbia_coredump_get_info(struct fba_device *dev,
 		goto out_unlock;
 	}
 	coredump_info->validity = 1;
-	coredump_info->num_regions = fbia_coredump_get_num_regions(dev);
+	coredump_info->num_regions = fbia_coredump_get_num_regions(fba_dev);
 	coredump_info->coredump_info_size =
 		sizeof(struct coredump_region) * coredump_info->num_regions;
 
 out_unlock:
-	mutex_unlock(&dev->coredump_mutex);
+	mutex_unlock(&fba_dev->coredump_mutex);
 
 	return rc;
 }
 
-static int fbia_coredump_get_regions(struct fba_device *dev, void *coredump_mem,
-				     uint32_t size)
+static int fbia_coredump_get_regions(struct fba_device *fba_dev,
+				     void *coredump_mem, uint32_t size)
 {
 	int rc;
 	uint32_t regions_size;
 
-	mutex_lock(&dev->coredump_mutex);
-	if (dev->coredump_disabled) {
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
 		rc = -ENODEV;
 		goto out_unlock;
 	}
 
-	regions_size = fbia_coredump_get_num_regions(dev) *
+	regions_size = fbia_coredump_get_num_regions(fba_dev) *
 		       sizeof(struct coredump_region);
 	if (size < regions_size) {
 		// Partial reading of coredump info is not supported
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Error in reading coredump region info, not enough memory to read full buffer");
 		rc = -EINVAL;
 		goto out_unlock;
 	}
 
 	memcpy_fromio(coredump_mem,
-		      (void __iomem *)(dev->bars[BAR_CXRAM] +
+		      (void __iomem *)(fba_dev->bars[BAR_CXRAM] +
 				       CXRAM_CORE_DUMP_REGION_INFO_OFFSET),
 		      regions_size);
 	rc = regions_size;
 
 out_unlock:
-	mutex_unlock(&dev->coredump_mutex);
+	mutex_unlock(&fba_dev->coredump_mutex);
 
 	return rc;
 }
 
-static uint32_t fbia_coredump_get_crc_offset(struct fba_device *dev)
+static uint32_t fbia_coredump_get_crc_offset(struct fba_device *fba_dev)
 {
 	return CXRAM_CCP_CORE_DUMP_CRC_OFFSET;
 }
 
-static uint32_t fbia_coredump_get_crc(struct fba_device *dev)
+static uint32_t fbia_coredump_get_crc(struct fba_device *fba_dev)
 {
-	return fba_read_bar(dev, BAR_CXRAM, CXRAM_CCP_CORE_DUMP_CRC_OFFSET);
+	return fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CCP_CORE_DUMP_CRC_OFFSET);
 }
 
-static inline void cxram_sideband_set_mask(struct fba_device *dev,
+static inline void cxram_sideband_set_mask(struct fba_device *fba_dev,
 					   uint32_t mask, uint32_t newval,
 					   uint64_t offset)
 {
 	uint32_t value;
 
-	value = freya_read_cxram_sb(dev, offset);
+	value = freya_read_cxram_sb(fba_dev, offset);
 	value &= ~mask;
 	value |= newval;
-	freya_write_cxram_sb(dev, value, offset);
+	freya_write_cxram_sb(fba_dev, value, offset);
 }
 
-static inline void cxram_sideband_setbit(struct fba_device *dev,
+static inline void cxram_sideband_setbit(struct fba_device *fba_dev,
 					 uint32_t setbits, uint64_t offset)
 {
 	uint32_t value;
 
-	value = freya_read_cxram_sb(dev, offset);
+	value = freya_read_cxram_sb(fba_dev, offset);
 	value |= setbits;
-	freya_write_cxram_sb(dev, value, offset);
+	freya_write_cxram_sb(fba_dev, value, offset);
 }
 
-static inline void cxram_sideband_clearbit(struct fba_device *dev,
+static inline void cxram_sideband_clearbit(struct fba_device *fba_dev,
 					   uint32_t clearbits, uint64_t offset)
 {
 	uint32_t value;
 
-	value = freya_read_cxram_sb(dev, offset);
+	value = freya_read_cxram_sb(fba_dev, offset);
 	value &= ~clearbits;
-	freya_write_cxram_sb(dev, value, offset);
+	freya_write_cxram_sb(fba_dev, value, offset);
 }
 
 static int request_and_xfer_fw(struct fba_device *fba_dev, const char *name,
@@ -1098,7 +1100,7 @@ static int reset_ccp(struct fba_device *fba_dev)
 	return rc;
 }
 
-static long fba_ioctl_get_coredump_regions(struct fba_device *dev,
+static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
 					   void __user *data)
 {
 	struct get_coredump_region_ioctl coredump_region_req;
@@ -1115,7 +1117,7 @@ static long fba_ioctl_get_coredump_regions(struct fba_device *dev,
 	if (!coredump_mem)
 		return -ENOMEM;
 
-	rc = fbia_coredump_get_regions(dev, coredump_mem,
+	rc = fbia_coredump_get_regions(fba_dev, coredump_mem,
 				       coredump_region_req.size);
 	if (rc < 0)
 		goto out_free;
@@ -1140,7 +1142,7 @@ out_free:
 static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	struct fba_ctx *ctx = fp->private_data;
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	void __user *data = (void __user *)arg;
 	long rc;
 
@@ -1151,7 +1153,7 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&coredump_info_req, data,
 				   sizeof(struct get_coredump_info_ioctl)))
 			return -EFAULT;
-		rc = fbia_coredump_get_info(dev, &coredump_info_req);
+		rc = fbia_coredump_get_info(fba_dev, &coredump_info_req);
 		if (rc != 0)
 			return rc;
 		if (copy_to_user(data, &coredump_info_req,
@@ -1160,7 +1162,7 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		return 0;
 	}
 	case FBA_IOCTL_GET_COREDUMP_REGIONS:
-		return fba_ioctl_get_coredump_regions(dev, data);
+		return fba_ioctl_get_coredump_regions(fba_dev, data);
 
 	case FBA_IOCTL_GET_COREDUMP_REGION_DATA: {
 		struct get_coredump_region_data_ioctl get_coredump_region_data;
@@ -1175,12 +1177,12 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if ((get_coredump_region_data.flags &
 		     GET_COREDUMP_DATA_FLAG_COREDUMP_DONE) != 0) {
 			/* Signal fba_device_abort() to stop waiting */
-			fba_device_signal_coredump_done(dev);
+			fba_device_signal_coredump_done(fba_dev);
 		}
 		return rc;
 	}
 	case FBA_IOCTL_SECURE_DBG_UNLOCK:
-		return freya_secure_dbg_unlock(dev);
+		return freya_secure_dbg_unlock(fba_dev);
 	default:
 		return -EINVAL;
 	}
@@ -1193,9 +1195,9 @@ static int freya_reset_controllers(struct fba_device *fba_dev)
 	return reset_ccp(fba_dev);
 }
 
-static const char *freya_get_boot_mode(struct fba_device *dev)
+static const char *freya_get_boot_mode(struct fba_device *fba_dev)
 {
-	struct freya_priv *priv = dev->impl_priv;
+	struct freya_priv *priv = fba_dev->impl_priv;
 
 	switch (priv->boot_mode) {
 	case FREYA_BOOT_MBIST:
@@ -1207,9 +1209,9 @@ static const char *freya_get_boot_mode(struct fba_device *dev)
 	}
 }
 
-static int freya_set_boot_mode(struct fba_device *dev, const char *mode)
+static int freya_set_boot_mode(struct fba_device *fba_dev, const char *mode)
 {
-	struct freya_priv *priv = dev->impl_priv;
+	struct freya_priv *priv = fba_dev->impl_priv;
 
 	if (strncmp(mode, "normal", 6) == 0) {
 		priv->boot_mode = FREYA_BOOT_NORMAL;

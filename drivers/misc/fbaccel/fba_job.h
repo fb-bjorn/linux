@@ -20,7 +20,7 @@
 typedef void (*fba_job_cb_t)(int completed, void *data);
 
 struct fba_job {
-	struct fba_device *dev;
+	struct fba_device *fba_dev;
 	struct fba_ctx *ctx; // Owner context.
 	struct list_head
 		ctx_item; // This job in the context (submitted or completed) list.
@@ -70,9 +70,9 @@ void fba_job_put(struct fba_job *job);
 void fba_job_release_resources(struct fba_job *job);
 
 // Update usage counts for job
-int fba_job_inc_usage(struct fba_device *dev, const struct fba_limits *max,
+int fba_job_inc_usage(struct fba_device *fba_dev, const struct fba_limits *max,
 		      struct fba_limits *src, struct fba_job *job);
-void fba_job_dec_usage(struct fba_device *dev, struct fba_limits *src,
+void fba_job_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,
 		       struct fba_job *job);
 
 // Generic Submission/Completion work (DMA)

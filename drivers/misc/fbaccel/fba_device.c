@@ -194,9 +194,9 @@ static struct attribute *fba_device_attrs[] = {
 };
 ATTRIBUTE_GROUPS(fba_device);
 
-struct fba_channel *fba_get_channel(struct fba_device *dev, int i)
+struct fba_channel *fba_get_channel(struct fba_device *fba_dev, int i)
 {
-	return &dev->channels[i];
+	return &fba_dev->channels[i];
 }
 
 void fba_device_add_ctx(struct fba_device *fba_dev, struct list_head *entry)
@@ -299,7 +299,7 @@ static void fba_device_stop(struct fba_device *fba_dev)
 		fba_channel_shutdown(fba_get_channel(fba_dev, i));
 }
 
-static int fba_device_alloc_queue(struct fba_device *dev,
+static int fba_device_alloc_queue(struct fba_device *fba_dev,
 				  struct fba_shared *area,
 				  uint32_t host_queue_mask,
 				  enum sail_regs sail_q, size_t q_size,
@@ -308,21 +308,21 @@ static int fba_device_alloc_queue(struct fba_device *dev,
 	int rc;
 
 	if (bdes & host_queue_mask) {
-		rc = fba_shared_alloc_coherent(dev, area, q_size);
+		rc = fba_shared_alloc_coherent(fba_dev, area, q_size);
 		if (rc)
 			return rc;
 
-		set_mailbox64(dev, sail_q, area->addr);
+		set_mailbox64(fba_dev, sail_q, area->addr);
 	} else {
-		uint64_t bir = get_mailbox64(dev, sail_q);
+		uint64_t bir = get_mailbox64(fba_dev, sail_q);
 
-		fba_shared_alloc_iomem(dev, area, BIR_TO_BAR(bir),
+		fba_shared_alloc_iomem(fba_dev, area, BIR_TO_BAR(bir),
 				       BIR_TO_OFFSET(bir), q_size);
 	}
 	return 0;
 }
 
-static int __fba_wait_for_state(struct fba_device *dev, uint32_t reg,
+static int __fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg,
 				uint32_t state, uint32_t num_retries,
 				bool bail_early)
 {
@@ -335,11 +335,11 @@ static int __fba_wait_for_state(struct fba_device *dev, uint32_t reg,
 
 	for (i = 0; i < tries; i++) {
 		/* Bail early if we're unbinding. */
-		if (bail_early && READ_ONCE(dev->exiting))
+		if (bail_early && READ_ONCE(fba_dev->exiting))
 			return -ETIMEDOUT;
 
-		fba_dev_info(dev, "Scan state %d try %d.", reg, i);
-		val = get_mailbox(dev, reg);
+		fba_dev_info(fba_dev, "Scan state %d try %d.", reg, i);
+		val = get_mailbox(fba_dev, reg);
 		if (val == state)
 			return 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
@@ -347,23 +347,23 @@ static int __fba_wait_for_state(struct fba_device *dev, uint32_t reg,
 		// emulation can be slow.
 		schedule_timeout(HZ);
 	}
-	fba_dev_err(dev, "Failed state %d = %x.", reg, val);
+	fba_dev_err(fba_dev, "Failed state %d = %x.", reg, val);
 	return -ETIMEDOUT;
 }
 
-int fba_wait_for_state(struct fba_device *dev, uint32_t reg, uint32_t state,
+int fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg, uint32_t state,
 		       uint32_t num_retries)
 {
-	return __fba_wait_for_state(dev, reg, state, num_retries, true);
+	return __fba_wait_for_state(fba_dev, reg, state, num_retries, true);
 }
 
-int fba_wait_for_state_nobail(struct fba_device *dev, uint32_t reg,
+int fba_wait_for_state_nobail(struct fba_device *fba_dev, uint32_t reg,
 			      uint32_t state, uint32_t num_retries)
 {
-	return __fba_wait_for_state(dev, reg, state, num_retries, false);
+	return __fba_wait_for_state(fba_dev, reg, state, num_retries, false);
 }
 
-static int fba_wait_for_status(struct fba_device *dev, uint64_t offset,
+static int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
 			       uint32_t state, uint32_t num_retries)
 {
 	uint32_t val;
@@ -374,8 +374,8 @@ static int fba_wait_for_status(struct fba_device *dev, uint64_t offset,
 		tries = 1;
 
 	for (i = 0; i < tries; i++) {
-		fba_dev_info(dev, "Wait for status ready, try %d.", i);
-		fba_shared_memcpy_from(&dev->status_area, offset, &val,
+		fba_dev_info(fba_dev, "Wait for status ready, try %d.", i);
+		fba_shared_memcpy_from(&fba_dev->status_area, offset, &val,
 				       sizeof(uint32_t));
 		if (val == state)
 			return 0;
@@ -384,7 +384,7 @@ static int fba_wait_for_status(struct fba_device *dev, uint64_t offset,
 		// emulation can be slow.
 		schedule_timeout(HZ);
 	}
-	fba_dev_err(dev, "Failed status ready = %x.", val);
+	fba_dev_err(fba_dev, "Failed status ready = %x.", val);
 	return -ETIMEDOUT;
 }
 
@@ -454,117 +454,122 @@ static int fba_device_usoc_init(struct fba_device *fba_dev)
 	return rv;
 }
 
-static void fba_device_fw_setup_ptrs(struct fba_device *dev)
+static void fba_device_fw_setup_ptrs(struct fba_device *fba_dev)
 {
-	uint32_t hdes = SAIL_HDES_DEFINE(dev->cfg->scratch_page_cnt, 0);
+	uint32_t hdes = SAIL_HDES_DEFINE(fba_dev->cfg->scratch_page_cnt, 0);
 
-	set_mailbox64(dev, SAIL_SCAL, dev->scratch_area.addr);
-	set_mailbox64(dev, SAIL_STAL, dev->status_area.addr);
+	set_mailbox64(fba_dev, SAIL_SCAL, fba_dev->scratch_area.addr);
+	set_mailbox64(fba_dev, SAIL_STAL, fba_dev->status_area.addr);
 
-	set_mailbox(dev, SAIL_HDES, hdes);
+	set_mailbox(fba_dev, SAIL_HDES, hdes);
 }
 
 /* Set up channels once firmware is ready */
-static int fba_device_fw_channel_init(struct fba_device *dev)
+static int fba_device_fw_channel_init(struct fba_device *fba_dev)
 {
 	struct fba_queue_info sqinfo, cqinfo;
-	uint32_t bdes = get_mailbox(dev, SAIL_BDES);
-	uint32_t cdes = get_mailbox(dev, SAIL_CDES);
-	uint32_t strm = get_mailbox(dev, SAIL_STRM);
-	uint32_t pkt_size = get_mailbox(dev, SAIL_PKT_SIZE);
+	uint32_t bdes = get_mailbox(fba_dev, SAIL_BDES);
+	uint32_t cdes = get_mailbox(fba_dev, SAIL_CDES);
+	uint32_t strm = get_mailbox(fba_dev, SAIL_STRM);
+	uint32_t pkt_size = get_mailbox(fba_dev, SAIL_PKT_SIZE);
 	size_t q_size;
 	int rc, i;
 
-	dev->channel_cnt = SAIL_CDES_CNUM(cdes);
-	if (dev->channel_cnt > MAX_CHANNELS)
-		dev->channel_cnt = MAX_CHANNELS;
-	if (dev->channel_cnt <= SAIL_CHANNEL_EXE) {
+	fba_dev->channel_cnt = SAIL_CDES_CNUM(cdes);
+	if (fba_dev->channel_cnt > MAX_CHANNELS)
+		fba_dev->channel_cnt = MAX_CHANNELS;
+	if (fba_dev->channel_cnt <= SAIL_CHANNEL_EXE) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Device did not advertise enough channels. (advertised=%u, min=%u)",
-			dev->channel_cnt, SAIL_CHANNEL_EXE + 1);
+			fba_dev->channel_cnt, SAIL_CHANNEL_EXE + 1);
 		return -EINVAL;
 	}
 
-	dev->streaming_channel_cnt = SAIL_STRM_CNUM(strm);
-	dev->channel_total = dev->channel_cnt + dev->streaming_channel_cnt;
-	if (dev->channel_total > MAX_CHANNELS) {
+	fba_dev->streaming_channel_cnt = SAIL_STRM_CNUM(strm);
+	fba_dev->channel_total =
+		fba_dev->channel_cnt + fba_dev->streaming_channel_cnt;
+	if (fba_dev->channel_total > MAX_CHANNELS) {
 		fba_dev_warn(
-			dev,
+			fba_dev,
 			"Limiting channels to max supported.  (advertised=%u, MAX_CHANNELS=%u)",
-			dev->channel_total, MAX_CHANNELS);
-		dev->streaming_channel_cnt = MAX_CHANNELS - dev->channel_cnt;
-		dev->channel_total = MAX_CHANNELS;
+			fba_dev->channel_total, MAX_CHANNELS);
+		fba_dev->streaming_channel_cnt =
+			MAX_CHANNELS - fba_dev->channel_cnt;
+		fba_dev->channel_total = MAX_CHANNELS;
 	}
 
-	fba_dev_dbg(dev, "using channels = %d, streaming_channels = %d.",
-		    dev->channel_cnt, dev->streaming_channel_cnt);
+	fba_dev_dbg(fba_dev, "using channels = %d, streaming_channels = %d.",
+		    fba_dev->channel_cnt, fba_dev->streaming_channel_cnt);
 
-	dev->channel_entries = SAIL_CDES_PQEC(cdes);
-	dev->streaming_channel_entries = SAIL_STRM_PQEC(strm);
+	fba_dev->channel_entries = SAIL_CDES_PQEC(cdes);
+	fba_dev->streaming_channel_entries = SAIL_STRM_PQEC(strm);
 
-	dev->channel_max_packet_size = SAIL_PKT_SIZE_MAX(pkt_size);
-	dev->streaming_channel_max_packet_size =
+	fba_dev->channel_max_packet_size = SAIL_PKT_SIZE_MAX(pkt_size);
+	fba_dev->streaming_channel_max_packet_size =
 		SAIL_PKT_STREAMING_SIZE_MAX(pkt_size);
 
-	dev->chan_limits.sub_cnt = dev->channel_entries;
+	fba_dev->chan_limits.sub_cnt = fba_dev->channel_entries;
 
-	dev->streaming_chan_limits.sub_cnt = dev->streaming_channel_entries;
+	fba_dev->streaming_chan_limits.sub_cnt =
+		fba_dev->streaming_channel_entries;
 
 	// Allocate enough space for all submission queues.
-	q_size = SAIL_SQ_BYTES(cdes) + dev->streaming_channel_cnt *
-					       dev->streaming_channel_entries *
-					       SAIL_CDES_SQES(cdes);
-	rc = fba_device_alloc_queue(dev, &dev->sqs_area, SAIL_BDES_HSQ,
+	q_size = SAIL_SQ_BYTES(cdes) +
+		 fba_dev->streaming_channel_cnt *
+			 fba_dev->streaming_channel_entries *
+			 SAIL_CDES_SQES(cdes);
+	rc = fba_device_alloc_queue(fba_dev, &fba_dev->sqs_area, SAIL_BDES_HSQ,
 				    SAIL_SQAL, q_size, bdes);
 	if (rc)
 		return rc;
 
 	// Allocate enough space for all completion queues.
-	q_size = SAIL_CQ_BYTES(cdes) + dev->streaming_channel_cnt *
-					       dev->streaming_channel_entries *
-					       SAIL_CDES_CQES(cdes);
-	rc = fba_device_alloc_queue(dev, &dev->cqs_area, SAIL_BDES_HCQ,
+	q_size = SAIL_CQ_BYTES(cdes) +
+		 fba_dev->streaming_channel_cnt *
+			 fba_dev->streaming_channel_entries *
+			 SAIL_CDES_CQES(cdes);
+	rc = fba_device_alloc_queue(fba_dev, &fba_dev->cqs_area, SAIL_BDES_HCQ,
 				    SAIL_CQAL, q_size, bdes);
 	if (rc)
 		goto err_free_sq;
 
-	cqinfo.size = dev->channel_entries * SAIL_CDES_CQES(cdes);
-	sqinfo.size = dev->channel_entries * SAIL_CDES_SQES(cdes);
+	cqinfo.size = fba_dev->channel_entries * SAIL_CDES_CQES(cdes);
+	sqinfo.size = fba_dev->channel_entries * SAIL_CDES_SQES(cdes);
 
-	cqinfo.area = &dev->cqs_area;
-	sqinfo.area = &dev->sqs_area;
+	cqinfo.area = &fba_dev->cqs_area;
+	sqinfo.area = &fba_dev->sqs_area;
 
 	cqinfo.offset = 0;
 	sqinfo.offset = 0;
 
 	/* Allocate MSIX vectors now that we know the number of channels */
-	rc = fba_device_msix_init(dev);
+	rc = fba_device_msix_init(fba_dev);
 	if (rc != 0)
 		goto err_free_cq;
 
 	/* Initialize channels */
-	for (i = 0; i < dev->channel_total; i++) {
+	for (i = 0; i < fba_dev->channel_total; i++) {
 		struct fba_limits *limits;
 		uint64_t max_subs;
 
-		if (i < dev->channel_cnt) {
+		if (i < fba_dev->channel_cnt) {
 			cqinfo.size =
-				dev->channel_entries * SAIL_CDES_CQES(cdes);
+				fba_dev->channel_entries * SAIL_CDES_CQES(cdes);
 			sqinfo.size =
-				dev->channel_entries * SAIL_CDES_SQES(cdes);
-			limits = &dev->chan_limits;
-			max_subs = dev->channel_max_packet_size;
+				fba_dev->channel_entries * SAIL_CDES_SQES(cdes);
+			limits = &fba_dev->chan_limits;
+			max_subs = fba_dev->channel_max_packet_size;
 		} else {
-			cqinfo.size = dev->streaming_channel_entries *
+			cqinfo.size = fba_dev->streaming_channel_entries *
 				      SAIL_CDES_CQES(cdes);
-			sqinfo.size = dev->streaming_channel_entries *
+			sqinfo.size = fba_dev->streaming_channel_entries *
 				      SAIL_CDES_SQES(cdes);
-			limits = &dev->streaming_chan_limits;
-			max_subs = dev->streaming_channel_max_packet_size;
+			limits = &fba_dev->streaming_chan_limits;
+			max_subs = fba_dev->streaming_channel_max_packet_size;
 		}
 
-		rc = fba_channel_init(dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
+		rc = fba_channel_init(fba_dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
 				      &sqinfo, &cqinfo, limits, max_subs);
 		if (rc)
 			goto err_exit_channels;
@@ -573,19 +578,19 @@ static int fba_device_fw_channel_init(struct fba_device *dev)
 		cqinfo.offset += cqinfo.size;
 	}
 
-	fba_device_fw_setup_ptrs(dev);
+	fba_device_fw_setup_ptrs(fba_dev);
 
 	return 0;
 
 err_exit_channels:
 	while (i-- > 0)
-		fba_channel_exit(fba_get_channel(dev, i));
+		fba_channel_exit(fba_get_channel(fba_dev, i));
 
 err_free_cq:
-	fba_shared_free(dev, &dev->cqs_area);
+	fba_shared_free(fba_dev, &fba_dev->cqs_area);
 
 err_free_sq:
-	fba_shared_free(dev, &dev->sqs_area);
+	fba_shared_free(fba_dev, &fba_dev->sqs_area);
 
 	return rc;
 }
@@ -675,12 +680,12 @@ static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
 	return rc;
 }
 
-static uint32_t get_admin_command_timeout(struct fba_device *dev)
+static uint32_t get_admin_command_timeout(struct fba_device *fba_dev)
 {
-	return get_mailbox(dev, SAIL_ADMIN_CMD_TIMEOUT);
+	return get_mailbox(fba_dev, SAIL_ADMIN_CMD_TIMEOUT);
 }
 
-static int fba_device_enable_sail(struct fba_device *dev)
+static int fba_device_enable_sail(struct fba_device *fba_dev)
 {
 	int rc;
 
@@ -690,99 +695,101 @@ static int fba_device_enable_sail(struct fba_device *dev)
 	 * limitations.)  The device will perform a write to host memory to let
 	 * us know it is safe to proceed.
 	 */
-	set_mailbox(dev, SAIL_CTRL, SAIL_ENABLED);
-	rc = fba_wait_for_status(dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
-				 dev->num_retries);
+	set_mailbox(fba_dev, SAIL_CTRL, SAIL_ENABLED);
+	rc = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				 fba_dev->num_retries);
 	if (rc) {
-		fba_dev_err(dev, "Failed waiting for status memory signature.");
+		fba_dev_err(fba_dev,
+			    "Failed waiting for status memory signature.");
 		return rc;
 	}
 	// Resetting the ACK signal
-	fba_shared_memset(&dev->status_area, IATU_CONFIG_OFS, 0,
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
 			  sizeof(uint32_t));
 
-	rc = fba_wait_for_state(dev, SAIL_STAT, SAIL_ENABLED, dev->num_retries);
+	rc = fba_wait_for_state(fba_dev, SAIL_STAT, SAIL_ENABLED,
+				fba_dev->num_retries);
 	if (rc)
-		fba_dev_err(dev, "Failed waiting for state %d.", SAIL_STAT);
+		fba_dev_err(fba_dev, "Failed waiting for state %d.", SAIL_STAT);
 
 	return rc;
 }
 
 /* Setup some defaults once we know platform type */
-static void fba_device_fw_setup_platform(struct fba_device *dev)
+static void fba_device_fw_setup_platform(struct fba_device *fba_dev)
 {
-	if (dev->platform_type == PLATFORM_SILICON)
-		dev->num_retries = MIN_RETRIES;
+	if (fba_dev->platform_type == PLATFORM_SILICON)
+		fba_dev->num_retries = MIN_RETRIES;
 	else
-		dev->num_retries = MAX_RETRIES;
+		fba_dev->num_retries = MAX_RETRIES;
 
-	dev->admin_cmd_timeout_ms = get_admin_command_timeout(dev);
-	if (!dev->admin_cmd_timeout_ms) {
-		if (dev->platform_type == PLATFORM_SILICON)
-			dev->admin_cmd_timeout_ms =
+	fba_dev->admin_cmd_timeout_ms = get_admin_command_timeout(fba_dev);
+	if (!fba_dev->admin_cmd_timeout_ms) {
+		if (fba_dev->platform_type == PLATFORM_SILICON)
+			fba_dev->admin_cmd_timeout_ms =
 				SAIL_ADMIN_CMD_MIN_TIMEOUT_MS;
 		else
-			dev->admin_cmd_timeout_ms =
+			fba_dev->admin_cmd_timeout_ms =
 				SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
 	}
 }
 
 /* Finish device setup once firmware is ready. */
-static int fba_device_fw_init(struct fba_device *dev)
+static int fba_device_fw_init(struct fba_device *fba_dev)
 {
 	int rc;
 
-	rc = fba_device_fw_channel_init(dev);
+	rc = fba_device_fw_channel_init(fba_dev);
 	if (rc)
 		return rc;
 
-	rc = fba_device_enable_sail(dev);
+	rc = fba_device_enable_sail(fba_dev);
 	if (rc)
 		goto err_channel_exit;
 
-	fba_device_uart_register(dev);
+	fba_device_uart_register(fba_dev);
 
 	/* Any error logged within fba_device_usoc_init already, but continue if it fails */
-	(void)fba_device_usoc_init(dev);
+	(void)fba_device_usoc_init(fba_dev);
 	if (!disable_logger)
-		dev->logger_dev = fba_logger_register(dev);
+		fba_dev->logger_dev = fba_logger_register(fba_dev);
 
-	if (IS_ERR(dev->logger_dev))
-		dev->logger_dev = NULL;
+	if (IS_ERR(fba_dev->logger_dev))
+		fba_dev->logger_dev = NULL;
 
 	// Setup Resources
-	rc = fba_resource_init(dev);
+	rc = fba_resource_init(fba_dev);
 	if (rc) {
-		fba_dev_err(dev, "Failed to init resources.");
+		fba_dev_err(fba_dev, "Failed to init resources.");
 		goto err_channel_exit;
 	}
 
-	fba_device_fw_setup_platform(dev);
+	fba_device_fw_setup_platform(fba_dev);
 
-	rc = fba_admin_time_set(dev, ktime_get_real());
+	rc = fba_admin_time_set(fba_dev, ktime_get_real());
 	if (rc) {
-		fba_dev_err(dev, "Failed to set device time.");
+		fba_dev_err(fba_dev, "Failed to set device time.");
 		goto err_resource_exit;
 	}
 
 	// coredump and mon init must be after fba_resource_init()
-	if (dev->cfg->impl_ops->coredump_init)
-		dev->cfg->impl_ops->coredump_init(dev);
+	if (fba_dev->cfg->impl_ops->coredump_init)
+		fba_dev->cfg->impl_ops->coredump_init(fba_dev);
 
-	rc = fba_mon_device_init(dev);
+	rc = fba_mon_device_init(fba_dev);
 	if (rc) {
-		fba_dev_err(dev, "Failed initialize monitoring.");
+		fba_dev_err(fba_dev, "Failed initialize monitoring.");
 		goto err_resource_exit;
 	}
 
-	fba_channel_start_heartbeats(dev);
+	fba_channel_start_heartbeats(fba_dev);
 
 	return 0;
 
 err_resource_exit:
-	fba_resource_exit(dev);
+	fba_resource_exit(fba_dev);
 err_channel_exit:
-	fba_device_fw_channel_exit(dev);
+	fba_device_fw_channel_exit(fba_dev);
 
 	return rc;
 }
@@ -1180,56 +1187,57 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	return 0;
 }
 
-struct fba_channel *fba_allocate_streaming_channel(struct fba_device *dev)
+struct fba_channel *fba_allocate_streaming_channel(struct fba_device *fba_dev)
 {
 	int chan_id;
 	struct fba_channel *chan = NULL;
 
-	chan_id = ida_alloc_range(
-		&dev->channel_ids, dev->channel_cnt,
-		dev->channel_cnt + dev->streaming_channel_cnt - 1, GFP_KERNEL);
+	chan_id = ida_alloc_range(&fba_dev->channel_ids, fba_dev->channel_cnt,
+				  fba_dev->channel_cnt +
+					  fba_dev->streaming_channel_cnt - 1,
+				  GFP_KERNEL);
 	if (chan_id >= 0)
-		chan = fba_get_channel(dev, chan_id);
+		chan = fba_get_channel(fba_dev, chan_id);
 
 	return chan;
 }
 
 void fba_free_streaming_channel(struct fba_channel *chan)
 {
-	ida_free(&chan->dev->channel_ids, chan->chan_id);
+	ida_free(&chan->fba_dev->channel_ids, chan->chan_id);
 }
 
 static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	struct fba_device *dev;
+	struct fba_device *fba_dev;
 
 	dev_info(&pdev->dev, "Probe.\n");
-	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (dev == NULL)
+	fba_dev = kzalloc(sizeof(*fba_dev), GFP_KERNEL);
+	if (fba_dev == NULL)
 		return -ENOMEM;
 
-	dev->pdev = pdev;
-	dev->cfg = (const struct fba_cfg *)ent->driver_data;
+	fba_dev->pdev = pdev;
+	fba_dev->cfg = (const struct fba_cfg *)ent->driver_data;
 
-	dev->pcie_boot_en = pcie_boot_en;
+	fba_dev->pcie_boot_en = pcie_boot_en;
 
-	dev->num_retries = MAX_RETRIES;
-	dev->admin_cmd_timeout_ms = SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+	fba_dev->num_retries = MAX_RETRIES;
+	fba_dev->admin_cmd_timeout_ms = SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
 
-	return fba_device_init(dev);
+	return fba_device_init(fba_dev);
 }
 
 static void fbaccel_remove(struct pci_dev *pdev)
 {
-	struct fba_device *dev;
+	struct fba_device *fba_dev;
 
 	dev_info(&pdev->dev, "Remove.");
 
 	/* Wait for any FW load in progress to complete */
 	async_synchronize_full();
 
-	dev = pci_get_drvdata(pdev);
-	fba_device_exit(dev);
+	fba_dev = pci_get_drvdata(pdev);
+	fba_device_exit(fba_dev);
 }
 
 #define PCI_VENDOR_ID_FACEBOOK 0x1d9b

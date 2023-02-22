@@ -88,7 +88,7 @@ static int fba_setup_eventfd_cb(struct fba_job *job, int eventfd)
 
 	ectx = eventfd_ctx_fdget(eventfd);
 	if (IS_ERR(ectx)) {
-		fba_dev_err(job->dev, "Failed to get event context.");
+		fba_dev_err(job->fba_dev, "Failed to get event context.");
 		return PTR_ERR(ectx);
 	}
 	fba_job_set_callback(job, fba_eventfd_cb, ectx);
@@ -263,38 +263,38 @@ static long fba_ioctl_resource_free(struct fba_ctx *ctx, uint64_t rid)
 /* For legacy reasons, always return FBA_ACTIVE */
 #define FBA_ACTIVE 8
 
-static long fba_ioctl_get_details(struct fba_device *dev,
+static long fba_ioctl_get_details(struct fba_device *fba_dev,
 				  struct get_details_ioctl *detail)
 {
 	int i;
 
 	memset(detail, 0, sizeof(*detail));
-	detail->host_ipc_bar = dev->cfg->host_ipc_bar;
-	detail->host_ipc_stride = dev->cfg->host_ipc_stride;
-	detail->host_ipc_offset = dev->cfg->host_ipc_offset;
-	detail->irq_num = CHANNEL_MSIX_VECTOR_BASE + dev->channel_total;
+	detail->host_ipc_bar = fba_dev->cfg->host_ipc_bar;
+	detail->host_ipc_stride = fba_dev->cfg->host_ipc_stride;
+	detail->host_ipc_offset = fba_dev->cfg->host_ipc_offset;
+	detail->irq_num = CHANNEL_MSIX_VECTOR_BASE + fba_dev->channel_total;
 	for (i = 0; i < BAR_CNT; i++) {
-		detail->bar_addrs[i] = (uintptr_t)dev->bars[i];
-		detail->bar_sizes[i] = pci_resource_len(dev->pdev, i);
+		detail->bar_addrs[i] = (uintptr_t)fba_dev->bars[i];
+		detail->bar_sizes[i] = pci_resource_len(fba_dev->pdev, i);
 	}
-	detail->dma_addr = dev->debug_area.addr;
+	detail->dma_addr = fba_dev->debug_area.addr;
 	detail->dma_size = SAIL_DEBUG_SIZE;
-	detail->resource_cnt = dev->resource_cnt;
-	detail->context_cnt = dev->n_ctxs;
-	detail->mon_item_cnt = fba_mon_get_item_cnt(&dev->mon);
-	detail->mon_group_cnt = fba_mon_get_group_cnt(&dev->mon);
+	detail->resource_cnt = fba_dev->resource_cnt;
+	detail->context_cnt = fba_dev->n_ctxs;
+	detail->mon_item_cnt = fba_mon_get_item_cnt(&fba_dev->mon);
+	detail->mon_group_cnt = fba_mon_get_group_cnt(&fba_dev->mon);
 
 	detail->state = FBA_ACTIVE;
 
-	detail->context_used = fba_device_get_ctx_count(dev);
+	detail->context_used = fba_device_get_ctx_count(fba_dev);
 
-	fba_channel_get_fill_watermarks(fba_get_channel(dev,
+	fba_channel_get_fill_watermarks(fba_get_channel(fba_dev,
 							SAIL_CHANNEL_ADMIN),
 					&detail->admin_sq_fill_watermark,
 					&detail->admin_cq_fill_watermark);
-	fba_channel_get_fill_watermarks(fba_get_channel(dev, SAIL_CHANNEL_EXE),
-					&detail->exe_sq_fill_watermark,
-					&detail->exe_cq_fill_watermark);
+	fba_channel_get_fill_watermarks(
+		fba_get_channel(fba_dev, SAIL_CHANNEL_EXE),
+		&detail->exe_sq_fill_watermark, &detail->exe_cq_fill_watermark);
 
 	return 0;
 }
@@ -391,30 +391,31 @@ out_unlock:
 	return rc;
 }
 
-static long fba_ioctl_stream_create(struct fba_device *dev,
+static long fba_ioctl_stream_create(struct fba_device *fba_dev,
 				    struct fba_ctx *parent,
 				    struct stream_ioctl *stream_req)
 {
 	struct fba_ctx *ctx;
 	long ret;
 
-	ctx = fba_ctx_alloc(fba_device_get(dev), parent);
+	ctx = fba_ctx_alloc(fba_device_get(fba_dev), parent);
 	if (IS_ERR(ctx)) {
-		fba_dev_err(dev, "Failed to allocate streaming context.");
-		fba_device_put(dev);
+		fba_dev_err(fba_dev, "Failed to allocate streaming context.");
+		fba_device_put(fba_dev);
 		return PTR_ERR(ctx);
 	}
 
 	ret = fba_ctx_open(ctx);
 	if (ret < 0) {
-		fba_dev_err(dev, "Failed to open streaming context.");
+		fba_dev_err(fba_dev, "Failed to open streaming context.");
 		goto err_close_ctx;
 	}
 
 	ret = anon_inode_getfd("freya_streaming", &fba_fops, ctx,
 			       stream_req->flags);
 	if (ret < 0) {
-		fba_dev_err(dev, "Failed to create streaming inode: %ld.", ret);
+		fba_dev_err(fba_dev, "Failed to create streaming inode: %ld.",
+			    ret);
 		goto err_close_ctx;
 	}
 
@@ -427,32 +428,33 @@ err_close_ctx:
 	return ret;
 }
 
-static long fba_ioctl_get_limit_params(struct fba_device *dev,
+static long fba_ioctl_get_limit_params(struct fba_device *fba_dev,
 				       struct fba_limit_params_ioctl *params)
 {
 	switch (params->channel_type) {
 	/* Count the number of user available channels */
 	case FBA_CHANNEL_TYPE_CONCURRENT:
-		params->max_channels = dev->channel_cnt - SAIL_CHANNEL_EXE;
-		params->max_entries_per_packet = dev->channel_max_packet_size;
+		params->max_channels = fba_dev->channel_cnt - SAIL_CHANNEL_EXE;
+		params->max_entries_per_packet =
+			fba_dev->channel_max_packet_size;
 		break;
 
 	case FBA_CHANNEL_TYPE_STREAMING:
-		params->max_channels = dev->streaming_channel_cnt;
+		params->max_channels = fba_dev->streaming_channel_cnt;
 		params->max_entries_per_packet =
-			dev->streaming_channel_max_packet_size;
+			fba_dev->streaming_channel_max_packet_size;
 		break;
 
 	default:
 		return -EINVAL;
 	}
 
-	params->max_entries_per_context = dev->cfg->ctx_limits.sub_cnt;
+	params->max_entries_per_context = fba_dev->cfg->ctx_limits.sub_cnt;
 
 	return 0;
 }
 
-static int fba_mon_defs_ioctl(struct fba_device *dev, void __user *data)
+static int fba_mon_defs_ioctl(struct fba_device *fba_dev, void __user *data)
 {
 	struct mon_defs_ioctl mon_defs_req;
 	int rv;
@@ -460,7 +462,7 @@ static int fba_mon_defs_ioctl(struct fba_device *dev, void __user *data)
 	if (copy_from_user(&mon_defs_req, data, sizeof(mon_defs_req)))
 		return -EFAULT;
 
-	rv = fba_mon_get_defs(dev, &mon_defs_req);
+	rv = fba_mon_get_defs(fba_dev, &mon_defs_req);
 	if (rv)
 		return rv;
 
@@ -470,7 +472,7 @@ static int fba_mon_defs_ioctl(struct fba_device *dev, void __user *data)
 	return 0;
 }
 
-static int fba_mon_data_ioctl(struct fba_device *dev, void __user *data_req)
+static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 {
 	struct mon_data_ioctl mon_data_req = {}; // Users's request
 	uint32_t *ids;
@@ -513,7 +515,8 @@ static int fba_mon_data_ioctl(struct fba_device *dev, void __user *data_req)
 		goto out_free;
 	}
 
-	rc = fba_mon_get_data(dev, ids, mon_data_req.id_count, data, errors);
+	rc = fba_mon_get_data(fba_dev, ids, mon_data_req.id_count, data,
+			      errors);
 	if (rc != 0)
 		goto out_free;
 
@@ -541,14 +544,15 @@ out_free:
 	return rc;
 }
 
-static int fba_mon_data_set_ioctl(struct fba_device *dev, void __user *data_req)
+static int fba_mon_data_set_ioctl(struct fba_device *fba_dev,
+				  void __user *data_req)
 {
 	struct mon_data_ioctl mon_data_req; // Users's request
 	uint32_t *ids;
 	void *data;
 	size_t data_size = 0;
 	size_t id_size = 0;
-	int max_id_cnt = fba_mon_get_item_cnt(&dev->mon);
+	int max_id_cnt = fba_mon_get_item_cnt(&fba_dev->mon);
 	int rc = 0;
 
 	if (copy_from_user(&mon_data_req, data_req, sizeof(mon_data_req)))
@@ -587,7 +591,7 @@ static int fba_mon_data_set_ioctl(struct fba_device *dev, void __user *data_req)
 		rc = -EFAULT;
 		goto out_free_bufs;
 	}
-	rc = fba_mon_set_data(dev, ids, mon_data_req.id_count, data);
+	rc = fba_mon_set_data(fba_dev, ids, mon_data_req.id_count, data);
 
 out_free_bufs:
 	kfree(ids);
@@ -601,7 +605,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	void __user *data = (void __user *)arg;
 	struct fba_ctx *ctx = fp->private_data;
 	struct fba_ctx *streaming_ctx, *parent_ctx;
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	long rc;
 
 	// All IOCTLS take a struct *, so ensure it's non-zero.
@@ -619,8 +623,8 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		if (copy_from_user(&res_req, data, sizeof(res_req)))
 			return -EFAULT;
-		rc = fba_ioctl_resource_info(dev, res_req.info, res_req.offset,
-					     res_req.count);
+		rc = fba_ioctl_resource_info(fba_dev, res_req.info,
+					     res_req.offset, res_req.count);
 		return rc;
 	}
 	case FBA_IOCTL_RESOURCE_ALLOC: {
@@ -667,7 +671,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		if (copy_from_user(&bar_req, data, sizeof(bar_req)))
 			return -EFAULT;
-		rc = fba_ioctl_bar_access(dev, &bar_req);
+		rc = fba_ioctl_bar_access(fba_dev, &bar_req);
 		return rc;
 	}
 	case FBA_IOCTL_POST_ID: {
@@ -698,7 +702,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (copy_from_user(&details_req, data, sizeof(details_req)))
 			return -EFAULT;
 
-		rc = fba_ioctl_get_details(dev, &details_req);
+		rc = fba_ioctl_get_details(fba_dev, &details_req);
 		if (rc != 0)
 			return rc;
 
@@ -708,11 +712,11 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		return 0;
 	}
 	case FBA_IOCTL_MON_DEFS:
-		return fba_mon_defs_ioctl(dev, data);
+		return fba_mon_defs_ioctl(fba_dev, data);
 	case FBA_IOCTL_MON_DATA:
-		return fba_mon_data_ioctl(dev, data);
+		return fba_mon_data_ioctl(fba_dev, data);
 	case FBA_IOCTL_MON_SET_DATA:
-		return fba_mon_data_set_ioctl(dev, data);
+		return fba_mon_data_set_ioctl(fba_dev, data);
 	case FBA_IOCTL_SET_STATE:
 		/* No need to set state anymore, but still need side effect */
 		rc = fba_ctx_open(ctx);
@@ -723,7 +727,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 		if (copy_from_user(&dma_req, data, sizeof(dma_req)))
 			return -EFAULT;
-		rc = fba_ioctl_access_dma(dev, &dma_req);
+		rc = fba_ioctl_access_dma(fba_dev, &dma_req);
 		if (rc != 0)
 			return rc;
 		if (copy_to_user(data, &dma_req, sizeof(dma_req)))
@@ -745,7 +749,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(struct stream_ioctl)))
 			return -EFAULT;
 
-		rc = fba_ioctl_stream_create(dev, ctx, &stream_req);
+		rc = fba_ioctl_stream_create(fba_dev, ctx, &stream_req);
 		if (rc == 0) {
 			if (copy_to_user(data, &stream_req,
 					 sizeof(struct stream_ioctl))) {
@@ -761,7 +765,7 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 				   sizeof(limit_params_req)))
 			return -EFAULT;
 
-		rc = fba_ioctl_get_limit_params(dev, &limit_params_req);
+		rc = fba_ioctl_get_limit_params(fba_dev, &limit_params_req);
 		if (rc == 0) {
 			if (copy_to_user(data, &limit_params_req,
 					 sizeof(limit_params_req)))
@@ -771,8 +775,8 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	}
 	default:
 		/* Provide a hook for device-specific ioctl handling */
-		if (dev->cfg->impl_ops->priv_ioctl)
-			return dev->cfg->impl_ops->priv_ioctl(fp, cmd, arg);
+		if (fba_dev->cfg->impl_ops->priv_ioctl)
+			return fba_dev->cfg->impl_ops->priv_ioctl(fp, cmd, arg);
 		return -EINVAL;
 	}
 	return 0;
@@ -782,10 +786,10 @@ static __poll_t fba_poll(struct file *filp, struct poll_table_struct *wait)
 {
 	__poll_t mask = 0;
 	struct fba_ctx *ctx = filp->private_data;
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 
-	poll_wait(filp, &dev->read_q, wait);
-	poll_wait(filp, &dev->write_q, wait);
+	poll_wait(filp, &fba_dev->read_q, wait);
+	poll_wait(filp, &fba_dev->write_q, wait);
 
 	if (fba_ctx_has_completions(ctx))
 		mask |= EPOLLIN | EPOLLRDNORM;

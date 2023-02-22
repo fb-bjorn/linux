@@ -84,19 +84,21 @@ static void queue_write_entries(struct fba_queue *queue,
 }
 
 /* Signal to the device that new submission queue entries are available */
-static void fba_channel_set_squeue_tail(struct fba_device *dev, int chan,
+static void fba_channel_set_squeue_tail(struct fba_device *fba_dev, int chan,
 					uint32_t new_tail)
 {
 	/* Submission doorbells are even mailboxes. */
-	set_mailbox(dev, (chan * 2) + dev->cfg->db_mbox_base + 0, new_tail);
+	set_mailbox(fba_dev, (chan * 2) + fba_dev->cfg->db_mbox_base + 0,
+		    new_tail);
 }
 
 /* Signal to the device that we have consumed completion queue entries */
-static void fba_channel_set_cqueue_head(struct fba_device *dev, int chan,
+static void fba_channel_set_cqueue_head(struct fba_device *fba_dev, int chan,
 					uint32_t new_head)
 {
 	/* Completion doorbells are odd mailboxes. */
-	set_mailbox(dev, (chan * 2) + dev->cfg->db_mbox_base + 1, new_head);
+	set_mailbox(fba_dev, (chan * 2) + fba_dev->cfg->db_mbox_base + 1,
+		    new_head);
 }
 
 #define MAX_CMD_ID 0xFFFF
@@ -128,7 +130,7 @@ static int fba_channel_alloc_cmd_id(struct fba_channel *chan,
 static bool fba_channel_fill_head(struct fba_channel *chan)
 {
 	struct fba_channel_req *req;
-	struct fba_device *dev = chan->dev;
+	struct fba_device *fba_dev = chan->fba_dev;
 	struct fba_queue *sq = &chan->squeue;
 	uint32_t space, head, tail;
 	int rc;
@@ -163,8 +165,8 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 		return false;
 	}
 
-	if (fba_util_inc_usage(dev, chan->limits, &chan->usage, req->sub_cnt) <
-	    0) {
+	if (fba_util_inc_usage(fba_dev, chan->limits, &chan->usage,
+			       req->sub_cnt) < 0) {
 		/* We have too many outstanding submission entries already */
 		spin_unlock(&chan->lock);
 		return false;
@@ -180,22 +182,22 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 	queue_write_entries(sq, req->subs, req->sub_cnt, req->cmd_id);
 	head = sq->head;
 	tail = sq->tail;
-	fba_channel_set_squeue_tail(dev, chan->chan_id, tail);
+	fba_channel_set_squeue_tail(fba_dev, chan->chan_id, tail);
 	spin_unlock(&chan->lock);
 
-	trace_fba_channel_post(dev->name, chan->chan_id, req->cmd_id,
+	trace_fba_channel_post(fba_dev->name, chan->chan_id, req->cmd_id,
 			       req->sub_cnt);
 	if (trace_fba_channel_post_sub_enabled()) {
 		int i;
 
 		for (i = 0; i < req->sub_cnt; i++)
-			trace_fba_channel_post_sub(dev->name, chan->chan_id,
+			trace_fba_channel_post_sub(fba_dev->name, chan->chan_id,
 						   req->cmd_id,
 						   req->subs[i].header.opcode);
 	}
 
 	fba_dev_dbg(
-		dev,
+		fba_dev,
 		"Added %d items for packet %d to channel %d tail=%d head=%d.",
 		req->sub_cnt, req->cmd_id, chan->chan_id, tail, head);
 
@@ -241,7 +243,7 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 	/* If we lost a race with stopping device, bail here. */
 	if (chan->stopped) {
 		spin_unlock(&chan->lock);
-		fba_dev_err(chan->dev, "channel stopped.");
+		fba_dev_err(chan->fba_dev, "channel stopped.");
 		rc = -EIO;
 		goto out_unlock_pending;
 	}
@@ -254,7 +256,7 @@ int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
 	if (req->sub_cnt > chan->max_job_subs) {
 		spin_unlock(&chan->lock);
 		fba_dev_err(
-			chan->dev,
+			chan->fba_dev,
 			"job exceeds size of channel (sub_cnt=%u, max=%llu)",
 			req->sub_cnt, chan->max_job_subs);
 		rc = -EINVAL;
@@ -314,7 +316,7 @@ static void fba_channel_purge_pending(struct fba_channel *chan)
 
 		spin_lock(&chan->lock);
 		if (req->posted) {
-			fba_util_dec_usage(chan->dev, &chan->usage,
+			fba_util_dec_usage(chan->fba_dev, &chan->usage,
 					   req->sub_cnt);
 		} else {
 			/*
@@ -390,14 +392,14 @@ static bool fba_channel_complete(struct fba_channel *chan,
 
 	if (req == NULL) {
 		if (cmp->status != CS_CANCEL /* XXX - and !chan->stopped */)
-			fba_dev_err(chan->dev,
+			fba_dev_err(chan->fba_dev,
 				    "Packet not found for completion ID=%04Xh.",
 				    cmp->command_id);
 		return false;
 	}
 
 	spin_lock(&chan->lock);
-	fba_util_dec_usage(chan->dev, &chan->usage, req->sub_cnt);
+	fba_util_dec_usage(chan->fba_dev, &chan->usage, req->sub_cnt);
 	spin_unlock(&chan->lock);
 	req->cmp = *cmp;
 	req->cb(true, req);
@@ -447,7 +449,7 @@ static int get_completion(struct fba_channel *chan, struct fba_completion *cmp)
 	if (sq_space_after < sq_space_before) {
 		/* Device has given us an invalid sq_head value. */
 		spin_unlock(&chan->lock);
-		fba_device_abort(chan->dev, "invalid sq_head");
+		fba_device_abort(chan->fba_dev, "invalid sq_head");
 		return -EIO;
 	}
 
@@ -480,7 +482,7 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 {
 	int ncmp = 0;
 	int cqueue_head = -1;
-	struct fba_device *dev = chan->dev;
+	struct fba_device *fba_dev = chan->fba_dev;
 
 	while (1) {
 		struct fba_completion cmp;
@@ -490,8 +492,8 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 		if (rv < 0)
 			break;
 
-		trace_fba_channel_done(dev->name, chan->chan_id, cmp.command_id,
-				       rv);
+		trace_fba_channel_done(fba_dev->name, chan->chan_id,
+				       cmp.command_id, rv);
 
 		cqueue_head = rv;
 		ncmp++;
@@ -508,13 +510,14 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 			chan->cqueue.fill_watermark = ncmp;
 		spin_unlock(&chan->lock);
 		// Let the device know we've drained the completion queue.
-		fba_channel_set_cqueue_head(dev, chan->chan_id, cqueue_head);
+		fba_channel_set_cqueue_head(fba_dev, chan->chan_id,
+					    cqueue_head);
 		// Signal to any process waiting on this read wait queue that
 		// there is data available to read from this device.
-		wake_up_interruptible(&dev->read_q);
+		wake_up_interruptible(&fba_dev->read_q);
 		// If there's space in the squeue then wake up any process waiting on this.
 		if (fba_channel_has_space(chan))
-			wake_up_interruptible(&dev->write_q);
+			wake_up_interruptible(&fba_dev->write_q);
 	}
 
 	return ncmp;
@@ -525,15 +528,15 @@ static void work_handler(struct work_struct *work)
 	struct fba_channel *chan = container_of(work, struct fba_channel, work);
 	int cnt = fba_channel_handle_completions(chan);
 
-	fba_dev_dbg(chan->dev, "Channel %d handled %d packets.", chan->chan_id,
-		    cnt);
+	fba_dev_dbg(chan->fba_dev, "Channel %d handled %d packets.",
+		    chan->chan_id, cnt);
 }
 
 static irqreturn_t fba_channel_isr(int irq, void *data)
 {
 	struct fba_channel *chan = data;
 
-	queue_work(chan->dev->msix_wq, &chan->work);
+	queue_work(chan->fba_dev->msix_wq, &chan->work);
 
 	return IRQ_HANDLED;
 }
@@ -586,14 +589,15 @@ void fba_channel_set_hb_mon_period(void *obj)
 		// monitor from sending the heartbeat
 		chan->poller.period_ms = CHAN_HEARTBEAT_PERIOD_MS;
 		if (chan->poller.enabled)
-			fba_dev_err(chan->dev, "HB now disabled for channel %d",
+			fba_dev_err(chan->fba_dev,
+				    "HB now disabled for channel %d",
 				    (uint32_t)chan->chan_id);
 		chan->poller.enabled = false;
 	} else {
 		chan->poller.period_ms = chan_hb_period_ms;
 		if (!chan->poller.enabled)
 			fba_dev_info(
-				chan->dev,
+				chan->fba_dev,
 				"HB now enabled for channel %d period %d ms",
 				(uint32_t)chan->chan_id, chan_hb_period_ms);
 		chan->poller.enabled = true;
@@ -614,17 +618,17 @@ static void setup_queue(struct fba_queue *queue, struct fba_queue_info *qinfo,
 }
 
 /* Initialize a channel */
-int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
+int fba_channel_init(struct fba_device *fba_dev, int id, unsigned int irq,
 		     struct fba_queue_info *sqinfo,
 		     struct fba_queue_info *cqinfo, struct fba_limits *limits,
 		     uint64_t max_job_subs)
 {
-	struct fba_channel *chan = fba_get_channel(dev, id);
+	struct fba_channel *chan = fba_get_channel(fba_dev, id);
 	uint32_t max_monitored_channel =
-		min((uint32_t)(SAIL_CHANNEL_EXE + 1), dev->channel_cnt);
+		min((uint32_t)(SAIL_CHANNEL_EXE + 1), fba_dev->channel_cnt);
 	int rc;
 
-	chan->dev = dev;
+	chan->fba_dev = fba_dev;
 	chan->chan_id = id;
 	chan->irq = irq;
 	chan->limits = limits;
@@ -641,14 +645,14 @@ int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
 	INIT_WORK(&chan->work, work_handler);
 
 	if (id == SAIL_CHANNEL_ADMIN) {
-		rc = fba_request_irq(dev->pdev, irq, fba_channel_isr, NULL,
-				     chan, "%s-admin", dev->name);
+		rc = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
+				     chan, "%s-admin", fba_dev->name);
 	} else {
-		rc = fba_request_irq(dev->pdev, irq, fba_channel_isr, NULL,
-				     chan, "%s-chan%d", dev->name, id);
+		rc = fba_request_irq(fba_dev->pdev, irq, fba_channel_isr, NULL,
+				     chan, "%s-chan%d", fba_dev->name, id);
 	}
 	if (rc) {
-		fba_dev_err(dev, "Failed to request IRQ %d.", irq);
+		fba_dev_err(fba_dev, "Failed to request IRQ %d.", irq);
 		return rc;
 	}
 
@@ -660,7 +664,7 @@ int fba_channel_init(struct fba_device *dev, int id, unsigned int irq,
 
 void fba_channel_exit(struct fba_channel *chan)
 {
-	struct fba_device *fba_dev = chan->dev;
+	struct fba_device *fba_dev = chan->fba_dev;
 
 	fba_free_irq(fba_dev->pdev, chan->irq, chan);
 	WARN_ON(!idr_is_empty(&chan->cmd_ids));

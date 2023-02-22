@@ -73,7 +73,7 @@ static int fba_admin_packet_sync(struct fba_device *fba_dev,
 		sub_cnt, stat);
 }
 
-int fba_admin_create_context(struct fba_device *dev, int id)
+int fba_admin_create_context(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
@@ -83,22 +83,23 @@ int fba_admin_create_context(struct fba_device *dev, int id)
 	sub.header.opcode = ADMIN_CREATE_CONTEXT;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 	if (rc) {
-		fba_dev_err(dev, "ADMIN_CREATE_CONTEXT failed %d.", rc);
+		fba_dev_err(fba_dev, "ADMIN_CREATE_CONTEXT failed %d.", rc);
 		return rc;
 	}
 	if (status != 0) {
-		fba_dev_err(dev, "Failed to create ctx on device, status=%d.",
+		fba_dev_err(fba_dev,
+			    "Failed to create ctx on device, status=%d.",
 			    status);
-		fba_device_abort(dev, "create context failed");
+		fba_device_abort(fba_dev, "create context failed");
 		return -EIO;
 	}
 
 	return 0;
 }
 
-int fba_admin_delete_context_begin(struct fba_device *dev, int id)
+int fba_admin_delete_context_begin(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
@@ -108,24 +109,24 @@ int fba_admin_delete_context_begin(struct fba_device *dev, int id)
 	sub.header.opcode = ADMIN_DELETE_CONTEXT_BEGIN;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 	if (rc) {
-		fba_dev_err(dev, "%s: failed rc %d", __func__, rc);
+		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, rc);
 		return rc;
 	}
 	if (status != 0) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Failed to delete ctx begin id=%d on device, status=%d.",
 			id, status);
-		fba_device_abort(dev, "delete context failed");
+		fba_device_abort(fba_dev, "delete context failed");
 		return -EIO;
 	}
 
 	return 0;
 }
 
-int fba_admin_delete_context_end(struct fba_device *dev, int id)
+int fba_admin_delete_context_end(struct fba_device *fba_dev, int id)
 {
 	struct fba_submission sub;
 	uint16_t status;
@@ -135,17 +136,17 @@ int fba_admin_delete_context_end(struct fba_device *dev, int id)
 	sub.header.opcode = ADMIN_DELETE_CONTEXT_END;
 	sub.ctx.id = id;
 
-	rc = fba_admin_packet_sync(dev, &sub, 1, &status);
+	rc = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 	if (rc) {
-		fba_dev_err(dev, "%s: failed rc %d", __func__, rc);
+		fba_dev_err(fba_dev, "%s: failed rc %d", __func__, rc);
 		return rc;
 	}
 	if (status != 0) {
 		fba_dev_err(
-			dev,
+			fba_dev,
 			"Failed to delete ctx end id=%d on device, status=%d.",
 			id, status);
-		fba_device_abort(dev, "delete context failed.");
+		fba_device_abort(fba_dev, "delete context failed.");
 		return -EIO;
 	}
 
@@ -281,26 +282,27 @@ int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 bool fba_admin_poll_channel(void *obj)
 {
 	struct fba_channel *chan = (struct fba_channel *)obj;
-	struct fba_device *dev = chan->dev;
+	struct fba_device *fba_dev = chan->fba_dev;
 	uint16_t status = 0;
 	int rc;
 
-	if (chan == fba_get_channel(dev, SAIL_CHANNEL_ADMIN)) {
-		rc = fba_admin_time_set(dev, ktime_get_real());
+	if (chan == fba_get_channel(fba_dev, SAIL_CHANNEL_ADMIN)) {
+		rc = fba_admin_time_set(fba_dev, ktime_get_real());
 	} else {
 		struct fba_submission sub = {
 			.header.opcode = EXE_NOOP,
 		};
 
-		rc = fba_admin_packet_chan_sync(dev, chan, &sub, 1, &status);
+		rc = fba_admin_packet_chan_sync(fba_dev, chan, &sub, 1,
+						&status);
 	}
 
 	if (rc || status) {
-		fba_device_abort(dev, "heartbeat failure");
-		fba_dev_err(dev,
+		fba_device_abort(fba_dev, "heartbeat failure");
+		fba_dev_err(fba_dev,
 			    "Heartbeat failed for channel %d rc=%d status=%d",
 			    (uint16_t)chan->chan_id, rc, status);
-		dev->heart_beat_failed = true;
+		fba_dev->heart_beat_failed = true;
 		return false;
 	}
 

@@ -25,7 +25,8 @@ struct fba_job;
 struct fba_job_result;
 
 // Allocate and initialize a dynamic context object.
-struct fba_ctx *fba_ctx_alloc(struct fba_device *dev, struct fba_ctx *parent);
+struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,
+			      struct fba_ctx *parent);
 
 // Send open admin message and promote the state to allow FW transactions.
 int fba_ctx_open(struct fba_ctx *ctx);

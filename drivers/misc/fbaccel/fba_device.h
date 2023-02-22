@@ -198,38 +198,38 @@ struct fba_dma {
 /* Implementation defined operations */
 struct fba_impl_ops {
 	/* Implementation defined init */
-	int (*impl_init)(struct fba_device *dev);
+	int (*impl_init)(struct fba_device *fba_dev);
 	/* Implementation defined exit */
-	void (*impl_exit)(struct fba_device *dev);
+	void (*impl_exit)(struct fba_device *fba_dev);
 	/* Implementations may extend ioctl API */
 	long (*priv_ioctl)(struct file *fp, unsigned int cmd,
 			   unsigned long arg);
 
 	// Boot APIs
 	// Get device-specific boot mode
-	const char *(*get_boot_mode)(struct fba_device *dev);
+	const char *(*get_boot_mode)(struct fba_device *fba_dev);
 	// Set device-specific boot mode
-	int (*set_boot_mode)(struct fba_device *dev, const char *mode);
+	int (*set_boot_mode)(struct fba_device *fba_dev, const char *mode);
 	// Get firmware default boot1 and boot2 filenames
-	void (*get_fw_filenames)(struct fba_device *dev, const char **boot1,
+	void (*get_fw_filenames)(struct fba_device *fba_dev, const char **boot1,
 				 const char **boot2);
 	// Load firmware
-	int (*load_firmware)(struct fba_device *dev);
+	int (*load_firmware)(struct fba_device *fba_dev);
 	// Reset CCP and SCP
-	int (*reset_controller)(struct fba_device *dev);
+	int (*reset_controller)(struct fba_device *fba_dev);
 
 	/* Coredump init/exit hooks */
-	int (*coredump_init)(struct fba_device *dev);
-	void (*coredump_exit)(struct fba_device *dev);
+	int (*coredump_init)(struct fba_device *fba_dev);
+	void (*coredump_exit)(struct fba_device *fba_dev);
 
 	// Check the health of boot controller.
-	char *(*boot_health_check)(struct fba_device *dev);
+	char *(*boot_health_check)(struct fba_device *fba_dev);
 	// Check CCP Panic State
-	bool (*did_ccp_panic)(struct fba_device *dev);
-	uint32_t (*coredump_get_cxram_crc_offset)(struct fba_device *dev);
-	uint32_t (*coredump_get_crc)(struct fba_device *dev);
+	bool (*did_ccp_panic)(struct fba_device *fba_dev);
+	uint32_t (*coredump_get_cxram_crc_offset)(struct fba_device *fba_dev);
+	uint32_t (*coredump_get_crc)(struct fba_device *fba_dev);
 	// Decide whether to load signed or unsigned firmware
-	bool (*is_secure_boot)(struct fba_device *dev);
+	bool (*is_secure_boot)(struct fba_device *fba_dev);
 };
 
 #include "fba_channel.h"
@@ -379,8 +379,9 @@ void fba_device_put(struct fba_device *fba_dev);
 struct fba_device *fba_device_lookup(unsigned int minor);
 
 // Get a sail channel
-struct fba_channel *fba_get_channel(struct fba_device *dev, int sail_channel);
-struct fba_channel *fba_allocate_streaming_channel(struct fba_device *dev);
+struct fba_channel *fba_get_channel(struct fba_device *fba_dev,
+				    int sail_channel);
+struct fba_channel *fba_allocate_streaming_channel(struct fba_device *fba_dev);
 void fba_free_streaming_channel(struct fba_channel *chan);
 
 // Device Operations
@@ -398,7 +399,7 @@ void fba_device_signal_coredump_done(struct fba_device *fba_dev);
 extern const struct file_operations fba_fops;
 
 // Allocation/RID Convertion Opertations
-int fba_alloc_translate_setup(struct fba_device *dev, struct fba_job *job,
+int fba_alloc_translate_setup(struct fba_device *fba_dev, struct fba_job *job,
 			      size_t cnt);
 void fba_alloc_translate_teardown(struct fba_job *job);
 
@@ -423,9 +424,9 @@ void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma);
 //
 // State functions
 //
-int fba_wait_for_state(struct fba_device *dev, enum sail_regs reg,
+int fba_wait_for_state(struct fba_device *fba_dev, enum sail_regs reg,
 		       uint32_t state, uint32_t num_retries);
-int fba_wait_for_state_nobail(struct fba_device *dev, enum sail_regs reg,
+int fba_wait_for_state_nobail(struct fba_device *fba_dev, enum sail_regs reg,
 			      uint32_t state, uint32_t num_retries);
 
 struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,

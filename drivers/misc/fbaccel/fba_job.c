@@ -16,7 +16,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 			      const struct fba_submission __user *subs,
 			      size_t n_subs, uint64_t user_data)
 {
-	struct fba_device *dev = fba_ctx_to_fba_device(ctx);
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	int ctx_id = fba_ctx_get_id(ctx);
 	struct fba_job *job;
 	size_t size;
@@ -32,12 +32,13 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 	size = n_subs * sizeof(struct fba_submission);
 	job = kzalloc(sizeof(struct fba_job) + size, GFP_KERNEL);
 	if (job == NULL) {
-		fba_dev_err(dev, "Failed to allocate job, n_subs=%zu.", n_subs);
+		fba_dev_err(fba_dev, "Failed to allocate job, n_subs=%zu.",
+			    n_subs);
 		return ERR_PTR(-ENOMEM);
 	}
 
 	kref_init(&job->ref);
-	job->dev = dev;
+	job->fba_dev = fba_dev;
 	/* Job references the context */
 	job->ctx = fba_ctx_get(ctx);
 
@@ -55,7 +56,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 			     fba_job_channel_cb);
 	job->user_data = user_data;
 
-	fba_alloc_translate_setup(dev, job, job->req.sub_cnt);
+	fba_alloc_translate_setup(fba_dev, job, job->req.sub_cnt);
 	for (i = 0; i < job->req.sub_cnt; i++) {
 		rc = fba_alloc_translate_sub(ctx, job, &job->sub_array[i]);
 		if (rc < 0)
@@ -67,7 +68,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 		job->sub_array[i].header.packet_tail = job->req.sub_cnt - i - 1;
 	}
 
-	fba_dev_dbg(dev, "Created job size %d.", job->req.sub_cnt);
+	fba_dev_dbg(fba_dev, "Created job size %d.", job->req.sub_cnt);
 	return job;
 
 err_put_job:
@@ -149,7 +150,7 @@ int fba_job_channel_post(struct fba_channel *chan, struct fba_job *job)
 void fba_job_complete(struct fba_job *job)
 {
 	struct fba_ctx *ctx = job->ctx;
-	struct fba_device *dev = job->dev;
+	struct fba_device *fba_dev = job->fba_dev;
 	uint16_t cmd_id = job->req.cmp.command_id;
 	uint32_t sub_cnt = job->req.sub_cnt;
 	size_t alloc_cnt = job->alloc_cnt;
@@ -168,8 +169,9 @@ void fba_job_complete(struct fba_job *job)
 	if (job->callback)
 		job->callback(JOB_COMPLETE, job->callback_data);
 
-	trace_fba_job_done(dev->name, job, user_job_key, sub_cnt, alloc_cnt);
-	fba_dev_dbg(dev, "Job %04Xh Completed. ctx ID %d items: %d", cmd_id,
+	trace_fba_job_done(fba_dev->name, job, user_job_key, sub_cnt,
+			   alloc_cnt);
+	fba_dev_dbg(fba_dev, "Job %04Xh Completed. ctx ID %d items: %d", cmd_id,
 		    ctx_id, sub_cnt);
 
 	/* Drop reference from fba_job_channel_post() */
@@ -201,16 +203,16 @@ void fba_job_put(struct fba_job *job)
 	kref_put(&job->ref, fba_job_free);
 }
 
-int fba_job_inc_usage(struct fba_device *dev, const struct fba_limits *max,
+int fba_job_inc_usage(struct fba_device *fba_dev, const struct fba_limits *max,
 		      struct fba_limits *src, struct fba_job *job)
 {
-	return fba_util_inc_usage(dev, max, src, job->req.sub_cnt);
+	return fba_util_inc_usage(fba_dev, max, src, job->req.sub_cnt);
 }
 
-void fba_job_dec_usage(struct fba_device *dev, struct fba_limits *src,
+void fba_job_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,
 		       struct fba_job *job)
 {
-	fba_util_dec_usage(dev, src, job->req.sub_cnt);
+	fba_util_dec_usage(fba_dev, src, job->req.sub_cnt);
 }
 
 // Map a DMA buffer and add it to the list of DMAs tracked by the job
