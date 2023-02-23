@@ -369,11 +369,12 @@ static int fbia_coredump_init(struct fba_device *fba_dev)
 }
 
 static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
-					 uintptr_t host_buf,
+					 void __user *host_buf,
 					 uint64_t device_addr)
 {
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	struct fba_dma *dma;
+	dma_addr_t host_addr;
 	uint64_t opcode =
 		AT_DMA_GET_OP(size | AT_DMA_OPSZ | AT_DMA_FROM_DEVICE);
 	int ret;
@@ -386,8 +387,7 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 
 	fba_dev_info(fba_dev, "%s: Mapping DMA pages size=%zu.", __func__,
 		     (size_t)size);
-	dma = fba_dma_map(ctx, (uint64_t *)host_buf, size, DMA_FROM_DEVICE,
-			  true);
+	dma = fba_dma_map(ctx, host_buf, size, DMA_FROM_DEVICE, true);
 	if (IS_ERR(dma)) {
 		ret = -EINVAL;
 		goto out_unlock;
@@ -396,16 +396,16 @@ static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
 	if (dma->map_cnt != 1) {
 		fba_dev_dbg(fba_dev, "DMA pages are in PRP format.");
 		opcode = opcode | AT_DMA_PRP;
-		host_buf = dma->prp_addr;
+		host_addr = dma->prp_addr;
 	} else {
 		fba_dev_dbg(fba_dev, "DMA pages are in contig format.");
-		host_buf = dma->dma_addr;
+		host_addr = dma->dma_addr;
 	}
 
 	set_mailbox64(fba_dev, M7_MBOX_DMA_OPCODE_ENTRY, opcode);
 	set_mailbox64(fba_dev, M7_MBOX_DMA_SIZE_ENTRY, size);
 	set_mailbox64(fba_dev, M7_MBOX_DMA_DADDR_ENTRY, device_addr);
-	set_mailbox64(fba_dev, M7_MBOX_DMA_HADDR_ENTRY, host_buf);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_HADDR_ENTRY, host_addr);
 	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
 	set_mailbox(fba_dev, M7_MBOX_DMA_SUBMISSION_ENTRY, DMA_SUBMISSION);
 
@@ -1137,7 +1137,7 @@ static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
 			   sizeof(struct get_coredump_region_ioctl)))
 		return -EFAULT;
 
-	user = coredump_region_req.data;
+	user = u64_to_user_ptr(coredump_region_req.data_ptr);
 	coredump_mem = kzalloc(coredump_region_req.size, GFP_KERNEL);
 	if (!coredump_mem)
 		return -ENOMEM;
@@ -1191,13 +1191,15 @@ static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 	case FBA_IOCTL_GET_COREDUMP_REGION_DATA: {
 		struct get_coredump_region_data_ioctl get_coredump_region_data;
+		void __user *host_buf;
 
 		if (copy_from_user(&get_coredump_region_data, data,
 				   sizeof(get_coredump_region_data)))
 			return -EFAULT;
+		host_buf =
+			u64_to_user_ptr(get_coredump_region_data.host_buf_ptr);
 		ret = fbia_coredump_get_region_data(
-			ctx, get_coredump_region_data.size,
-			(uintptr_t)get_coredump_region_data.host_buf,
+			ctx, get_coredump_region_data.size, host_buf,
 			get_coredump_region_data.device_addr);
 		if ((get_coredump_region_data.flags &
 		     GET_COREDUMP_DATA_FLAG_COREDUMP_DONE) != 0) {

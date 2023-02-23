@@ -167,7 +167,7 @@ static int fba_alloc_translate_p2p(struct fba_job *job, uint64_t rid,
 
 static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 					       struct fba_job *job,
-					       uintptr_t buf_addr,
+					       void __user *buf_addr,
 					       uint64_t enc_size)
 {
 	size_t size = enc_size & AT_DMA_SIZE_MASK;
@@ -190,7 +190,7 @@ static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 		return ERR_PTR(-EINVAL);
 	}
 
-	return fba_job_dma_map(ctx, job, (void *)buf_addr, size, dir, true);
+	return fba_job_dma_map(ctx, job, buf_addr, size, dir, true);
 }
 
 int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
@@ -250,7 +250,8 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				return -EINVAL;
 
 			size = iargs[i + 1];
-			dma = fba_alloc_translate_dma(ctx, job, iargs[i], size);
+			dma = fba_alloc_translate_dma(
+				ctx, job, u64_to_user_ptr(iargs[i]), size);
 			if (IS_ERR(dma)) {
 				ret = PTR_ERR(dma);
 				break;

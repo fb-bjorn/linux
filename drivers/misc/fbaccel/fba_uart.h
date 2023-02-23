@@ -11,7 +11,7 @@ void fba_uart_driver_exit(void);
 
 struct fba_uart_dev;
 
-struct fba_uart_dev *fba_uart_register(struct fba_device *fba,
+struct fba_uart_dev *fba_uart_register(struct fba_device *fba_dev,
 				       struct device *parent, int minor,
 				       const char *name, int id, int mbox_start,
 				       int msi_irq_rx, int msi_irq_tx);

@@ -184,10 +184,7 @@ struct fba_dma_prp_node {
  */
 struct fba_dma {
 	struct list_head item; /* This DMA node in the Job. */
-	union {
-		void *user_data; /* Pointer to user space data. */
-		dma_addr_t user_addr; /* Unsigned int to user space data. */
-	};
+	uintptr_t user_addr; /* Pointer to user space data. */
 	size_t size; /* Size of payload. */
 	int flags; /* DMA Direction. */
 	int get_cnt; /* Number of pages we have locked. */
@@ -427,8 +424,8 @@ uint64_t fba_alloc_get_addr(struct fba_alloc *alloc);
 void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr);
 
 /* DMA Operations */
-struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
-			    int dir, bool force_prp);
+struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
+			    size_t size, int dir, bool force_prp);
 void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma);
 
 /*

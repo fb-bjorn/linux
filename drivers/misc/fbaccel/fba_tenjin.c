@@ -494,7 +494,7 @@ static int coredump_get_size(struct fba_device *fba_dev, int region_id,
 	return cpu_hdr.size;
 }
 
-void fbv_coredump_start(struct fba_device *fba_dev)
+static void fbv_coredump_start(struct fba_device *fba_dev)
 {
 	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
@@ -503,23 +503,7 @@ void fbv_coredump_start(struct fba_device *fba_dev)
 			      COREDUMP_POLLING_TIME_HZ);
 }
 
-int fbv_coredump_host_region_init(struct fba_device *fba_dev,
-				  struct fba_shared *host_mem, int cpu_id)
-{
-	struct tenjin_priv *priv = fba_dev->impl_priv;
-	struct fbv_coredump *coredump = &priv->coredump;
-	struct fba_shared *region;
-
-	if (cpu_id >= N_COREDUMP_CPUS)
-		return -EINVAL;
-
-	region = &coredump->regions[HOST_REGION][cpu_id];
-	*region = *host_mem;
-
-	return 0;
-}
-
-int fbv_coredump_init(struct fba_device *fba_dev)
+static int fbv_coredump_init(struct fba_device *fba_dev)
 {
 	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
@@ -550,7 +534,7 @@ int fbv_coredump_init(struct fba_device *fba_dev)
 	return 0;
 }
 
-void fbv_coredump_exit(struct fba_device *fba_dev)
+static void fbv_coredump_exit(struct fba_device *fba_dev)
 {
 	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
@@ -571,8 +555,9 @@ void fbv_coredump_exit(struct fba_device *fba_dev)
 	}
 }
 
-int fbv_coredump_get_status(struct fba_device *fba_dev,
-			    struct coredump_status_ioctl *coredump_status)
+static int
+fbv_coredump_get_status(struct fba_device *fba_dev,
+			struct coredump_status_ioctl *coredump_status)
 {
 	struct tenjin_priv *priv = fba_dev->impl_priv;
 	struct fbv_coredump *coredump = &priv->coredump;
@@ -643,8 +628,8 @@ static int coredump_get_data(struct fba_device *fba_dev, int region_id,
 	return 0;
 }
 
-int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
-			  uint32_t size)
+static int fbv_coredump_get_data(struct fba_device *fba_dev, void *coredump_mem,
+				 uint32_t size)
 {
 	int offset = 0;
 	uint32_t cpu_data_size;
@@ -688,7 +673,7 @@ fba_ioctl_get_coredump_data(struct fba_device *fba_dev,
 			    struct get_coredump_ioctl *coredump_data_req)
 {
 	void *coredump_mem;
-	void __user *user = coredump_data_req->data;
+	void __user *user = u64_to_user_ptr(coredump_data_req->data_ptr);
 	int ret;
 
 	if (coredump_data_req->size > MAX_COREDUMP_SIZE)

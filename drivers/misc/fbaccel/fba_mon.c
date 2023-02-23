@@ -982,6 +982,10 @@ int fba_mon_get_defs(struct fba_device *fba_dev,
 	size_t max_items_size;
 	size_t max_groups_size;
 	struct fba_mon *mon = &fba_dev->mon;
+	void __user *items, *groups;
+
+	items = u64_to_user_ptr(mon_defs_req->items_ptr);
+	groups = u64_to_user_ptr(mon_defs_req->groups_ptr);
 
 	mutex_lock(&mon->mutex);
 	max_items_size = fba_mon_get_item_cnt(mon) * sizeof(struct mon_item);
@@ -1012,8 +1016,7 @@ int fba_mon_get_defs(struct fba_device *fba_dev,
 
 			if (items_size) {
 				if (copy_to_user(
-					    mon_defs_req->items +
-						    mon_defs_req
+					    items + mon_defs_req
 							    ->items_bytes_written,
 					    mon->src_info[src].items,
 					    items_size)) {
@@ -1025,7 +1028,7 @@ int fba_mon_get_defs(struct fba_device *fba_dev,
 
 			if (groups_size) {
 				if (copy_to_user(
-					    mon_defs_req->groups +
+					    groups +
 						    mon_defs_req
 							    ->groups_bytes_written,
 					    mon->src_info[src].groups,

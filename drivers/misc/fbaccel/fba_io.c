@@ -18,15 +18,17 @@
 static long fba_ioctl_bar_access(struct fba_device *fba_dev,
 				 struct bar_access_ioctl *access)
 {
-	int ret;
 	const char *rwstr;
 	uint32_t nwords;
 	uint32_t owords;
 	uint32_t i;
 	uint32_t val;
 	uint32_t __iomem *bar_words;
+	uint32_t __user *data;
 	uint64_t bar_len;
+	int ret;
 
+	data = u64_to_user_ptr(access->data_ptr);
 	rwstr = (access->type == FBA_ACCESS_READ) ? "Read" : "Write";
 	fba_dev_dbg(fba_dev, "%s bar=%u offset=%#llx len=%#x", rwstr,
 		    access->bar, access->offset, access->len);
@@ -50,7 +52,7 @@ static long fba_ioctl_bar_access(struct fba_device *fba_dev,
 	if (access->type == FBA_ACCESS_READ) {
 		for (i = 0; i < nwords; i++) {
 			val = ioread32(&bar_words[i + owords]);
-			ret = put_user(val, &access->data[i]);
+			ret = put_user(val, data + i);
 			if (ret)
 				return ret;
 		}
@@ -58,7 +60,7 @@ static long fba_ioctl_bar_access(struct fba_device *fba_dev,
 	}
 	if (access->type == FBA_ACCESS_WRITE) {
 		for (i = 0; i < nwords; i++) {
-			ret = get_user(val, &access->data[i]);
+			ret = get_user(val, data + i);
 			if (ret)
 				return ret;
 			iowrite32(val, &bar_words[i + owords]);
@@ -100,14 +102,15 @@ static int fba_setup_eventfd_cb(struct fba_job *job, int eventfd)
 static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
 {
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	const struct fba_submission __user *subs;
 	struct fba_job *job = NULL;
 	int ret;
 
 	trace_fba_post_cmd(fba_dev->name, post_req->count, post_req->user_data);
 
 	/* Allocate the job. */
-	job = fba_job_alloc(ctx, post_req->subs, post_req->count,
-			    post_req->user_data);
+	subs = u64_to_user_ptr(post_req->subs_ptr);
+	job = fba_job_alloc(ctx, subs, post_req->count, post_req->user_data);
 	if (IS_ERR(job))
 		return PTR_ERR(job);
 
@@ -302,6 +305,7 @@ static long fba_ioctl_get_details(struct fba_device *fba_dev,
 static long __fba_ioctl_access_dma(struct fba_device *fba_dev,
 				   struct dma_access_ioctl *dma_req)
 {
+	void __user *data = u64_to_user_ptr(dma_req->data_ptr);
 	uint8_t *ptr;
 
 	ptr = (uint8_t *)fba_dev->debug_area.data;
@@ -312,10 +316,10 @@ static long __fba_ioctl_access_dma(struct fba_device *fba_dev,
 
 	ptr += dma_req->offset;
 	if (dma_req->type == FBA_ACCESS_READ) {
-		if (copy_to_user(dma_req->data, ptr, dma_req->len))
+		if (copy_to_user(data, ptr, dma_req->len))
 			return -EFAULT;
 	} else {
-		if (copy_from_user(ptr, dma_req->data, dma_req->len))
+		if (copy_from_user(ptr, data, dma_req->len))
 			return -EFAULT;
 	}
 	dma_req->addr = fba_dev->debug_area.addr;
@@ -344,7 +348,7 @@ out_unlock:
 static long __fba_ioctl_access_scratch(struct fba_ctx *ctx,
 				       struct scratch_access_ioctl *scratch_req)
 {
-	void __user *user = scratch_req->data;
+	void __user *user = u64_to_user_ptr(scratch_req->data_ptr);
 	struct fba_alloc *alloc;
 	uint64_t scratch;
 	void *scratch_va;
@@ -478,6 +482,9 @@ static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 	uint32_t *ids;
 	void *data;
 	int16_t *errors;
+	void __user *ids_buf;
+	void __user *data_buf;
+	void __user *errors_buf;
 	int ret = 0;
 	size_t data_size = 0;
 	size_t id_size = 0;
@@ -485,13 +492,16 @@ static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 
 	if (copy_from_user(&mon_data_req, data_req, sizeof(mon_data_req)))
 		return -EFAULT;
+	ids_buf = u64_to_user_ptr(mon_data_req.ids_ptr);
+	data_buf = u64_to_user_ptr(mon_data_req.data_ptr);
+	errors_buf = u64_to_user_ptr(mon_data_req.errors_ptr);
 
 	if (mon_data_req.id_count == 0)
 		return 0;
 
-	id_size = mon_data_req.id_count * sizeof(*mon_data_req.ids);
+	id_size = mon_data_req.id_count * sizeof(*ids);
 	data_size = mon_data_req.id_count * MON_VALUE_SIZE;
-	err_size = mon_data_req.id_count * sizeof(*mon_data_req.errors);
+	err_size = mon_data_req.id_count * sizeof(*errors);
 	ids = kzalloc(id_size, GFP_KERNEL);
 	data = kzalloc(data_size, GFP_KERNEL);
 	errors = kzalloc(err_size, GFP_KERNEL);
@@ -500,17 +510,17 @@ static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 		goto out_free;
 	}
 
-	if (copy_from_user(ids, mon_data_req.ids, id_size)) {
+	if (copy_from_user(ids, ids_buf, id_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
 
-	if (copy_from_user(data, mon_data_req.data, data_size)) {
+	if (copy_from_user(data, data_buf, data_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
 
-	if (copy_from_user(errors, mon_data_req.errors, err_size)) {
+	if (copy_from_user(errors, errors_buf, err_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
@@ -520,18 +530,17 @@ static int fba_mon_data_ioctl(struct fba_device *fba_dev, void __user *data_req)
 	if (ret != 0)
 		goto out_free;
 
-	if (copy_to_user((void __user *)mon_data_req.ids, ids, id_size)) {
+	if (copy_to_user(ids_buf, ids, id_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
 
-	if (copy_to_user((void __user *)mon_data_req.data, data, data_size)) {
+	if (copy_to_user(data_buf, data, data_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
 
-	if (copy_to_user((void __user *)mon_data_req.errors, errors,
-			 err_size)) {
+	if (copy_to_user(errors_buf, errors, err_size)) {
 		ret = -EFAULT;
 		goto out_free;
 	}
@@ -553,10 +562,14 @@ static int fba_mon_data_set_ioctl(struct fba_device *fba_dev,
 	size_t data_size = 0;
 	size_t id_size = 0;
 	int max_id_cnt = fba_mon_get_item_cnt(&fba_dev->mon);
+	void __user *ids_buf;
+	void __user *data_buf;
 	int ret = 0;
 
 	if (copy_from_user(&mon_data_req, data_req, sizeof(mon_data_req)))
 		return -EFAULT;
+	ids_buf = u64_to_user_ptr(mon_data_req.ids_ptr);
+	data_buf = u64_to_user_ptr(mon_data_req.data_ptr);
 
 	if (mon_data_req.id_count > max_id_cnt)
 		return -EINVAL;
@@ -564,7 +577,7 @@ static int fba_mon_data_set_ioctl(struct fba_device *fba_dev,
 	if (mon_data_req.id_count == 0)
 		return 0;
 
-	id_size = mon_data_req.id_count * sizeof(*mon_data_req.ids);
+	id_size = mon_data_req.id_count * sizeof(*ids);
 	data_size = mon_data_req.id_count * MON_VALUE_SIZE;
 	if (data_size > MAX_MON_SET_DATA_SIZE)
 		return -EINVAL;
@@ -582,12 +595,12 @@ static int fba_mon_data_set_ioctl(struct fba_device *fba_dev,
 		goto out_free_bufs;
 	}
 
-	if (copy_from_user(ids, mon_data_req.ids, id_size)) {
+	if (copy_from_user(ids, ids_buf, id_size)) {
 		ret = -EFAULT;
 		goto out_free_bufs;
 	}
 
-	if (copy_from_user(data, mon_data_req.data, data_size)) {
+	if (copy_from_user(data, data_buf, data_size)) {
 		ret = -EFAULT;
 		goto out_free_bufs;
 	}
@@ -620,11 +633,13 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case FBA_IOCTL_RESOURCE_INFO: {
 		struct res_info_ioctl res_req;
+		struct resource_info __user *info;
 
 		if (copy_from_user(&res_req, data, sizeof(res_req)))
 			return -EFAULT;
-		ret = fba_ioctl_resource_info(fba_dev, res_req.info,
-					      res_req.offset, res_req.count);
+		info = u64_to_user_ptr(res_req.info_ptr);
+		ret = fba_ioctl_resource_info(fba_dev, info, res_req.offset,
+					      res_req.count);
 		return ret;
 	}
 	case FBA_IOCTL_RESOURCE_ALLOC: {
@@ -687,12 +702,14 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	}
 	case FBA_IOCTL_READ_ID: {
 		struct read_ioctl read_req;
+		struct result_info __user *results;
 
 		if (copy_from_user(&read_req, data, sizeof(read_req)))
 			return -EFAULT;
+		results = u64_to_user_ptr(read_req.results_ptr);
 
 		ret = fba_ioctl_read_results(streaming_ctx, read_req.eventfd,
-					     read_req.results, read_req.count);
+					     results, read_req.count);
 		return ret;
 	}
 	case FBA_IOCTL_GET_DETAILS: {

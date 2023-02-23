@@ -225,7 +225,7 @@ void fba_job_dec_usage(struct fba_device *fba_dev, struct fba_limits *src,
 
 /* Map a DMA buffer and add it to the list of DMAs tracked by the job */
 struct fba_dma *fba_job_dma_map(struct fba_ctx *ctx, struct fba_job *job,
-				void *data, size_t size, int dir,
+				void __user *data, size_t size, int dir,
 				bool force_prp)
 {
 	struct fba_dma *dma;

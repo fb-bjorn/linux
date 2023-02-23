@@ -2,6 +2,7 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
 #pragma once
 
+#include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
 
@@ -14,70 +15,71 @@
  * the lower 7 bits of flag and all of status are application defined.
  */
 struct result_info {
-	uint16_t status; /* App defined, or CS code if high bit if flag set. */
-	uint8_t flags_index; /* App defined, or index of failed entry. */
-	uint8_t reserved[5];
-	uint64_t user_data; /* User data provided on post. */
+	__u16 status; /* App defined, or CS code if high bit if flag set. */
+	__u8 flags_index; /* App defined, or index of failed entry. */
+	__u8 reserved[5];
+	__u64 user_data; /* User data provided on post. */
 };
 
 struct resource_info {
 	/* Type of resources such as memory, computer etc. */
-	uint16_t type;
+	__u16 type;
 	/* Subtype of resources as SRAM, DRAM in memory etc. */
-	uint16_t subtype;
+	__u16 subtype;
 	/* Mainly to ensure 8 byte alignment, can be used for misc. purposes. */
-	uint16_t alloc;
+	__u16 alloc;
 	/* Mainly to ensure 8 byte alignment, can be used for misc. purposes. */
-	uint16_t misc;
+	__u16 misc;
 	/* Start address of the resource. */
-	uint64_t start;
+	__u64 start;
 	/* Size of the resource available for use. */
-	uint64_t size;
+	__u64 size;
 	/* Granularity of resources e.g. for memory this could imply alignment. */
-	uint64_t avail;
+	__u64 avail;
 };
 
 /* IOCTL struct to retreive Resource Info from device. */
 struct res_info_ioctl {
-	size_t count; /* Number of resources wanted */
-	size_t offset; /* Starting index of resources wanted */
-	struct resource_info __user *info; /* Where resource info should be */
-	/* copied to. */
+	__u64 count; /* Number of resources wanted */
+	__u64 offset; /* Starting index of resources wanted */
+	__u64 info_ptr; /* Array for returned struct resource_info */
 };
 
 /* IOCTL struct to allocate resrouce and retrieve RID. */
 struct res_alloc_ioctl {
-	uint16_t index;
-	uint16_t type;
-	uint16_t subtype;
-	uint16_t reserved;
-	uint64_t count; /* Number of resources wanted */
-	uint64_t rid; /* Returned RID */
-	uint64_t start; /* Returned START */
+	__u16 index;
+	__u16 type;
+	__u16 subtype;
+	__u16 reserved;
+	__u64 count; /* Number of resources wanted */
+	__u64 rid; /* Returned RID */
+	__u64 start; /* Returned START */
 };
 
 /* IOCTL struct to map a P2P memory RID to an fd */
 struct res_p2p_export_ioctl {
-	uint64_t source_rid; /* Returned RID */
-	int fd; /* Returned dmabuf fd */
+	__u64 source_rid; /* Returned RID */
+	__s32 fd; /* Returned dmabuf fd */
+	__u32 padding;
 };
 
 /* IOCTL struct to read or write data directly to device BARs. */
 #define FBA_ACCESS_READ 0
 #define FBA_ACCESS_WRITE 1
 struct bar_access_ioctl {
-	uint32_t __user *data; /* Read destination, or write source. */
-	uint64_t offset; /* Word-aligned byte offset into bar to access. */
-	uint32_t len; /* Word-multiple number of bytes to read/write. */
-	uint8_t bar; /* Driver bar index. */
-	uint8_t type; /* Read or write. */
+	__u64 data_ptr; /* Read destination, or write source. */
+	__u64 offset; /* Word-aligned byte offset into bar to access. */
+	__u32 len; /* Word-multiple number of bytes to read/write. */
+	__u8 bar; /* Driver bar index. */
+	__u8 type; /* Read or write. */
+	__u16 padding;
 };
 
 struct scratch_access_ioctl {
-	void __user *data; /* Read destination, or write source. */
-	uint64_t rid; /* RID of the scratch area. */
-	uint32_t len; /* Length of the transfer. */
-	uint32_t type; /* Read or write. */
+	__u64 data_ptr; /* Read destination, or write source. */
+	__u64 rid; /* RID of the scratch area. */
+	__u32 len; /* Length of the transfer. */
+	__u32 type; /* Read or write. */
 };
 
 /*
@@ -85,86 +87,89 @@ struct scratch_access_ioctl {
  * eventfd.
  */
 struct post_ioctl {
-	int eventfd; /* The eventfd associated with this post. */
-	const struct fba_submission __user
-		*subs; /* Array of submission entries. */
-	size_t count; /* Number of submission entries in the packet. */
-	uint64_t user_data; /* User data associated with packet. */
+	__s32 eventfd; /* The eventfd associated with this post. */
+	__u32 padding;
+	__u64 subs_ptr; /* Array of struct fba_submission entries */
+	__u64 count; /* Number of submission entries in the packet. */
+	__u64 user_data; /* User data associated with packet. */
 };
 
 /* IOCTL struct to read one or more results keyed by eventfd. */
 struct read_ioctl {
-	int eventfd; /* The eventfd associated with this read. */
-	size_t count; /* Max number of results to drain. */
-	struct result_info __user *results; /* Array of results. */
+	__s32 eventfd; /* The eventfd associated with this read. */
+	__u32 padding;
+	__u64 count; /* Max number of results to drain. */
+	__u64 results_ptr; /* Array of struct result-info */
 };
 
 /* IOCTL struct to read or write data into DMA buffer. */
 struct dma_access_ioctl {
-	void __user *data; /* Read destination, or write source */
-	uint64_t offset; /* Word-aligned byte offset into dma area. */
-	uint32_t len; /* Number of bytes to read/write */
-	uint8_t type; /* Read or write command (FBA_ACCESS_xxx) */
-	uint64_t addr; /* Read-only physical address of DMA buffer. */
+	__u64 data_ptr; /* Read destination, or write source */
+	__u64 offset; /* Word-aligned byte offset into dma area. */
+	__u32 len; /* Number of bytes to read/write */
+	__u8 type; /* Read or write command (FBA_ACCESS_xxx) */
+	__u8 padding[3];
+	__u64 addr; /* Read-only physical address of DMA buffer. */
 };
 
 /* IOCTL struct to update and report driver state. */
 struct set_state_ioctl {
-	uint32_t oldstate; /* Read only old state value. */
-	uint32_t newstate; /* Write only new state value. */
+	__u32 oldstate; /* Read only old state value. */
+	__u32 newstate; /* Write only new state value. */
 };
 
 /* IOCTL struct to read driver details. */
 struct get_details_ioctl {
-	uint64_t size; /* Max bytes to transfer. */
-	uint64_t bar_addrs[6]; /* Physical address of BARs. */
-	uint32_t bar_sizes[6]; /* Sizes of the BARs. */
-	uint16_t host_ipc_bar; /* Bar index. */
-	uint16_t host_ipc_stride; /* Mailbox entry width. */
-	uint32_t host_ipc_offset; /* Offset into BAR for host IPC. */
-	uint64_t dma_addr; /* Physical address of shared DMA buffer. */
-	uint32_t dma_size; /* Size of shared DMA buffer. */
-	uint32_t state; /* Current state of driver. */
-	uint64_t irq_num; /* Number of IRQs aquired. */
-	uint64_t irq_seen; /* Deprecated, set to 0. */
-	uint64_t resource_cnt; /* Number of resources available. */
-	uint64_t context_cnt; /* Number of contexts available. */
-	uint64_t context_used; /* Number of contexts used. */
-	uint64_t mon_item_cnt; /* Number of monitoring items definitions. */
-	uint64_t mon_group_cnt; /* Number of monitoring group definitions. */
-	uint32_t admin_sq_fill_watermark; /* AdminQ SQ fill watermark. */
-	uint32_t admin_cq_fill_watermark; /* AdminQ CQ fill watermark. */
-	uint32_t exe_sq_fill_watermark; /* ExeQ SQ fill watermark. */
-	uint32_t exe_cq_fill_watermark; /* ExeQ CQ fill watermark. */
-	uint32_t streaming_channel_cnt; /* Number of streaming channels */
+	__u64 size; /* Max bytes to transfer. */
+	__u64 bar_addrs[6]; /* Physical address of BARs. */
+	__u32 bar_sizes[6]; /* Sizes of the BARs. */
+	__u16 host_ipc_bar; /* Bar index. */
+	__u16 host_ipc_stride; /* Mailbox entry width. */
+	__u32 host_ipc_offset; /* Offset into BAR for host IPC. */
+	__u64 dma_addr; /* Physical address of shared DMA buffer. */
+	__u32 dma_size; /* Size of shared DMA buffer. */
+	__u32 state; /* Current state of driver. */
+	__u64 irq_num; /* Number of IRQs aquired. */
+	__u64 irq_seen; /* Deprecated, set to 0. */
+	__u64 resource_cnt; /* Number of resources available. */
+	__u64 context_cnt; /* Number of contexts available. */
+	__u64 context_used; /* Number of contexts used. */
+	__u64 mon_item_cnt; /* Number of monitoring items definitions. */
+	__u64 mon_group_cnt; /* Number of monitoring group definitions. */
+	__u32 admin_sq_fill_watermark; /* AdminQ SQ fill watermark. */
+	__u32 admin_cq_fill_watermark; /* AdminQ CQ fill watermark. */
+	__u32 exe_sq_fill_watermark; /* ExeQ SQ fill watermark. */
+	__u32 exe_cq_fill_watermark; /* ExeQ CQ fill watermark. */
+	__u32 streaming_channel_cnt; /* Number of streaming channels */
+	__u32 padding;
 };
 
 /* IOCTL struct to read items or groups definitions into data. */
 struct mon_defs_ioctl {
-	void __user *items; /* Buffer to hold items defs */
-	uint64_t max_items_size; /* items buffer size in bytes. */
-	uint64_t items_bytes_written; /* Number of byte written into items buffer. */
-	void __user *groups; /* Buffer to hold group defs */
-	uint64_t max_groups_size; /* groups buffer size in bytes. */
-	uint64_t groups_bytes_written; /* Number of byte written into groups buffer. */
+	__u64 items_ptr; /* Buffer to hold items defs */
+	__u64 max_items_size; /* items buffer size in bytes. */
+	__u64 items_bytes_written; /* Number of byte written into items buffer. */
+	__u64 groups_ptr; /* Buffer to hold group defs */
+	__u64 max_groups_size; /* groups buffer size in bytes. */
+	__u64 groups_bytes_written; /* Number of byte written into groups buffer. */
 };
 
 #define MON_VALUE_SIZE 124
 
 /* IOCTL struct to read monitoring data for the specified item ids. */
 struct mon_data_ioctl {
-	uint64_t id_count; /* Number of elements in ids, data, and err arrays. */
-	uint32_t __user *ids; /* input: array of ids */
+	__u64 id_count; /* Number of elements in ids, data, and err arrays. */
+	__u64 ids_ptr; /* input: array of __u32 ids */
 	/*
 	 * Data buffer destination. Buffer size is assumed to be
 	 * id_count * MON_VALUE_SIZE
 	 */
-	void __user *data;
+	__u64 data_ptr;
 	/*
 	 * Error buffer destination. Buffer size is assumed to be
 	 * id_count * sizeof(int16_t)
 	 */
-	int16_t __user *errors;
+	__u64 errors_ptr;
 };
 
 /* IOCTL for getting coredump status. */
@@ -173,31 +178,31 @@ struct coredump_status_ioctl {
 	 * Output param which provides the trigger status,
 	 * 0 - coredump not triggered, 1 - coredump triggered.
 	 */
-	uint32_t triggered;
+	__u32 triggered;
 	/* Output param which provides coredump data size. */
-	uint32_t coredump_size;
+	__u32 coredump_size;
 	/*
 	 * If wait >= 0 call will block until coredump generated.
 	 * If wait < 0, call will return status immediately.
 	 */
-	int wait;
+	__s32 wait;
 };
 
 /*IOCTL for getting coredump. */
 struct get_coredump_ioctl {
 	/* Destination buffer to read coredump data. */
-	void __user *data;
+	__u64 data_ptr;
 	/*
 	 * Size of the buffer allocated. This should be at least equal
 	 * to coredump_size reported in coredump_status_ioctl.
 	 */
-	uint64_t size;
+	__u64 size;
 };
 
 /*IOCTL for creating streaming context */
 struct stream_ioctl {
-	int64_t flags; /* Same as flags used in open(2) */
-	uint64_t fd; /* Created streaming file descriptor */
+	__s64 flags; /* Same as flags used in open(2) */
+	__u64 fd; /* Created streaming file descriptor */
 };
 
 /* Enumeration for channel_type in fba_limit_params_ioctl */
@@ -205,21 +210,21 @@ struct stream_ioctl {
 #define FBA_CHANNEL_TYPE_STREAMING 1U
 
 struct fba_limit_params_ioctl {
-	uint32_t channel_type; /* Channel type to query (generic or streaming) */
-	uint32_t max_channels; /* Total number of supported channels */
-	uint32_t max_entries_per_context; /* Max number of entries per context */
-	uint32_t max_entries_per_packet; /* Max allowed entries per packet */
+	__u32 channel_type; /* Channel type to query (generic or streaming) */
+	__u32 max_channels; /* Total number of supported channels */
+	__u32 max_entries_per_context; /* Max number of entries per context */
+	__u32 max_entries_per_packet; /* Max allowed entries per packet */
 };
 
 /* IOCTL for getting coredump region info. */
 struct get_coredump_region_ioctl {
 	/* Destination buffer for coredump region info. */
-	void __user *data;
+	__u64 data_ptr;
 	/*
 	 * Size of the buffer allocated.This should be at least equal
 	 * to coredump_size reported in get_coredump_info_ioctl.
 	 */
-	uint64_t size;
+	__u64 size;
 };
 
 /* IOCTL for getting coredump info. */
@@ -228,26 +233,26 @@ struct get_coredump_info_ioctl {
 	 * Output param which provides the validity status,
 	 * 0 - coredump not valid, 1 - coredump info valid.
 	 */
-	uint32_t validity;
+	__u32 validity;
 	/* Output param which provides the number of core dump regions */
-	uint32_t num_regions;
+	__u32 num_regions;
 	/* Output param which provides coredump info size. */
-	uint32_t coredump_info_size;
+	__u32 coredump_info_size;
 };
 
 /* IOCTL for running a payload executable binary */
 struct payload_exec_ioctl {
-	int use_default_func;
-	int use_default_args;
-	uint32_t func;
-	uint32_t arg1;
-	uint32_t arg2;
-	uint32_t arg3;
-	const char __user *user_hbin_filename;
-	unsigned long exec_timeout;
-	uint64_t results_buf_size;
-	uint64_t __user *user_results_buf;
-	uint64_t __user *user_actual_results_size;
+	__u32 use_default_func;
+	__u32 use_default_args;
+	__u32 func;
+	__u32 arg1;
+	__u32 arg2;
+	__u32 arg3;
+	__u64 user_hbin_filename_ptr;
+	__u64 exec_timeout;
+	__u64 results_buf_size;
+	__u64 user_results_buf_ptr;
+	__u64 user_actual_results_size_ptr;
 };
 
 /* IOCTL for getting coredump data by issuing DMA from M7 */
@@ -261,13 +266,14 @@ struct payload_exec_ioctl {
 
 struct get_coredump_region_data_ioctl {
 	/* Size of the DMA operation */
-	uint64_t size;
+	__u64 size;
 	/* Device address used for DMA */
-	uint64_t device_addr;
+	__u64 device_addr;
 	/* Host address used for DMA */
-	void __user *host_buf;
+	__u64 host_buf_ptr;
 	/* flags for request (mainly signaling done) */
-	uint32_t flags;
+	__u32 flags;
+	__u32 padding;
 };
 
 /*
@@ -312,7 +318,7 @@ struct get_coredump_region_data_ioctl {
  *   -EINVAL - Bad RID provided.
  *   non-zero - Other, lower level errors.
  */
-#define FBA_IOCTL_RESOURCE_FREE _IOWR('f', 3, uint64_t)
+#define FBA_IOCTL_RESOURCE_FREE _IOWR('f', 3, __u64)
 
 /*
  * Read or write 32-bit words at the given driver bar index and offset.

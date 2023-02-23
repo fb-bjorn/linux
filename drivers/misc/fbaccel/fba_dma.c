@@ -131,8 +131,8 @@ error:
 	return -ENOMEM;
 }
 
-struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
-			    int dir, bool force_prp_ok)
+struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
+			    size_t size, int dir, bool force_prp_ok)
 {
 	int ret = -ENOMEM;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
@@ -173,7 +173,7 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void *user_data, size_t size,
 	/* Initialize dma object. */
 	INIT_LIST_HEAD(&dma->item);
 	dma->size = size;
-	dma->user_data = user_data;
+	dma->user_addr = (uintptr_t)user_data;
 	dma->flags = dir;
 
 	/* Compute number of pages */

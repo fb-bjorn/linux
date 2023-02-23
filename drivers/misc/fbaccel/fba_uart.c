@@ -67,7 +67,7 @@
  * fba_uart_dev - driver-specific data extension to struct uart_port
  */
 struct fba_uart_dev {
-	struct fba_device *fba;
+	struct fba_device *fba_dev;
 	struct uart_port port;
 	struct device *dev;
 	int mbox_start;
@@ -86,12 +86,12 @@ static void fba_uart_stop_tx(struct uart_port *port);
 
 static inline void fbau_write_mbox(struct fba_uart_dev *fbau, u32 val, u32 mbox)
 {
-	set_mailbox(fbau->fba, fbau->mbox_start + mbox, val);
+	set_mailbox(fbau->fba_dev, fbau->mbox_start + mbox, val);
 }
 
 static inline u32 fbau_read_mbox(struct fba_uart_dev *fbau, u32 mbox)
 {
-	return get_mailbox(fbau->fba, fbau->mbox_start + mbox);
+	return get_mailbox(fbau->fba_dev, fbau->mbox_start + mbox);
 }
 
 static inline bool fba_uart_tx_full(struct fba_uart_dev *fbau)
@@ -404,13 +404,13 @@ static struct uart_driver fba_uart_uart_driver = {
 	.nr = FBA_UART_MAX_PORTS,
 };
 
-struct fba_uart_dev *fba_uart_register(struct fba_device *fba,
+struct fba_uart_dev *fba_uart_register(struct fba_device *fba_dev,
 				       struct device *parent, int minor,
 				       const char *name, int id, int mbox_start,
 				       int msi_irq_rx, int msi_irq_tx)
 {
 	struct fba_uart_dev *fbau;
-	struct pci_dev *pdev = fba->pdev;
+	struct pci_dev *pdev = fba_dev->pdev;
 	int ret;
 
 	fbau = devm_kzalloc(&pdev->dev, sizeof(*fbau), GFP_KERNEL);
@@ -423,7 +423,7 @@ struct fba_uart_dev *fba_uart_register(struct fba_device *fba,
 
 	fbau->minor = minor;
 	fbau->id = id;
-	fbau->fba = fba;
+	fbau->fba_dev = fba_dev;
 	fbau->msi_irq_rx = msi_irq_rx;
 	fbau->msi_irq_tx = msi_irq_tx;
 
@@ -472,8 +472,8 @@ void fba_uart_unregister(struct fba_uart_dev *fbau)
 	/* disable device interrupts */
 	fbau_write_mbox(fbau, 0, FBA_UART_IEN_OFFS);
 
-	fba_free_irq(fbau->fba->pdev, fbau->msi_irq_rx, fbau);
-	fba_free_irq(fbau->fba->pdev, fbau->msi_irq_tx, fbau);
+	fba_free_irq(fbau->fba_dev->pdev, fbau->msi_irq_rx, fbau);
+	fba_free_irq(fbau->fba_dev->pdev, fbau->msi_irq_tx, fbau);
 
 	put_device(fbau->dev);
 }

@@ -6,4 +6,9 @@ config FBACCEL
 	select GENERIC_ALLOCATOR
 	select SERIAL_CORE
 	help
-	  Driver for Meta's Accelerator silicon
+	  This option enables a driver for Meta's accelerator silicon devices.
+
+	  This driver supports a set of silicon devices that (mostly) share a
+	  common firmware interface.  This currently includes video transcoding
+	  and machine learning accelerators, but may be leveraged for additional
+	  accelerators in the future.
