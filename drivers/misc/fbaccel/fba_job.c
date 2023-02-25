@@ -65,7 +65,8 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 	/* Setup tail, and assign context ID. */
 	for (i = 0; i < job->req.sub_cnt; i++) {
 		job->sub_array[i].header.context_id = ctx_id;
-		job->sub_array[i].header.packet_tail = job->req.sub_cnt - i - 1;
+		job->sub_array[i].header.packet_tail =
+			cpu_to_le16(job->req.sub_cnt - i - 1);
 	}
 
 	fba_dev_dbg(fba_dev, "Created job size %d.", job->req.sub_cnt);
@@ -155,7 +156,7 @@ void fba_job_complete(struct fba_job *job)
 {
 	struct fba_ctx *ctx = job->ctx;
 	struct fba_device *fba_dev = job->fba_dev;
-	uint16_t cmd_id = job->req.cmp.command_id;
+	uint16_t cmd_id = job->req.cmd_id;
 	uint32_t sub_cnt = job->req.sub_cnt;
 	size_t alloc_cnt = job->alloc_cnt;
 	void *user_job_key = job->user_job_key;

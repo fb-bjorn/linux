@@ -22,7 +22,19 @@
  */
 
 struct fba_job;
-struct fba_job_result;
+
+/*
+ * FBA Result Object
+ *
+ * A result object represents the result for a packet returned
+ * from the driver to the application, including the original ID.
+ */
+struct fba_job_result {
+	uint64_t user_id;
+	uint16_t status;
+	uint8_t flags;
+};
+static_assert(sizeof(struct fba_job_result) == 16);
 
 /* Allocate and initialize a dynamic context object. */
 struct fba_ctx *fba_ctx_alloc(struct fba_device *fba_dev,

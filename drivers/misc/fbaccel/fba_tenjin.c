@@ -392,12 +392,12 @@ static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 	switch (*status) {
 	case FBA_COREDUMP_STATUS_NONE:
 		/* Check if CPU has initialized the coredump region */
-		if (hdr.cookie == COREDUMP_COOKIE)
+		if (le32_to_cpu(hdr.cookie) == COREDUMP_COOKIE)
 			*status = FBA_COREDUMP_STATUS_POLLING;
 		break;
 	case FBA_COREDUMP_STATUS_POLLING:
 		/* Check if coredump is triggered by CPU */
-		if (hdr.started == 1) {
+		if (le32_to_cpu(hdr.started) == 1) {
 			*status = FBA_COREDUMP_STATUS_STARTED;
 
 			/* Also signal that device has failed */
@@ -406,7 +406,7 @@ static void coredump_check_cpu(struct fba_device *fba_dev, int region_id,
 		break;
 	case FBA_COREDUMP_STATUS_STARTED:
 		/* Check if coredump is completed. If not then signal timeout */
-		if (hdr.completed == 1)
+		if (le32_to_cpu(hdr.completed) == 1)
 			*status = FBA_COREDUMP_STATUS_COMPLETED;
 		else
 			*status = FBA_COREDUMP_STATUS_TIMEDOUT;
@@ -484,14 +484,14 @@ static int coredump_get_size(struct fba_device *fba_dev, int region_id,
 	if (ret != 0) {
 		/* Region is not initialized */
 		return 0;
-	} else if (cpu_hdr.cookie != COREDUMP_COOKIE) {
+	} else if (le32_to_cpu(cpu_hdr.cookie) != COREDUMP_COOKIE) {
 		fba_dev_dbg(
 			fba_dev,
 			"Coredump region %d for cpu %d not initalized by device",
 			region_id, cpu_id);
 		return 0;
 	}
-	return cpu_hdr.size;
+	return le32_to_cpu(cpu_hdr.size);
 }
 
 static void fbv_coredump_start(struct fba_device *fba_dev)

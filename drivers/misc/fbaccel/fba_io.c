@@ -176,8 +176,8 @@ static long fba_ioctl_read_results(struct fba_ctx *ctx, int eventfd,
 
 		memset(&ri, 0, sizeof(ri));
 		ri.user_data = result.user_id;
-		ri.status = result.cmp.status;
-		ri.flags_index = result.cmp.flags;
+		ri.status = result.status;
+		ri.flags_index = result.flags;
 
 		ret = copy_to_user(&results[cnt], &ri, sizeof(ri));
 		if (ret) {
@@ -350,7 +350,7 @@ static long __fba_ioctl_access_scratch(struct fba_ctx *ctx,
 {
 	void __user *user = u64_to_user_ptr(scratch_req->data_ptr);
 	struct fba_alloc *alloc;
-	uint64_t scratch;
+	__le64 scratch;
 	void *scratch_va;
 	long ret;
 

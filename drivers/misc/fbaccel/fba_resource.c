@@ -165,33 +165,32 @@ int fba_resource_info(struct fba_device *fba_dev, struct resource_info *info,
 }
 
 static struct fba_resource *build_resource(struct fba_device *fba_dev,
-					   struct resource_def *def, void *va)
+					   uint16_t type, uint16_t subtype,
+					   uint64_t start, uint64_t count,
+					   uint64_t gran, void *va)
 {
-	int order = granularity_to_order(fba_dev, def->gran);
+	int order = granularity_to_order(fba_dev, gran);
 	struct fba_resource *res;
 	int ret;
 
 	res = kzalloc(sizeof(*res), GFP_KERNEL);
-	if (res == NULL)
+	if (!res)
 		return NULL;
-
-	spin_lock_init(&res->pool_lock);
-	kref_init(&res->ref);
 
 	res->pool = gen_pool_create(order, -1);
 	if (res->pool == NULL) {
-		fba_dev_err(fba_dev, "Create pool w/gran %#llx failed.",
-			    def->gran);
+		fba_dev_err(fba_dev, "Create pool w/gran %#llx failed.", gran);
 		ret = -ENOMEM;
 		goto err_free_res;
 	}
 
-	res->type = def->type;
-	res->subtype = def->subtype;
-	res->start = def->start;
+	spin_lock_init(&res->pool_lock);
+	kref_init(&res->ref);
+	res->type = type, res->subtype = subtype;
+	res->start = start;
 	res->va = va;
 
-	ret = fba_resource_pool_add(res, def->start, def->count);
+	ret = fba_resource_pool_add(res, start, count);
 	if (ret != 0) {
 		fba_dev_err(fba_dev, "Add to pool failed.");
 		ret = -EINVAL;
@@ -207,139 +206,147 @@ err_free_res:
 	return ERR_PTR(ret);
 }
 
-int fba_resource_init(struct fba_device *fba_dev)
+/* Fetch some firmware parameters exported as "info words" */
+static int fba_fetch_info_words(struct fba_device *fba_dev)
 {
-	struct fba_resource **resources = NULL;
-	struct fba_resource *res;
-	uint64_t *words = NULL;
-	void *temp_data = fba_dev->scratch_area.data;
-	dma_addr_t temp_addr = fba_dev->scratch_area.addr;
-	struct resource_def scratch_def;
-	size_t cnt = 0;
-	int idx, r_total;
-	int ret = -ENOMEM;
+	__le64 *words;
+	int ret;
 
-	/* Capture current value of INFO_WORDS */
-	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_INFO_WORDS,
-				     INFO_WORD_FIRST, INFO_WORD_APP_START);
+	ret = fba_admin_get_cfg_data(fba_dev, fba_dev->scratch_area.addr,
+				     ADMIN_GET_INFO_WORDS, INFO_WORD_FIRST,
+				     INFO_WORD_APP_START);
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to get info words first.");
-		goto err_put_resources;
+		return ret;
 	}
-	words = (uint64_t *)temp_data;
-	fba_dev->n_ctxs = words[INFO_CONTEXT_MAX_COUNT];
-	fba_dev->info_cnt = words[INFO_WORD_MAX_COUNT];
-	fba_dev->mon.src_info[SAIL_MTS_CCP].item_cnt =
-		words[INFO_MON_ITEM_COUNT];
-	fba_dev->mon.src_info[SAIL_MTS_CCP].group_cnt =
-		words[INFO_MON_GROUP_COUNT];
-	fba_dev->max_dma_segment_size = words[INFO_DMA_MAX_SEGMENT_SIZE];
-	fba_dev->platform_type = words[INFO_PLATFORM_TYPE];
 
-	if (fba_dev->info_cnt < INFO_WORD_APP_START) {
+	words = (__le64 *)fba_dev->scratch_area.data;
+
+	if (le64_to_cpu(words[INFO_WORD_MAX_COUNT]) < INFO_WORD_APP_START) {
 		fba_dev_err(
 			fba_dev,
 			"%s: info_cnt %llu is invalid, min expected value is %d.",
-			__func__, fba_dev->info_cnt, INFO_WORD_APP_START);
-		return -EFAULT;
+			__func__, le64_to_cpu(words[INFO_WORD_MAX_COUNT]),
+			INFO_WORD_APP_START);
+		return -EIO;
 	}
 
-	words = kzalloc(sizeof(uint64_t) * fba_dev->info_cnt, GFP_KERNEL);
-	if (words == NULL) {
-		ret = -ENOMEM;
-		fba_dev_err(fba_dev, "Failed to allocate info_data.");
-		goto err_put_resources;
-	}
+	fba_dev->n_ctxs = le64_to_cpu(words[INFO_CONTEXT_MAX_COUNT]);
+	fba_dev->mon.src_info[SAIL_MTS_CCP].item_cnt =
+		le64_to_cpu(words[INFO_MON_ITEM_COUNT]);
+	fba_dev->mon.src_info[SAIL_MTS_CCP].group_cnt =
+		le64_to_cpu(words[INFO_MON_GROUP_COUNT]);
+	fba_dev->max_dma_segment_size =
+		le64_to_cpu(words[INFO_DMA_MAX_SEGMENT_SIZE]);
+	fba_dev->platform_type = le64_to_cpu(words[INFO_PLATFORM_TYPE]);
+	fba_dev->fw_resource_cnt = le64_to_cpu(words[INFO_RESOURCE_MAX_COUNT]);
 
-	while (cnt < fba_dev->info_cnt) {
-		size_t len = (PAGE_SIZE / sizeof(uint64_t));
+	return 0;
+}
 
-		len = ((len + cnt) > fba_dev->info_cnt) ?
-				    fba_dev->info_cnt - cnt :
-				    len;
-		ret = fba_admin_get_cfg_data(fba_dev, temp_addr,
-					     ADMIN_GET_INFO_WORDS, cnt, len);
-		if (ret != 0) {
-			fba_dev_err(fba_dev,
-				    "Failed to get info words %d:%d = %d.",
-				    (int)cnt, (int)len, (int)ret);
-			goto err_put_resources;
-		}
+static void fba_resource_add(struct fba_device *fba_dev,
+			     struct fba_resource *res)
+{
+	res->index = fba_dev->resource_cnt++;
+	fba_dev->resources[res->index] = res;
+}
 
-		memcpy(&words[cnt], temp_data, sizeof(uint64_t) * len);
-		cnt += len;
-	}
+/* Add resource for host memory scratch area. */
+static int fba_resource_add_scratch(struct fba_device *fba_dev)
+{
+	struct fba_resource *res;
+	uint64_t start = fba_dev->scratch_area.addr;
+	uint64_t count = fba_dev->scratch_area.size;
+	uint64_t gran = 64; /* Cache-line sized. */
 
-	/* Capture resource data. */
-	ret = fba_admin_get_cfg_data(fba_dev, temp_addr, ADMIN_GET_RESOURCES, 0,
-				     words[INFO_RESOURCE_MAX_COUNT]);
+	res = build_resource(fba_dev, RT_MEMORY, MT_SCRATCH, start, count, gran,
+			     fba_dev->scratch_area.data);
+	if (IS_ERR(res))
+		return PTR_ERR(res);
+
+	fba_resource_add(fba_dev, res);
+	return 0;
+}
+
+static int fba_resource_add_fw(struct fba_device *fba_dev)
+{
+	struct resource_def *defs;
+	int i, ret;
+
+	/* Query device for resource info */
+	ret = fba_admin_get_cfg_data(fba_dev, fba_dev->scratch_area.addr,
+				     ADMIN_GET_RESOURCES, 0,
+				     fba_dev->fw_resource_cnt);
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to get resource data.");
+		return ret;
+	}
+	defs = (struct resource_def *)fba_dev->scratch_area.data;
+
+	/* Add firmware resources */
+	for (i = 0; i < fba_dev->fw_resource_cnt; i++) {
+		struct resource_def *def = &defs[i];
+		struct fba_resource *res;
+
+		res = build_resource(fba_dev, le16_to_cpu(def->type),
+				     le16_to_cpu(def->subtype),
+				     le64_to_cpu(def->start),
+				     le64_to_cpu(def->count),
+				     le64_to_cpu(def->gran), NULL);
+		if (IS_ERR(res))
+			return PTR_ERR(res);
+
+		fba_resource_add(fba_dev, res);
+	}
+	return 0;
+}
+
+static int fba_init_resources(struct fba_device *fba_dev)
+{
+	int ret;
+
+	/* Allocate array of resource pointers, plus 1 extra for scratch area */
+	fba_dev->resources = kcalloc(fba_dev->fw_resource_cnt + 1,
+				     sizeof(*fba_dev->resources), GFP_KERNEL);
+	if (fba_dev->resources == NULL)
+		return -ENOMEM;
+
+	/* Add host memory scratch space as initial resource */
+	ret = fba_resource_add_scratch(fba_dev);
+	if (ret)
 		goto err_put_resources;
-	}
 
-	/* Create array of resources, including 1 extra for scratch area. */
-	r_total = words[INFO_RESOURCE_MAX_COUNT] + 1;
-	resources = kcalloc(r_total, sizeof(*resources), GFP_KERNEL);
-	if (resources == NULL) {
-		ret = -ENOMEM;
+	/* Query and add resources exposed by firmware. */
+	ret = fba_resource_add_fw(fba_dev);
+	if (ret)
 		goto err_put_resources;
-	}
-
-	/* Add Scratch area. */
-	scratch_def = (struct resource_def){
-		.type = RT_MEMORY,
-		.subtype = MT_SCRATCH,
-		.start = (uint64_t)fba_dev->scratch_area.addr,
-		.count = fba_dev->scratch_area.size,
-		.gran = 64, /* Cache-line sized. */
-	};
-	res = build_resource(fba_dev, &scratch_def, fba_dev->scratch_area.data);
-	if (IS_ERR(res)) {
-		ret = PTR_ERR(res);
-		goto err_put_resources;
-	}
-	res->index = 0;
-	resources[res->index] = res;
-
-	/* Add FW areas. */
-	for (idx = 0; idx < r_total - 1; idx++) {
-		struct resource_def *defs = (struct resource_def *)temp_data;
-
-		res = build_resource(fba_dev, &defs[idx], NULL);
-		if (IS_ERR(res)) {
-			ret = PTR_ERR(res);
-			goto err_put_resources;
-		}
-		res->index = idx + 1;
-		resources[res->index] = res;
-	}
-
-	spin_lock(&fba_dev->resources_lock);
-	fba_dev->resources = resources;
-	fba_dev->info_data = words;
-	fba_dev->resource_cnt = r_total;
-	spin_unlock(&fba_dev->resources_lock);
 
 	return 0;
 
 err_put_resources:
-	if (resources) {
-		for (cnt = 0; cnt < r_total; cnt++) {
-			if (resources[cnt] != NULL)
-				fba_resource_put(resources[cnt]);
-		}
-		kfree(resources);
-	}
-	kfree(words);
+	while (fba_dev->resource_cnt > 0)
+		fba_resource_put(fba_dev->resources[--fba_dev->resource_cnt]);
+
+	kfree(fba_dev->resources);
+	fba_dev->resources = NULL;
 
 	return ret;
+}
+
+int fba_resource_init(struct fba_device *fba_dev)
+{
+	int ret;
+
+	ret = fba_fetch_info_words(fba_dev);
+	if (ret < 0)
+		return ret;
+
+	return fba_init_resources(fba_dev);
 }
 
 void fba_resource_exit(struct fba_device *fba_dev)
 {
 	struct fba_resource **rscs;
-	uint64_t *info_data;
 	int i, n_rscs;
 
 	spin_lock(&fba_dev->resources_lock);
@@ -349,13 +356,10 @@ void fba_resource_exit(struct fba_device *fba_dev)
 	n_rscs = fba_dev->resource_cnt;
 	fba_dev->resource_cnt = 0;
 
-	info_data = fba_dev->info_data;
-	fba_dev->info_data = NULL;
 	spin_unlock(&fba_dev->resources_lock);
 
 	for (i = 0; i < n_rscs; i++)
 		fba_resource_put(rscs[i]);
 
 	kfree(rscs);
-	kfree(info_data);
 }

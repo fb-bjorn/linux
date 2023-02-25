@@ -73,7 +73,7 @@ static void queue_write_entries(struct fba_queue *queue,
 	entry_size = sizeof(struct fba_submission);
 
 	for (i = 0; i < count; i++) {
-		entries[i].header.command_id = cmd_id;
+		entries[i].header.command_id = cpu_to_le16(cmd_id);
 		fba_shared_memcpy_to(queue->area,
 				     queue->offset + queue->tail * entry_size,
 				     &entries[i], entry_size);
@@ -193,9 +193,9 @@ static bool fba_channel_fill_head(struct fba_channel *chan)
 		int i;
 
 		for (i = 0; i < req->sub_cnt; i++)
-			trace_fba_channel_post_sub(fba_dev->name, chan->chan_id,
-						   req->cmd_id,
-						   req->subs[i].header.opcode);
+			trace_fba_channel_post_sub(
+				fba_dev->name, chan->chan_id, req->cmd_id,
+				le16_to_cpu(req->subs[i].header.opcode));
 	}
 
 	fba_dev_dbg(
@@ -231,7 +231,7 @@ void fba_channel_init_req(struct fba_channel_req *req, size_t n_subs,
 	 * Initialize the result to failed. This will be updated by
 	 * the FW to the appropriate value when packet is completed.
 	 */
-	req->cmp.status = CS_FAILED;
+	req->status = CS_FAILED;
 }
 
 int fba_channel_post_req(struct fba_channel *chan, struct fba_channel_req *req)
@@ -336,11 +336,8 @@ static void fba_channel_purge_pending(struct fba_channel *chan)
 		idr_remove(&chan->cmd_ids, req->cmd_id);
 		mutex_unlock(&chan->pending_mutex);
 
-		req->cmp = (struct fba_completion){
-			.command_id = req->cmd_id,
-			.status = CS_ABORT,
-			.flags = PACKET_FAIL,
-		};
+		req->status = CS_ABORT;
+		req->flags = PACKET_FAIL;
 		req->cb(false, req);
 	}
 
@@ -359,11 +356,8 @@ static void fba_channel_purge_pending(struct fba_channel *chan)
 		list_del(&req->req_item);
 		mutex_unlock(&chan->pending_mutex);
 
-		req->cmp = (struct fba_completion){
-			.command_id = req->cmd_id,
-			.status = CS_ABORT,
-			.flags = PACKET_FAIL,
-		};
+		req->status = CS_ABORT;
+		req->flags = PACKET_FAIL;
 		req->cb(false, req);
 	}
 }
@@ -387,25 +381,31 @@ static bool fba_channel_complete(struct fba_channel *chan,
 				 struct fba_completion *cmp)
 {
 	struct fba_channel_req *req;
+	uint16_t command_id;
+	uint16_t status;
+
+	command_id = le16_to_cpu(cmp->command_id);
+	status = le16_to_cpu(cmp->status);
 
 	mutex_lock(&chan->pending_mutex);
-	req = idr_find(&chan->cmd_ids, cmp->command_id);
+	req = idr_find(&chan->cmd_ids, command_id);
 	if (req != NULL)
-		idr_remove(&chan->cmd_ids, cmp->command_id);
+		idr_remove(&chan->cmd_ids, command_id);
 	mutex_unlock(&chan->pending_mutex);
 
 	if (req == NULL) {
-		if (cmp->status != CS_CANCEL /* XXX - and !chan->stopped */)
+		if (status != CS_CANCEL /* XXX - and !chan->stopped */)
 			fba_dev_err(chan->fba_dev,
 				    "Packet not found for completion ID=%04Xh.",
-				    cmp->command_id);
+				    command_id);
 		return false;
 	}
 
 	spin_lock(&chan->lock);
 	fba_util_dec_usage(chan->fba_dev, &chan->usage, req->sub_cnt);
 	spin_unlock(&chan->lock);
-	req->cmp = *cmp;
+	req->status = status;
+	req->flags = cmp->flags;
 	req->cb(true, req);
 
 	/* Possibly we can now submit more pending reqs */
@@ -447,7 +447,7 @@ static int get_completion(struct fba_channel *chan, struct fba_completion *cmp)
 	 * reported head is 16b not 32b, we need to handle roll over.
 	 */
 	sq_space_before = queue_get_space(&chan->squeue);
-	chan->squeue.head = (uint16_t)tmp->sq_head;
+	chan->squeue.head = le16_to_cpu(tmp->sq_head);
 	sq_space_after = queue_get_space(&chan->squeue);
 
 	/*
@@ -501,7 +501,7 @@ static int fba_channel_handle_completions(struct fba_channel *chan)
 			break;
 
 		trace_fba_channel_done(fba_dev->name, chan->chan_id,
-				       cmp.command_id, ret);
+				       le16_to_cpu(cmp.command_id), ret);
 
 		cqueue_head = ret;
 		ncmp++;

@@ -302,12 +302,6 @@ struct coredump_region {
 	__le64 region_size;
 };
 
-struct fbia_coredump_info {
-	__le32 magic;
-	__le32 num_regions;
-	struct coredump_region regions[];
-};
-
 /* From fbia/freya/freya_cxram.h: */
 
 /* Freya boot parameter offset index in CXRAM */

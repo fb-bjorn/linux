@@ -184,8 +184,6 @@ struct fba_dma_prp_node {
  */
 struct fba_dma {
 	struct list_head item; /* This DMA node in the Job. */
-	uintptr_t user_addr; /* Pointer to user space data. */
-	size_t size; /* Size of payload. */
 	int flags; /* DMA Direction. */
 	int get_cnt; /* Number of pages we have locked. */
 	int map_cnt; /* Number of pages we have DMA mapped. */
@@ -295,14 +293,11 @@ struct fba_device {
 	uint32_t channel_total;
 	struct ida channel_ids;
 
-	/* Application Specific INFO and Resources */
-	uint64_t *info_data; /* Pointer to device INFO WORDS. */
-	uint64_t info_cnt; /* Number of INFO words. */
-	uint64_t resource_cnt; /* Number of FW resources. */
-	uint64_t max_dma_segment_size; /* Max DMA segment size */
-	uint64_t platform_type; /* Device platform type */
+	/* Resources exported by driver and firmware */
+	uint64_t fw_resource_cnt; /* Number of firmware resources. */
+	uint64_t resource_cnt; /* Number of firmware and driver resources. */
+	spinlock_t resources_lock; /* Protects access to resources */
 	struct fba_resource **resources; /* Pointer to resouces. */
-	spinlock_t resources_lock; /* Lock protecting access to resources */
 
 	/*
 	 * Context ID == 0 is reserved for the admin context.
@@ -310,6 +305,8 @@ struct fba_device {
 	 */
 	struct ida ctx_ids;
 	unsigned int n_ctxs;
+	uint64_t max_dma_segment_size; /* Max DMA segment size */
+	uint64_t platform_type; /* Device platform type */
 
 	struct mutex ctx_mtx; /* Mutex to protect ctx_list */
 	struct list_head ctx_list; /* Contexts on this device. */
@@ -413,7 +410,7 @@ void fba_alloc_translate_teardown(struct fba_job *job);
 int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			    struct fba_submission *sub);
 struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
-				    uint64_t size, uint64_t *val);
+				    uint64_t size, __le64 *val);
 struct fba_alloc *fba_alloc_get(struct fba_alloc *alloc);
 void fba_alloc_put(struct fba_alloc *alloc);
 struct fba_alloc *fba_alloc_new(struct fba_resource *res, uint64_t addr,
@@ -421,7 +418,7 @@ struct fba_alloc *fba_alloc_new(struct fba_resource *res, uint64_t addr,
 uint64_t fba_alloc_get_addr(struct fba_alloc *alloc);
 
 /* Map the provided addr (in resource space) to its virtual address offset. */
-void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr);
+void *fba_alloc_map_to_va(struct fba_alloc *alloc, __le64 addr);
 
 /* DMA Operations */
 struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,

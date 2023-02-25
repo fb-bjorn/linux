@@ -238,13 +238,13 @@ enum argument_type {
 /* All submission queue entries start with the same 16-byte header. */
 struct submission_header {
 	/* Fields provided by USER */
-	uint16_t opcode; /* Identifies command and args format. */
-	uint16_t reserved_usr; /* 16b reserved value. */
-	uint32_t flags; /* 31:24 CMD Flags, 23:0 ARG Flags. */
+	__le16 opcode; /* Identifies command and args format. */
+	__le16 reserved_usr; /* 16b reserved value. */
+	__le32 flags; /* 31:24 CMD Flags, 23:0 ARG Flags. */
 
 	/* Fields filled in by DRIVER */
-	uint16_t command_id; /* Opaque ID mirrored on completion. */
-	uint16_t packet_tail;
+	__le16 command_id; /* Opaque ID mirrored on completion. */
+	__le16 packet_tail;
 	uint8_t context_id;
 	uint8_t reserved_drv[3];
 };
@@ -314,13 +314,13 @@ enum info_word {
  */
 struct admin_info_words {
 	/* First 64-bit info word to read. See enum info_word. */
-	uint32_t first_word;
+	__le32 first_word;
 
 	/* Number of consecutive 64-bit info words to copy into host memory. */
-	uint32_t num_words;
+	__le32 num_words;
 
 	/* Destination address in host memory where info words are written. */
-	uint64_t host_addr;
+	__le64 host_addr;
 };
 
 enum resource_type {
@@ -351,37 +351,37 @@ enum mem_type {
 
 struct resource_def {
 	/* Type of resources such as memory, computer etc. */
-	uint16_t type;
+	__le16 type;
 	/* Subtype of resources as SRAM, DRAM in memory etc. */
-	uint16_t subtype;
+	__le16 subtype;
 	/* Mainly to ensure 8 byte alignment, can be used for misc. purposes. */
-	uint16_t alloc;
+	__le16 alloc;
 	/* Mainly to ensure 8 byte alignment, can be used for misc. purposes. */
-	uint16_t misc;
+	__le16 misc;
 	/* Start address of the resource. */
-	uint64_t start;
+	__le64 start;
 	/* Size of the resource available for use. */
-	uint64_t count;
+	__le64 count;
 	/* Granularity of resources e.g. for memory this could imply alignment. */
-	uint64_t gran;
+	__le64 gran;
 };
 /* Ensure struct is 8-byte aligned. */
 static_assert((sizeof(struct resource_def) % sizeof(uint64_t)) == 0);
 
 /* analogous to struct timespec in time.h without with 32-bit / 64-bit ambiguity removed */
 struct time_spec_64 {
-	int64_t tv_sec;
-	int64_t tv_nsec;
+	__le64 tv_sec;
+	__le64 tv_nsec;
 };
 
 struct va_dma_op {
-	uint64_t host_addr;
+	__le64 host_addr;
 	/*
 	 * flags_size is used differently for prp vs. contiguous dma transfers:
 	 * - requests for prp dma transfers set both size and flags.
 	 * - requests for contiguous dma transfers set only the size.
 	 */
-	uint64_t flags_size;
+	__le64 flags_size;
 };
 
 struct fba_submission {
@@ -443,17 +443,17 @@ enum completion_status {
 
 struct fba_completion {
 	/* Identifier for the completed command. Copied from the command's header. */
-	uint16_t command_id;
+	__le16 command_id;
 
 	/*
 	 * New head pointer for the squeue containing the command. This is used
 	 * to indicate to the host how many submission queue entries have been
 	 * consumed by the device so far.
 	 */
-	uint16_t sq_head;
+	__le16 sq_head;
 
 	/* Command completion status. See enum completion_status in constants.h. */
-	uint16_t status;
+	__le16 status;
 
 	/*
 	 * Flags used to interpret status.  If the high bit is set the command
@@ -476,18 +476,6 @@ struct fba_completion {
 
 static_assert(sizeof(struct fba_completion) == 8);
 static_assert(sizeof(struct fba_completion) % COMPLETION_ENTRY_ALIGNMENT == 0);
-
-/*
- * FBA Result Object
- *
- * A result object represents the result for a packet returned
- * from the driver to the application, including the original ID.
- */
-struct fba_job_result {
-	struct fba_completion cmp;
-	uint64_t user_id;
-};
-static_assert(sizeof(struct fba_job_result) == 16);
 
 /* Coredump (Tenjin style) */
 
@@ -562,18 +550,18 @@ struct coredump_hdr {
 	 * This is to indicate device has initialized the coredump region with header
 	 * and driver can poll the region to detect the coredump.
 	 */
-	uint32_t cookie;
+	__le32 cookie;
 	/* Version number. */
-	uint32_t version;
+	__le32 version;
 	/* Allocated size. */
-	uint32_t size;
+	__le32 size;
 	/* Device sets this before start of coredump, Only valid for region 0. */
-	uint32_t started;
+	__le32 started;
 	/* Device sets this to 1 after completion of core dump, Only valid for region 0. */
-	uint32_t completed;
-	uint32_t cpu_id;
+	__le32 completed;
+	__le32 cpu_id;
 	/* Refer to enum coredump_reason_t, Only valid for region 0 */
-	int32_t coredump_reason;
+	__le32 coredump_reason;
 	/* Align it to 32 bytes and reserve some mem for future */
-	uint32_t reserved[9];
+	__le32 reserved[9];
 };

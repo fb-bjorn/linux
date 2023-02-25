@@ -137,6 +137,7 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 	int ret = -ENOMEM;
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	struct device *dev = &fba_dev->pdev->dev;
+	uintptr_t user_addr = (uintptr_t)user_data;
 	size_t overflow;
 	int npages;
 	unsigned int gup_flags;
@@ -172,12 +173,10 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 
 	/* Initialize dma object. */
 	INIT_LIST_HEAD(&dma->item);
-	dma->size = size;
-	dma->user_addr = (uintptr_t)user_data;
 	dma->flags = dir;
 
 	/* Compute number of pages */
-	overflow = dma->size + (dma->user_addr & ~PAGE_MASK);
+	overflow = size + (user_addr & ~PAGE_MASK);
 	npages = DIV_ROUND_UP(overflow, PAGE_SIZE);
 
 	fba_dev_dbg(fba_dev, "Map DMA transaction of %d pages.", npages);
@@ -190,7 +189,7 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 	gup_flags = (dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL) ?
 				  FOLL_WRITE :
 				  0;
-	dma->get_cnt = pin_user_pages_fast(dma->user_addr & PAGE_MASK, npages,
+	dma->get_cnt = pin_user_pages_fast(user_addr & PAGE_MASK, npages,
 					   gup_flags, dma->pages);
 	if (dma->get_cnt != npages) {
 		if (dma->get_cnt < 0)
@@ -202,8 +201,8 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 	max_dma_segment_size = min(fba_dev->max_dma_segment_size,
 				   (uint64_t)FBA_MAX_SEGMENT_SIZE);
 	ret = sg_alloc_table_from_pages_segment(
-		&dma->sg, dma->pages, dma->get_cnt, dma->user_addr & ~PAGE_MASK,
-		dma->size, max_dma_segment_size, GFP_KERNEL);
+		&dma->sg, dma->pages, dma->get_cnt, user_addr & ~PAGE_MASK,
+		size, max_dma_segment_size, GFP_KERNEL);
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to allocate sg_table.");
 		goto err_dma_free;

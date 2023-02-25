@@ -29,7 +29,7 @@ static int fba_admin_packet_chan_sync(struct fba_device *fba_dev,
 				      uint32_t sub_cnt, uint16_t *status)
 {
 	struct fba_admin_cb_data cb_data = { 0 };
-	uint16_t opcode = sub->header.opcode;
+	uint16_t opcode = le16_to_cpu(sub->header.opcode);
 
 	long duration;
 	int ret;
@@ -50,7 +50,7 @@ static int fba_admin_packet_chan_sync(struct fba_device *fba_dev,
 			    opcode);
 		return -ETIMEDOUT;
 	}
-	if (cb_data.req.cmp.status == CS_CANCEL)
+	if (cb_data.req.status == CS_CANCEL)
 		return -ETIMEDOUT;
 
 	if (!cb_data.completed) {
@@ -58,7 +58,7 @@ static int fba_admin_packet_chan_sync(struct fba_device *fba_dev,
 		return ret;
 	}
 
-	*status = cb_data.req.cmp.status;
+	*status = cb_data.req.status;
 	fba_dev_dbg(fba_dev, "Admin packet completed. opcode %d status %d.",
 		    opcode, *status);
 	return 0;
@@ -80,7 +80,7 @@ int fba_admin_create_context(struct fba_device *fba_dev, int id)
 	int ret;
 
 	memset(&sub, 0, sizeof(sub));
-	sub.header.opcode = ADMIN_CREATE_CONTEXT;
+	sub.header.opcode = cpu_to_le16(ADMIN_CREATE_CONTEXT);
 	sub.ctx.id = id;
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
@@ -106,7 +106,7 @@ int fba_admin_delete_context_begin(struct fba_device *fba_dev, int id)
 	int ret;
 
 	memset(&sub, 0, sizeof(sub));
-	sub.header.opcode = ADMIN_DELETE_CONTEXT_BEGIN;
+	sub.header.opcode = cpu_to_le16(ADMIN_DELETE_CONTEXT_BEGIN);
 	sub.ctx.id = id;
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
@@ -133,7 +133,7 @@ int fba_admin_delete_context_end(struct fba_device *fba_dev, int id)
 	int ret;
 
 	memset(&sub, 0, sizeof(sub));
-	sub.header.opcode = ADMIN_DELETE_CONTEXT_END;
+	sub.header.opcode = cpu_to_le16(ADMIN_DELETE_CONTEXT_END);
 	sub.ctx.id = id;
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
@@ -163,13 +163,13 @@ int fba_admin_get_cfg_data(struct fba_device *fba_dev, dma_addr_t addr,
 	memset(&sub, 0, sizeof(sub));
 
 	sub.header.command_id = 0;
-	sub.header.opcode = opcode;
+	sub.header.opcode = cpu_to_le16(opcode);
 	sub.header.flags = 0;
 	sub.header.packet_tail = 0;
 	sub.header.context_id = 0;
-	sub.info_words.host_addr = addr;
-	sub.info_words.first_word = start;
-	sub.info_words.num_words = end;
+	sub.info_words.host_addr = cpu_to_le64(addr);
+	sub.info_words.first_word = cpu_to_le32(start);
+	sub.info_words.num_words = cpu_to_le32(end);
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 	if (ret != 0) {
@@ -199,9 +199,9 @@ int fba_admin_dma_from_device(struct fba_device *fba_dev, uint16_t opcode,
 	if (va_dma == NULL)
 		return -ENOMEM;
 
-	sub.header.opcode = opcode;
-	sub.va_dma.host_addr = pa_dma;
-	sub.va_dma.flags_size = size;
+	sub.header.opcode = cpu_to_le16(opcode);
+	sub.va_dma.host_addr = cpu_to_le64(pa_dma);
+	sub.va_dma.flags_size = cpu_to_le64(size);
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 
@@ -223,9 +223,9 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 			    void *dst, uint32_t size)
 {
 	struct fba_submission sub = {
-		.header = { .opcode = opcode },
-		.va_dma = { .flags_size = size | AT_DMA_OPSZ |
-					  AT_DMA_TO_DEVICE, },
+		.header = { .opcode = cpu_to_le16(opcode) },
+		.va_dma = { .flags_size = cpu_to_le64(size | AT_DMA_OPSZ |
+					  AT_DMA_TO_DEVICE), },
 	};
 	struct device *dev = &fba_dev->pdev->dev;
 	uint16_t status;
@@ -236,7 +236,7 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 	va_dma = dma_alloc_coherent(dev, size, &host_addr, GFP_KERNEL);
 	if (va_dma == NULL)
 		return -ENOMEM;
-	sub.va_dma.host_addr = host_addr;
+	sub.va_dma.host_addr = cpu_to_le64(host_addr);
 
 	memcpy(va_dma, dst, size);
 
@@ -257,14 +257,15 @@ int fba_admin_dma_to_device(struct fba_device *fba_dev, uint16_t opcode,
 int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 {
 	struct fba_submission sub = {
-		.header = { .opcode = ADMIN_TIME_SET },
+		.header = { .opcode = cpu_to_le16(ADMIN_TIME_SET) },
 	};
 	uint16_t status;
 	int32_t rem;
 	int ret;
 
-	sub.time_spec.tv_sec = div_s64_rem(time, NSEC_PER_SEC, &rem);
-	sub.time_spec.tv_nsec = rem;
+	sub.time_spec.tv_sec =
+		cpu_to_le64(div_s64_rem(time, NSEC_PER_SEC, &rem));
+	sub.time_spec.tv_nsec = cpu_to_le64(rem);
 
 	ret = fba_admin_packet_sync(fba_dev, &sub, 1, &status);
 	if (ret || status) {
@@ -273,8 +274,8 @@ int fba_admin_time_set(struct fba_device *fba_dev, int64_t time)
 		if (!ret)
 			ret = -EIO;
 	}
-	trace_fba_time_sync(fba_dev->name, sub.time_spec.tv_sec,
-			    sub.time_spec.tv_nsec);
+	trace_fba_time_sync(fba_dev->name, le64_to_cpu(sub.time_spec.tv_sec),
+			    le64_to_cpu(sub.time_spec.tv_nsec));
 
 	return ret;
 }
@@ -290,7 +291,7 @@ bool fba_admin_poll_channel(void *obj)
 		ret = fba_admin_time_set(fba_dev, ktime_get_real());
 	} else {
 		struct fba_submission sub = {
-			.header.opcode = EXE_NOOP,
+			.header.opcode = cpu_to_le16(EXE_NOOP),
 		};
 
 		ret = fba_admin_packet_chan_sync(fba_dev, chan, &sub, 1,

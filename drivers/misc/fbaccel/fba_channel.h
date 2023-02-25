@@ -80,7 +80,9 @@ struct fba_channel_req {
 	fba_channel_cb_fn cb;
 	bool posted;
 
-	struct fba_completion cmp;
+	/* Completion info */
+	uint16_t status;
+	uint8_t flags;
 };
 
 /*

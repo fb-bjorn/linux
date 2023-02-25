@@ -68,7 +68,7 @@ uint64_t fba_alloc_get_addr(struct fba_alloc *alloc)
 }
 
 struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
-				    uint64_t size, uint64_t *val)
+				    uint64_t size, __le64 *val)
 {
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	int id = (rid >> RID_ID_SHIFT);
@@ -103,13 +103,13 @@ struct fba_alloc *fba_alloc_convert(struct fba_ctx *ctx, uint64_t rid,
 	}
 
 	/* translate the address */
-	*val = alloc->addr + offs;
+	*val = cpu_to_le64(alloc->addr + offs);
 	return alloc;
 }
 
 /* Convert to alloc and add to those tracked by job */
 static int fba_alloc_convert_job(struct fba_job *job, uint64_t rid,
-				 uint64_t size, uint64_t *val)
+				 uint64_t size, __le64 *val)
 {
 	struct fba_alloc *alloc = fba_alloc_convert(job->ctx, rid, size, val);
 
@@ -146,7 +146,7 @@ void fba_alloc_translate_teardown(struct fba_job *job)
 }
 
 static int fba_alloc_translate_p2p(struct fba_job *job, uint64_t rid,
-				   uint64_t size, uint64_t *val)
+				   uint64_t size, __le64 *val)
 {
 	int fd = (rid >> RID_ID_SHIFT);
 	uint64_t offset = (rid & RID_OFFS_MASK);
@@ -157,7 +157,7 @@ static int fba_alloc_translate_p2p(struct fba_job *job, uint64_t rid,
 	if (IS_ERR(fba_dmabuf))
 		return PTR_ERR(fba_dmabuf);
 
-	*val = sg_dma_address(fba_dmabuf->sgt.sgl);
+	*val = cpu_to_le64(sg_dma_address(fba_dmabuf->sgt.sgl));
 
 	job->dmabuf_cnt++;
 	list_add_tail(&fba_dmabuf->list, &job->dma_buf_list);
@@ -201,10 +201,10 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 
 	for (i = 0; i < SUBMISSION_ENTRY_ARGS; i++) {
-		uint64_t arg_type =
-			(sub->header.flags >> (i * AT_FIELD_BIT_WIDTH)) &
-			AT_FIELD_BIT_MASK;
-		uint64_t *ptr = &iargs[i];
+		uint64_t arg_type = (le32_to_cpu(sub->header.flags) >>
+				     (i * AT_FIELD_BIT_WIDTH)) &
+				    AT_FIELD_BIT_MASK;
+		__le64 *ptr = (__le64 *)&iargs[i];
 		uint64_t size;
 
 		switch (arg_type) {
@@ -257,10 +257,10 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				break;
 			}
 			if (dma->map_cnt == 1 && !test_force_prp) {
-				*ptr = dma->dma_addr;
+				*ptr = cpu_to_le64(dma->dma_addr);
 				iargs[i + 1] |= AT_DMA_OPSZ;
 			} else {
-				*ptr = dma->prp_addr;
+				*ptr = cpu_to_le64(dma->prp_addr);
 				iargs[i + 1] |= AT_DMA_OPSZ | AT_DMA_PRP;
 			}
 			break;
@@ -290,9 +290,9 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 }
 
 /* Map the provided addr (in resource space) to its virtual address offset. */
-void *fba_alloc_map_to_va(struct fba_alloc *alloc, uint64_t addr)
+void *fba_alloc_map_to_va(struct fba_alloc *alloc, __le64 addr)
 {
-	ptrdiff_t offs = addr - alloc->resource->start;
+	ptrdiff_t offs = le64_to_cpu(addr) - alloc->resource->start;
 
 	return (alloc->resource->va + offs);
 }
