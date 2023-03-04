@@ -34,7 +34,6 @@
 static DEFINE_IDA(freya_ida);
 
 static bool gdb_on_boot;
-static int llc_config = 3;
 static bool pe_print_mode;
 static bool ddr_bypass;
 static bool pcie_console;
@@ -49,10 +48,6 @@ static char *freya_boot_args = "";
 module_param(gdb_on_boot, bool, 0444);
 MODULE_PARM_DESC(gdb_on_boot,
 		 "Enablement of gdb on Zephyr start up through boot parameter");
-
-module_param(llc_config, int, 0644);
-MODULE_PARM_DESC(llc_config,
-		 "LLC firmware boot config (when firmware is loaded/reloaded)");
 
 module_param(pe_print_mode, bool, 0444);
 MODULE_PARM_DESC(pe_print_mode,
@@ -280,15 +275,10 @@ static void store_boot_args(struct fba_device *fba_dev)
 
 static void freya_store_boot_param(struct fba_device *fba_dev)
 {
-	uint32_t llc_conf = READ_ONCE(llc_config);
-
 	fba_dev_info(fba_dev, "gdb_on_boot boot parameter is set to 0x%x",
 		     gdb_on_boot);
 	fba_write_bar(fba_dev, gdb_on_boot, BAR_CXRAM,
 		      CXRAM_GDB_ON_BOOT_OFFSET);
-	fba_dev_info(fba_dev, "llc_config boot parameter is set to 0x%x",
-		     llc_conf);
-	fba_write_bar(fba_dev, llc_conf, BAR_CXRAM, CXRAM_LLC_CONFIG_OFFSET);
 	fba_dev_info(fba_dev, "pe_print_mode boot parameter is set to 0x%x",
 		     pe_print_mode);
 	fba_write_bar(fba_dev, pe_print_mode, BAR_CXRAM,
