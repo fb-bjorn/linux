@@ -119,6 +119,9 @@ struct freya_priv {
 	/* Used as the payload transfer location and size for Bootflow using CXRAM */
 	uint32_t cxram_upgrade_ofs;
 	uint32_t cxram_upgrade_sz;
+	/* read bootargs offset and maxsize from the CXRAM */
+	uint64_t cxram_bootargs_ofs;
+	uint64_t cxram_bootargs_maxsize;
 };
 
 static uint32_t freya_read_cxram_sb(struct fba_device *fba_dev,
@@ -253,28 +256,59 @@ static bool did_ccp_panic(struct fba_device *fba_dev)
 	return panic ? true : false;
 }
 
-static void store_boot_args(struct fba_device *fba_dev)
+static int fbia_get_bootargs_info(struct fba_device *fba_dev)
 {
+	struct freya_priv *priv = fba_dev->impl_priv;
+	uint64_t cxram_size = priv->data->cxram_sideband_ofs + SIDEBAND_SIZE;
+
+	priv->cxram_bootargs_ofs =
+		get_mailbox(fba_dev, M7_BOOT_ARGS_OFFSET_MBOX);
+	priv->cxram_bootargs_maxsize =
+		get_mailbox(fba_dev, M7_BOOT_ARGS_SIZE_MBOX);
+
+	/* check for valid values */
+	if ((priv->cxram_bootargs_ofs >= cxram_size) ||
+	    (priv->cxram_bootargs_maxsize >
+	     (cxram_size - priv->cxram_bootargs_ofs))) {
+		fba_dev_err(fba_dev,
+			    "CXRAM args out of range offset 0x%llx size 0x%llx",
+			    priv->cxram_bootargs_ofs,
+			    priv->cxram_bootargs_maxsize);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int store_boot_args(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
 	void __iomem *args_bufp;
 	size_t boot_arg_len;
+	int ret = 0;
+
+	ret = fbia_get_bootargs_info(fba_dev);
+	if (ret < 0)
+		return ret;
 
 	boot_arg_len = strlen(freya_boot_args);
 	if (boot_arg_len == 0)
-		return;
-	WARN_ON(boot_arg_len > CXRAM_BOOT_ARGS_MAX_SIZE);
+		return 0;
+	WARN_ON(boot_arg_len > priv->cxram_bootargs_maxsize);
 
-	args_bufp = fba_dev->bars[BAR_CXRAM] + CXRAM_BOOT_ARGS_OFFSET;
+	args_bufp = fba_util_get_bar_ptr(fba_dev, BAR_CXRAM,
+					 priv->cxram_bootargs_ofs);
 
-	memset_io(args_bufp, 0, CXRAM_BOOT_ARGS_MAX_SIZE);
+	memset_io(args_bufp, 0, priv->cxram_bootargs_maxsize);
 	memcpy_toio(args_bufp, freya_boot_args,
-		    (boot_arg_len > CXRAM_BOOT_ARGS_MAX_SIZE) ?
-				  CXRAM_BOOT_ARGS_MAX_SIZE - 1 :
-				  boot_arg_len);
+		    min_t(size_t, boot_arg_len,
+			  priv->cxram_bootargs_maxsize - 1));
 	fba_dev_info(fba_dev, "Configured boot args:%s", freya_boot_args);
+	return ret;
 }
-
-static void freya_store_boot_param(struct fba_device *fba_dev)
+static int freya_store_boot_param(struct fba_device *fba_dev)
 {
+	int ret = 0;
+
 	fba_dev_info(fba_dev, "gdb_on_boot boot parameter is set to 0x%x",
 		     gdb_on_boot);
 	fba_write_bar(fba_dev, gdb_on_boot, BAR_CXRAM,
@@ -293,7 +327,9 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 	fba_write_bar(fba_dev, pe_idcache_disable, BAR_CXRAM,
 		      CXRAM_PE_IDCACHE_CONFIG_OFFSET);
 
-	store_boot_args(fba_dev);
+	ret = store_boot_args(fba_dev);
+	if (ret < 0)
+		return ret;
 
 	/* Ensure ECC regions are a multiple of 16MB */
 	if (IS_ALIGNED(ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
@@ -317,6 +353,7 @@ static void freya_store_boot_param(struct fba_device *fba_dev)
 			"P2P ECC region size not a multiple of 16MB, setting size to 0.");
 		fba_write_bar(fba_dev, 0, BAR_CXRAM, CXRAM_P2P_ECC_SIZE_OFFSET);
 	}
+	return ret;
 }
 
 static irqreturn_t fbia_coredump_msix_handler(int irq, void *data)
@@ -884,7 +921,9 @@ static int freya_boot1(struct fba_device *fba_dev)
 	cxram_sideband_clearbit(fba_dev, BOOT1_COMPLETE_MASK,
 				SB_BOOT_STATUS2_OFS);
 	fba_dev_info(fba_dev, "Boot1 ready for CCP transfer");
-	freya_store_boot_param(fba_dev);
+	ret = freya_store_boot_param(fba_dev);
+	if (ret < 0)
+		return ret;
 
 	if ((fba_dev->pdev->class >> 8) != 0) {
 		/* Reset requires PCI quirk to be in effect. */
@@ -1568,7 +1607,6 @@ static int freya_init(struct fba_device *fba_dev)
 		SRAM_UPGRADE_OFS(FREYA_CXRAM_BASE, FREYA_CXRAM_SIZE);
 	priv->cxram_upgrade_sz = SRAM_UPGRADE_MEM_SIZE;
 	priv->boot_timeouts = &asic_boot_timeouts;
-
 	return 0;
 }
 

@@ -232,6 +232,10 @@ struct payload_exec_result {
 #define M7_LOGBUF_SIZE_MBOX (M7_MBOX_GROUP_START + 21)
 #define M7_LOGBUF_OFFSET_MBOX (M7_MBOX_GROUP_START + 22)
 
+/* bootargs offset and max-size */
+#define M7_BOOT_ARGS_OFFSET_MBOX (M7_MBOX_GROUP_START + 23)
+#define M7_BOOT_ARGS_SIZE_MBOX (M7_MBOX_GROUP_START + 24)
+
 #define LOGBUF_MBOX_GROUP_START ((CPP_MBOX_GROUP_OFFS + 3) * HW_MBOX_GROUP_SIZE)
 #define CCP_LOGBUF_SIZE_MBOX (LOGBUF_MBOX_GROUP_START + 1)
 #define CCP_LOGBUF_OFFSET_MBOX (LOGBUF_MBOX_GROUP_START + 2)
@@ -367,8 +371,7 @@ struct coredump_region {
 
 #define FREYA_LOGGER_SRCS 2
 
-/* Offset for boot arguments in CXRAM. */
-#define CXRAM_BOOT_ARGS_OFFSET 0x8000
+/* Offset for Freya boot arguments in CXRAM. */
+#define FREYA_CXRAM_BOOT_ARGS_OFFSET 0x8000
 
-/* Max size of boot args in CXRAM. */
-#define CXRAM_BOOT_ARGS_MAX_SIZE 0x400
+/* Max size of Freya boot args in CXRAM. */
