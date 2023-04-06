@@ -39,7 +39,7 @@
 #define BAR_CNT 6
 
 /* Retry count while waiting for device to change state */
-#define MAX_RETRIES 50
+#define MAX_RETRIES 100
 #define MIN_RETRIES 5
 
 #define MAX_LOGGER_SRCS 2

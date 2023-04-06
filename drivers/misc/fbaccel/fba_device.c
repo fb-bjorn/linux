@@ -338,7 +338,8 @@ static int __fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg,
 		if (bail_early && READ_ONCE(fba_dev->exiting))
 			return -ETIMEDOUT;
 
-		fba_dev_info(fba_dev, "Scan state %d try %d.", reg, i);
+		fba_dev_info(fba_dev, "Scan state %d try %d/%d.", reg, i,
+			     tries);
 		val = get_mailbox(fba_dev, reg);
 		if (val == state)
 			return 0;
