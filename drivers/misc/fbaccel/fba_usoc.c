@@ -373,9 +373,8 @@ void fba_usoc_unregister(struct fba_usoc_dev *dev)
 
 static char *fba_usoc_devnode(struct device *dev, umode_t *mode)
 {
-	/* TODO(T91542908): Revisit for fba_driver privilege separation. */
 	if (mode)
-		*mode = 0666;
+		*mode = 0600;
 
 	return NULL;
 }

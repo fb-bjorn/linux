@@ -186,7 +186,8 @@ static struct fba_resource *build_resource(struct fba_device *fba_dev,
 
 	spin_lock_init(&res->pool_lock);
 	kref_init(&res->ref);
-	res->type = type, res->subtype = subtype;
+	res->type = type;
+	res->subtype = subtype;
 	res->start = start;
 	res->va = va;
 

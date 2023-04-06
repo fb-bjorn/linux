@@ -645,11 +645,6 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_RESOURCE_ALLOC: {
 		struct res_alloc_ioctl alloc_req;
 
-#ifdef NOTYET /* Not needed?  If needed, alloc is racy? */
-		if (!fba_ctx_is_open(ctx))
-			return -EACCES;
-#endif
-
 		if (copy_from_user(&alloc_req, data, sizeof(alloc_req)))
 			return -EFAULT;
 		ret = fba_ioctl_resource_alloc(
@@ -682,6 +677,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		return fba_ioctl_resource_free(ctx, arg);
 	case FBA_IOCTL_ACCESS_BAR: {
 		struct bar_access_ioctl bar_req;
+
+		if (!capable(CAP_SYS_RAWIO))
+			return -EPERM;
 
 		if (copy_from_user(&bar_req, data, sizeof(bar_req)))
 			return -EFAULT;

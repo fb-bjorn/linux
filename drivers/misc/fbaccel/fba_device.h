@@ -158,7 +158,7 @@ struct fba_alloc {
 /*
  * Contains information on shared memory areas.  If addr is non-zero
  * points to host allocated dma coherent.  If addr is zero, points to
- * to device memory via a device BAR.
+ * device memory via a device BAR.
  */
 struct fba_shared {
 	union {
