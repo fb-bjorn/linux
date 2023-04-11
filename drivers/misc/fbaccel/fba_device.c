@@ -1167,9 +1167,6 @@ static int fba_device_exit(struct fba_device *fba_dev)
 
 	fba_device_unregister(fba_dev);
 
-	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
-		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
-
 	ret = fba_device_fw_exit(fba_dev);
 	if (ret != 0) {
 		fba_dev_err(fba_dev,
@@ -1185,6 +1182,9 @@ static int fba_device_exit(struct fba_device *fba_dev)
 	kfree(fba_dev->m7_health_poller);
 
 	fba_mon_exit(&fba_dev->mon);
+
+	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
+		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
 
 	fba_shared_area_exit(fba_dev);
 	fba_pci_exit(fba_dev);
