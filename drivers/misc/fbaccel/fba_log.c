@@ -541,7 +541,7 @@ struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev)
 	struct device *pdev;
 	struct device *parent = fba_dev->dev;
 	int num_params = fba_dev->cfg->num_logger_srcs;
-	int ret;
+	int ret, i;
 
 	if (num_params < 1)
 		return NULL;
@@ -591,7 +591,7 @@ struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev)
 			     "%slog", fba_dev->name);
 	if (IS_ERR(pdev)) {
 		ret = PTR_ERR(pdev);
-		goto err_destroy_dev;
+		goto err_free_irq;
 	}
 	ldev->dev = pdev;
 
@@ -599,18 +599,18 @@ struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev)
 	if (ret) {
 		dev_err(&fba_dev->pdev->dev,
 			"%s: Failed to allocate device ID.", fba_dev->name);
-		goto err_put_logger;
+		goto err_destroy_dev;
 	}
 	return ldev;
 
-err_put_logger:
-	fba_logger_device_put(ldev);
-	mutex_lock(&fba_logger_mtx);
-	fba_logger_devices[fba_dev->id] = NULL;
-	mutex_unlock(&fba_logger_mtx);
 err_destroy_dev:
 	device_destroy(fba_logger_class,
 		       MKDEV(MAJOR(fba_logger_devt), fba_dev->id));
+err_free_irq:
+	for (i = 0; i < ldev->num_srcs; i++) {
+		struct fba_log_source *src = &ldev->srcs[i];
+		pci_free_irq(ldev->pci_dev, src->params->msix_int, src);
+	}
 err_put_device:
 	pci_dev_put(ldev->pci_dev);
 	kvfree(ldev->data);
