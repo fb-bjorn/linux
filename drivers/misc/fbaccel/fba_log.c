@@ -609,7 +609,8 @@ err_put_logger:
 	fba_logger_devices[fba_dev->id] = NULL;
 	mutex_unlock(&fba_logger_mtx);
 err_destroy_dev:
-	device_destroy(fba_logger_class, fba_logger_devt);
+	device_destroy(fba_logger_class,
+		       MKDEV(MAJOR(fba_logger_devt), fba_dev->id));
 err_put_device:
 	pci_dev_put(ldev->pci_dev);
 	kvfree(ldev->data);
