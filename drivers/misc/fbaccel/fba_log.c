@@ -406,7 +406,7 @@ static int fba_logger_device_init(struct fba_logger_dev *ldev)
 	return ret;
 }
 
-static void fba_logger_thread_init(struct fba_logger_dev *ldev)
+static int fba_logger_thread_init(struct fba_logger_dev *ldev)
 {
 	struct fba_device *fba_dev = ldev->fba_dev;
 	struct fba_log_source *src;
@@ -415,11 +415,16 @@ static void fba_logger_thread_init(struct fba_logger_dev *ldev)
 
 	snprintf(thread_name, sizeof(thread_name), "%s_logger", fba_dev->name);
 	ldev->logger_thread = create_singlethread_workqueue(thread_name);
+	if (!ldev->logger_thread)
+		return -ENOMEM;
+
 	for (i = 0; i < ldev->num_srcs; i++) {
 		src = &ldev->srcs[i];
 		INIT_WORK(&src->logger_work, fba_logger_handler);
 		queue_work(ldev->logger_thread, &src->logger_work);
 	}
+
+	return 0;
 }
 
 static bool fba_logger_src_ringbuff_invalid(struct fba_device *fba_dev)
@@ -580,11 +585,14 @@ struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev)
 	init_waitqueue_head(&((ldev)->read_q));
 	rwlock_init(&ldev->rwlock);
 	fba_logger_srcs_init(ldev);
-	fba_logger_thread_init(ldev);
+
+	ret = fba_logger_thread_init(ldev);
+	if (ret)
+		goto err_put_device;
 
 	ret = fba_logger_srcs_msix_init(ldev);
 	if (ret)
-		goto err_put_device;
+		goto err_destroy_wq;
 
 	pdev = device_create(fba_logger_class, parent,
 			     MKDEV(MAJOR(fba_logger_devt), fba_dev->id), ldev,
@@ -611,6 +619,8 @@ err_free_irq:
 		struct fba_log_source *src = &ldev->srcs[i];
 		pci_free_irq(ldev->pci_dev, src->params->msix_int, src);
 	}
+err_destroy_wq:
+	destroy_workqueue(ldev->logger_thread);
 err_put_device:
 	pci_dev_put(ldev->pci_dev);
 	kvfree(ldev->data);
