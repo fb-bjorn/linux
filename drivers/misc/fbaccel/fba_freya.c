@@ -15,7 +15,9 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/bitfield.h>
+#include <linux/parser.h>
 #include <linux/pci.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <linux/version.h>
 #include <uapi/linux/limits.h>
@@ -33,28 +35,13 @@
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(freya_ida);
 
-static bool gdb_on_boot;
-static bool pe_print_mode;
 static bool ddr_bypass;
-static bool pcie_console;
 static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
-static int pe_idcache_disable;
 static int ecc_region_size_mb;
 static int p2p_ecc_region_size_mb;
 
 /* Firmware boot parameters as a string. */
 static char *freya_boot_args = "";
-
-module_param(gdb_on_boot, bool, 0444);
-MODULE_PARM_DESC(gdb_on_boot,
-		 "Enablement of gdb on Zephyr start up through boot parameter");
-
-module_param(pe_print_mode, bool, 0444);
-MODULE_PARM_DESC(pe_print_mode,
-		 "PE lossless print mode enablement through boot parameter");
-
-module_param(pcie_console, bool, 0444);
-MODULE_PARM_DESC(pcie_console, "Enable Zephyr console on PCIe UART");
 
 module_param(ddr_bypass, bool, 0444);
 MODULE_PARM_DESC(ddr_bypass,
@@ -65,21 +52,9 @@ MODULE_PARM_DESC(
 	m7_hb_period_ms,
 	"SAIL m7 heartbeat polling period in milliseconds (default: 60000). Set to 0 to disable.");
 
-module_param(pe_idcache_disable, int, 0644);
-MODULE_PARM_DESC(
-	pe_idcache_disable,
-	"Disable PE I and D cache. Enabled by default. 1 - dcache, 2 - icache, 3 - i&d cache");
-
-module_param(ecc_region_size_mb, int, 0444);
-MODULE_PARM_DESC(ecc_region_size_mb,
-		 "Size of ECC region in MB (Must be multiple of 16MB)");
-
-module_param(p2p_ecc_region_size_mb, int, 0444);
-MODULE_PARM_DESC(p2p_ecc_region_size_mb,
-		 "Size of P2P ECC region in MB (Must be multiple of 16MB)");
-
 module_param(freya_boot_args, charp, 0444);
-MODULE_PARM_DESC(freya_boot_args, "Firmware boot parameters.");
+MODULE_PARM_DESC(freya_boot_args, "Firmware boot parameters (in p1=v1[,p2=v2...] format). "
+	"Driver recognizes: ecc_region_size_mb, p2p_ecc_region_size_mb");
 
 enum freya_boot_mode {
 	FREYA_BOOT_NORMAL,
@@ -305,53 +280,77 @@ static int store_boot_args(struct fba_device *fba_dev)
 	fba_dev_info(fba_dev, "Configured boot args:%s", freya_boot_args);
 	return ret;
 }
+
+enum {
+	BOOT_ARGS_ECC_REGION_MB,
+	BOOT_ARGS_P2P_ECC_REGION_MB,
+	BOOT_ARGS_END
+};
+
+static match_table_t tokens = {
+	{BOOT_ARGS_ECC_REGION_MB, "ecc_region_size_mb=%d"},
+	{BOOT_ARGS_P2P_ECC_REGION_MB, "p2p_ecc_region_size_mb=%d"},
+	{BOOT_ARGS_END, NULL}
+};
+
 static int freya_store_boot_param(struct fba_device *fba_dev)
 {
 	int ret = 0;
-
-	fba_dev_info(fba_dev, "gdb_on_boot boot parameter is set to 0x%x",
-		     gdb_on_boot);
-	fba_write_bar(fba_dev, gdb_on_boot, BAR_CXRAM,
-		      CXRAM_GDB_ON_BOOT_OFFSET);
-	fba_dev_info(fba_dev, "pe_print_mode boot parameter is set to 0x%x",
-		     pe_print_mode);
-	fba_write_bar(fba_dev, pe_print_mode, BAR_CXRAM,
-		      CXRAM_PE_PRINT_MODE_OFFSET);
-	fba_dev_info(fba_dev, "PCIe console is %s",
-		     pcie_console ? "enabled" : "disabled");
-	fba_write_bar(fba_dev, pcie_console, BAR_CXRAM,
-		      CXRAM_ENABLE_PCIE_CONSOLE_OFFSET);
-	fba_dev_info(fba_dev,
-		     "pe_idcache_disable boot parameter is set to 0x%x",
-		     pe_idcache_disable);
-	fba_write_bar(fba_dev, pe_idcache_disable, BAR_CXRAM,
-		      CXRAM_PE_IDCACHE_CONFIG_OFFSET);
+	char *str_pair;
+	char *str_alloc;
+	char *ptr;
+	int  tok;
+	substring_t args[MAX_OPT_ARGS];
 
 	ret = store_boot_args(fba_dev);
 	if (ret < 0)
 		return ret;
 
+	/* parse out known parameters out of firmware args string */
+	str_alloc = str_pair = kstrdup(freya_boot_args, GFP_KERNEL);
+	if (str_alloc == NULL) {
+		fba_dev_err(fba_dev, "Can't allocate args-parsing string");
+		goto skip_parsing;
+	}
+	while ((ptr = strsep(&str_pair, ",")) != NULL) {
+		tok = match_token(ptr, tokens, args);
+		switch (tok) {
+		case BOOT_ARGS_ECC_REGION_MB:
+			match_int(args, &ecc_region_size_mb);
+			break;
+		case BOOT_ARGS_P2P_ECC_REGION_MB:
+			match_int(args, &p2p_ecc_region_size_mb);
+			break;
+		default:
+			break;
+		}
+	}
+	kfree(str_alloc);
+
+skip_parsing:
 	/* Ensure ECC regions are a multiple of 16MB */
-	if (IS_ALIGNED(ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
-		fba_write_bar(fba_dev, ecc_region_size_mb, BAR_CXRAM,
-			      CXRAM_ECC_REGION_SIZE_OFFSET);
-	} else {
-		fba_dev_warn(
-			fba_dev,
-			"ECC region size not a multiple of 16MB, setting size to 0.");
-		fba_write_bar(fba_dev, 0, BAR_CXRAM,
-			      CXRAM_ECC_REGION_SIZE_OFFSET);
+	if (ecc_region_size_mb) {
+		fba_dev_info(fba_dev,
+			"Firmware setting ECC region size to %u MB",
+			ecc_region_size_mb);
+		if (!IS_ALIGNED(ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
+			fba_dev_warn(
+				fba_dev,
+				"Firmware ECC region size not a multiple of 16MB, ignoring");
+			ecc_region_size_mb = 0;
+		}
 	}
 
-	if (IS_ALIGNED(p2p_ecc_region_size_mb,
-		       DRAM_ECC_REGION_GRANULARITY_MB)) {
-		fba_write_bar(fba_dev, p2p_ecc_region_size_mb, BAR_CXRAM,
-			      CXRAM_P2P_ECC_SIZE_OFFSET);
-	} else {
-		fba_dev_warn(
-			fba_dev,
-			"P2P ECC region size not a multiple of 16MB, setting size to 0.");
-		fba_write_bar(fba_dev, 0, BAR_CXRAM, CXRAM_P2P_ECC_SIZE_OFFSET);
+	if (p2p_ecc_region_size_mb) {
+		fba_dev_info(fba_dev,
+			"Firmware setting P2P_ECC region size to %u MB",
+			p2p_ecc_region_size_mb);
+		if (!IS_ALIGNED(p2p_ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
+			fba_dev_warn(
+				fba_dev,
+				"Firmware P2P ECC region size not a multiple of 16MB, ignoring");
+			p2p_ecc_region_size_mb = 0;
+		}
 	}
 	return ret;
 }
