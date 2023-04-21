@@ -382,8 +382,14 @@ static int fba_logger_srcs_msix_init(struct fba_logger_dev *ldev)
 			dev_err(&fba_dev->pdev->dev,
 				"%s: pci_request_irq %d failed\n",
 				fba_dev->name, src->params->msix_int);
-			return ret;
+			goto err_irq;
 		}
+	}
+	return ret;
+err_irq:
+	for (--i; i >= 0; i--) {
+		src = &ldev->srcs[i];
+		pci_free_irq(ldev->pci_dev, src->params->msix_int, src);
 	}
 	return ret;
 }
