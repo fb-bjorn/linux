@@ -53,7 +53,9 @@ MODULE_PARM_DESC(
 	"SAIL m7 heartbeat polling period in milliseconds (default: 60000). Set to 0 to disable.");
 
 module_param(freya_boot_args, charp, 0444);
-MODULE_PARM_DESC(freya_boot_args, "Firmware boot parameters (in p1=v1[,p2=v2...] format). "
+MODULE_PARM_DESC(
+	freya_boot_args,
+	"Firmware boot parameters (in p1=v1[,p2=v2...] format). "
 	"Driver recognizes: ecc_region_size_mb, p2p_ecc_region_size_mb");
 
 enum freya_boot_mode {
@@ -281,16 +283,12 @@ static int store_boot_args(struct fba_device *fba_dev)
 	return ret;
 }
 
-enum {
-	BOOT_ARGS_ECC_REGION_MB,
-	BOOT_ARGS_P2P_ECC_REGION_MB,
-	BOOT_ARGS_END
-};
+enum { BOOT_ARGS_ECC_REGION_MB, BOOT_ARGS_P2P_ECC_REGION_MB, BOOT_ARGS_END };
 
 static match_table_t tokens = {
-	{BOOT_ARGS_ECC_REGION_MB, "ecc_region_size_mb=%d"},
-	{BOOT_ARGS_P2P_ECC_REGION_MB, "p2p_ecc_region_size_mb=%d"},
-	{BOOT_ARGS_END, NULL}
+	{ BOOT_ARGS_ECC_REGION_MB, "ecc_region_size_mb=%d" },
+	{ BOOT_ARGS_P2P_ECC_REGION_MB, "p2p_ecc_region_size_mb=%d" },
+	{ BOOT_ARGS_END, NULL }
 };
 
 static int freya_store_boot_param(struct fba_device *fba_dev)
@@ -299,7 +297,7 @@ static int freya_store_boot_param(struct fba_device *fba_dev)
 	char *str_pair;
 	char *str_alloc;
 	char *ptr;
-	int  tok;
+	int tok;
 	substring_t args[MAX_OPT_ARGS];
 
 	ret = store_boot_args(fba_dev);
@@ -331,9 +329,10 @@ skip_parsing:
 	/* Ensure ECC regions are a multiple of 16MB */
 	if (ecc_region_size_mb) {
 		fba_dev_info(fba_dev,
-			"Firmware setting ECC region size to %u MB",
-			ecc_region_size_mb);
-		if (!IS_ALIGNED(ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
+			     "Firmware setting ECC region size to %u MB",
+			     ecc_region_size_mb);
+		if (!IS_ALIGNED(ecc_region_size_mb,
+				DRAM_ECC_REGION_GRANULARITY_MB)) {
 			fba_dev_warn(
 				fba_dev,
 				"Firmware ECC region size not a multiple of 16MB, ignoring");
@@ -343,9 +342,10 @@ skip_parsing:
 
 	if (p2p_ecc_region_size_mb) {
 		fba_dev_info(fba_dev,
-			"Firmware setting P2P_ECC region size to %u MB",
-			p2p_ecc_region_size_mb);
-		if (!IS_ALIGNED(p2p_ecc_region_size_mb, DRAM_ECC_REGION_GRANULARITY_MB)) {
+			     "Firmware setting P2P_ECC region size to %u MB",
+			     p2p_ecc_region_size_mb);
+		if (!IS_ALIGNED(p2p_ecc_region_size_mb,
+				DRAM_ECC_REGION_GRANULARITY_MB)) {
 			fba_dev_warn(
 				fba_dev,
 				"Firmware P2P ECC region size not a multiple of 16MB, ignoring");
