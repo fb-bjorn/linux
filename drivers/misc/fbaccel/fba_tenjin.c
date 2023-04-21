@@ -1064,6 +1064,11 @@ static void tenjin_exit(struct fba_device *fba_dev)
 	kfree(fba_dev->impl_priv);
 }
 
+static void fbv_heartbeat_failed(struct fba_device *fba_dev)
+{
+	set_mailbox(fba_dev, CCP_COREDUMP_MBOX_GROUP_OFFS, 1);
+}
+
 static const struct fba_impl_ops tenjin_impl_ops = {
 	.impl_init = tenjin_init,
 	.impl_exit = tenjin_exit,
@@ -1077,6 +1082,8 @@ static const struct fba_impl_ops tenjin_impl_ops = {
 	.coredump_exit = fbv_coredump_exit,
 
 	.did_ccp_panic = did_ccp_panic,
+
+	.heartbeat_failed = fbv_heartbeat_failed,
 };
 
 const struct fba_cfg tenjin_cfg = {

@@ -233,6 +233,8 @@ struct fba_impl_ops {
 	uint32_t (*coredump_get_crc)(struct fba_device *fba_dev);
 	/* Decide whether to load signed or unsigned firmware */
 	bool (*is_secure_boot)(struct fba_device *fba_dev);
+	/* heartbeat failure callback */
+	void (*heartbeat_failed)(struct fba_device *fba_dev);
 };
 
 #include "fba_channel.h"

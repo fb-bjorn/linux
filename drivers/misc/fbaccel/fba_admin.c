@@ -300,6 +300,8 @@ bool fba_admin_poll_channel(void *obj)
 
 	if (ret || status) {
 		fba_device_abort(fba_dev, "heartbeat failure");
+		if (fba_dev->cfg->impl_ops->heartbeat_failed)
+			fba_dev->cfg->impl_ops->heartbeat_failed(fba_dev);
 		fba_dev_err(fba_dev,
 			    "Heartbeat failed for channel %d rc=%d status=%d",
 			    (uint16_t)chan->chan_id, ret, status);
