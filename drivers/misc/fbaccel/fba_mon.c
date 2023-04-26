@@ -543,6 +543,10 @@ static int update_device_data(struct fba_device *dev)
 
 	// Requires caller to lock the mon->mutex
 	WARN_ON(!mutex_is_locked(&mon->mutex));
+
+	if (!mon->src_info[SAIL_MTS_CCP].item_cnt)
+		return 0;
+
 	if ((!atomic_read(&dev->has_failed)) &&
 	    (mon->src_info[SAIL_MTS_CCP].is_init)) {
 		/* Stop polling for device data  if device has failed. */
