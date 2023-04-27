@@ -153,7 +153,7 @@ enum {
 #define SAIL_CHANNEL_EXE 1
 
 /* Admin command timeouts */
-#define SAIL_ADMIN_CMD_MAX_TIMEOUT_MS 50000
+#define SAIL_ADMIN_CMD_MAX_TIMEOUT_MS (5 * 60 * 1000)
 #define SAIL_ADMIN_CMD_MIN_TIMEOUT_MS 6000
 
 /* Possible values for the opcode field on the admin submission queue */
