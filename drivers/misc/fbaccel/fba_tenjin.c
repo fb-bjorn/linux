@@ -331,7 +331,6 @@ static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
 			    "Coredump triggered: RISCV WDT timeout detected.");
 		break;
 	default:
-		fba_dev->device_fatal_err_detected = true;
 		if (cpu_id == 0)
 			priv->ccp_panic = true;
 
@@ -339,8 +338,9 @@ static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
 		break;
 	}
 
-	/* Generate udev event KOBJ_CHANGE */
+	/* Always Generate udev event KOBJ_CHANGE here since we may get coredump from M7 and CCP independently*/
 	mutex_lock(&fba_dev->coredump_mutex);
+	fba_dev->device_fatal_err_detected = true;
 	if (!fba_dev->coredump_disabled)
 		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
 	mutex_unlock(&fba_dev->coredump_mutex);
@@ -1066,7 +1066,42 @@ static void tenjin_exit(struct fba_device *fba_dev)
 
 static void fbv_heartbeat_failed(struct fba_device *fba_dev)
 {
+	uint32_t num_retries = 5;
+	uint32_t rd_val;
+
 	set_mailbox(fba_dev, CCP_COREDUMP_MBOX_GROUP_OFFS, 1);
+
+	/*
+   * Wait for ACK from device. If device is(CCP FW) is alive
+   * it will ack via mailbox write. If ack is received then
+   * let ccp FW generate coredump else we trigger a dummy
+   * coredump here
+   */
+	while (num_retries) {
+		/* Bail early if we're unbinding. */
+		if (READ_ONCE(fba_dev->exiting))
+			return;
+
+		rd_val = get_mailbox(fba_dev, CCP_COREDUMP_MBOX_GROUP_OFFS);
+
+		if (rd_val == HEARTBEAT_MAILBOX_ACK)
+			break;
+
+		schedule_timeout(HZ);
+		num_retries--;
+	}
+
+	if (!num_retries) {
+		fba_dev_err(
+			fba_dev,
+			"Device un-responsive on HB failure, trigger coredump udev event");
+		/* Generate udev event KOBJ_CHANGE only if coredump is not already triggered */
+		mutex_lock(&fba_dev->coredump_mutex);
+		if ((!fba_dev->device_fatal_err_detected) &&
+		    (!fba_dev->coredump_disabled))
+			kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
+		mutex_unlock(&fba_dev->coredump_mutex);
+	}
 }
 
 static const struct fba_impl_ops tenjin_impl_ops = {
