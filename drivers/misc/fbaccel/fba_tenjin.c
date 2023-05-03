@@ -1069,20 +1069,20 @@ static void fbv_heartbeat_failed(struct fba_device *fba_dev)
 	uint32_t num_retries = 5;
 	uint32_t rd_val;
 
-	set_mailbox(fba_dev, CCP_COREDUMP_MBOX_GROUP_OFFS, 1);
+	set_mailbox(fba_dev, CCP_COREDUMP_MBOX_ID, 1);
 
 	/*
-   * Wait for ACK from device. If device is(CCP FW) is alive
-   * it will ack via mailbox write. If ack is received then
-   * let ccp FW generate coredump else we trigger a dummy
-   * coredump here
-   */
+	 * Wait for ACK from device. If device is(CCP FW) is alive
+	 * it will ack via mailbox write. If ack is received then
+	 * let ccp FW generate coredump else we trigger a dummy
+	 * coredump here
+	 */
 	while (num_retries) {
 		/* Bail early if we're unbinding. */
 		if (READ_ONCE(fba_dev->exiting))
 			return;
 
-		rd_val = get_mailbox(fba_dev, CCP_COREDUMP_MBOX_GROUP_OFFS);
+		rd_val = get_mailbox(fba_dev, CCP_COREDUMP_MBOX_ID);
 
 		if (rd_val == HEARTBEAT_MAILBOX_ACK)
 			break;
