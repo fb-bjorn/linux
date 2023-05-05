@@ -69,6 +69,10 @@ enum {
 #define IATU_CONFIG_OFS 0x0
 #define IATU_CONFIGURED 0xFACEB00C
 
+/* Value written to status page when IATU setup on M7 is completed. */
+#define IATU_CONFIG_CIP_RESET_OFS 0x4
+#define IATU_CIP_RESET_CONFIGURED 0xFACEBAAC
+
 /*
  * SAIL Channel Descriptor
  * [00:07] CNUM - Number of channels.

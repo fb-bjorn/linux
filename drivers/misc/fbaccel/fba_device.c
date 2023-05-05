@@ -366,8 +366,8 @@ int fba_wait_for_state_nobail(struct fba_device *fba_dev, uint32_t reg,
 	return __fba_wait_for_state(fba_dev, reg, state, num_retries, false);
 }
 
-static int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
-			       uint32_t state, uint32_t num_retries)
+int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
+			uint32_t state, uint32_t num_retries)
 {
 	uint32_t val;
 	int i;
@@ -970,17 +970,23 @@ static int fba_shared_area_init(struct fba_device *fba_dev)
 	if (ret)
 		return ret;
 
+	fba_shared_memset(&fba_dev->debug_area, 0, 0, SAIL_DEBUG_SIZE);
+
 	/* Temp Area pages. */
 	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
 					SAIL_SCRATCH_SIZE);
 	if (ret)
 		goto err_free_debug;
 
+	fba_shared_memset(&fba_dev->scratch_area, 0, 0, SAIL_SCRATCH_SIZE);
+
 	/* Allocate Host Status pages. */
 	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
 					SAIL_STATUS_SIZE);
 	if (ret)
 		goto err_free_scratch;
+
+	fba_shared_memset(&fba_dev->status_area, 0, 0, SAIL_STATUS_SIZE);
 
 	return ret;
 

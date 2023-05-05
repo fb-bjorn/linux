@@ -436,6 +436,8 @@ int fba_wait_for_state(struct fba_device *fba_dev, enum sail_regs reg,
 		       uint32_t state, uint32_t num_retries);
 int fba_wait_for_state_nobail(struct fba_device *fba_dev, enum sail_regs reg,
 			      uint32_t state, uint32_t num_retries);
+int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
+			uint32_t state, uint32_t num_retries);
 
 struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
 						  size_t offset, size_t size);

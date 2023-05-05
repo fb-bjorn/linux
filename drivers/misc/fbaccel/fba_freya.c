@@ -861,6 +861,43 @@ static int freya_boot(struct fba_device *fba_dev,
 	return ret;
 }
 
+static int freya_m7_setup_iatu(struct fba_device *fba_dev)
+{
+	int ret;
+
+	set_mailbox64(fba_dev, M7_MBOX_IATU_STS_ADDR_ENTRY,
+		      (uint64_t)fba_dev->status_area.addr);
+	set_mailbox(fba_dev, M7_MBOX_IATU_STS_SIZE_ENTRY,
+		    (uint64_t)fba_dev->status_area.size);
+	set_mailbox(fba_dev, M7_MBOX_IATU_SETUP_ENTRY, 0);
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(
+			fba_dev,
+			"Failed waiting for iATU Config status memory signature.");
+		return ret;
+	}
+	/* Resetting the iATU Config ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
+			  sizeof(uint32_t));
+
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_CIP_RESET_OFS,
+				  IATU_CIP_RESET_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(
+			fba_dev,
+			"Failed waiting for iATU CIP Reset status memory signature.");
+		return ret;
+	}
+	/* Resetting the iATU CIP Reset ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_CIP_RESET_OFS, 0,
+			  sizeof(uint32_t));
+
+	return ret;
+}
+
 static int freya_boot1(struct fba_device *fba_dev)
 {
 	int ret;
@@ -920,6 +957,13 @@ static int freya_boot1(struct fba_device *fba_dev)
 	cxram_sideband_clearbit(fba_dev, BOOT1_COMPLETE_MASK,
 				SB_BOOT_STATUS2_OFS);
 	fba_dev_info(fba_dev, "Boot1 ready for CCP transfer");
+
+	ret = freya_m7_setup_iatu(fba_dev);
+	if (ret) {
+		fba_dev_err(fba_dev, "Boot1 iATU setup failed");
+		return ret;
+	}
+
 	ret = freya_store_boot_param(fba_dev);
 	if (ret < 0)
 		return ret;
@@ -1352,8 +1396,8 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 
 /*
  * Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
- * callback is set to reset CCP and CIP. The second entry serves as a status
- * to let the driver know that the CCP CIP reset is done
+ * callback is set to reset CCP and CIP. iATU Status page is used to listen
+ * for when the CCP CIP reset is done.
  */
 static int reset_ccp(struct fba_device *fba_dev)
 {
@@ -1365,9 +1409,16 @@ static int reset_ccp(struct fba_device *fba_dev)
 	fba_dev_info(fba_dev, "Interrupting M7 to reset CCP and CIP.");
 	set_mailbox(fba_dev, M7_MBOX_CTRL, CCP_CIP_RESET);
 	fba_dev_info(fba_dev, "Waiting for M7 to reset CCP and CIP.");
-	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
-					CCP_CIP_RESET_DONE,
-					fba_dev->num_retries);
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_CIP_RESET_OFS,
+				  CCP_CIP_RESET_DONE, fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(fba_dev,
+			    "Failed waiting for iATU CIP Reset Done Status.");
+		return ret;
+	}
+	/* Resetting the iATU CIP Reset ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_CIP_RESET_OFS, 0,
+			  sizeof(uint32_t));
 	set_mailbox(fba_dev, M7_MBOX_CTRL, STATUS_RESET);
 	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
 					STATUS_RESET_DONE,
