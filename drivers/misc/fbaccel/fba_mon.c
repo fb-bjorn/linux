@@ -167,6 +167,11 @@ enum mon_raw_type {
 	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t),    \
 		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
 
+// Static uint64_t
+#define MON_U64(name_, group_, source_, user_data_, get_value_cb_)             \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint64_t),    \
+		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
+
 /* Define a monitored item of type string */
 #define MON_STR(name_, group_, source_, user_data_, get_value_cb_)             \
 	MON_ITM_CB(name_, group_, source_, SAIL_MTT_CSTR,                      \
@@ -287,6 +292,37 @@ static int16_t get_device_id(struct fba_device *fba_dev, void *user_data,
 	*data = fba_dev->id;
 
 	return 0;
+}
+
+static int16_t get_allocated_memory(struct fba_device *fba_dev, void *user_data,
+				    void *buf, size_t buf_size)
+{
+	uint64_t *data = (uint64_t *)buf;
+	enum mem_type memory_type = (enum mem_type)((uintptr_t)user_data);
+
+	uint64_t resource_count = fba_dev->resource_cnt;
+	uint64_t allocated = 0, idx;
+	struct resource_info info;
+	int16_t ret = 0;
+
+	if (buf_size < sizeof(uint64_t)) {
+		fba_dev_err(fba_dev, "%s: Invalid buf size", __func__);
+		return -EFAULT;
+	}
+
+	for (idx = 0; idx < resource_count; idx++) {
+		ret = fba_resource_info(fba_dev, &info, idx);
+		if (ret) {
+			*data = 0;
+			return ret;
+		}
+		if (info.type == RT_MEMORY && info.subtype == memory_type) {
+			allocated += info.size - info.avail;
+		}
+	}
+	*data = allocated;
+
+	return ret;
 }
 
 static int16_t get_pci_vendor_id(struct fba_device *fba_dev, void *user_data,
@@ -527,6 +563,18 @@ static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 		    NULL, get_latest_ccp_coredump_crc),
 	MON_U32("device_id", MTG_ASIC_INFO, SAIL_MTS_DRIVER, NULL,
 		get_device_id),
+	MON_U64("allocated_dram", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_DRAM, get_allocated_memory),
+	MON_U64("allocated_p2p", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_P2P_DRAM, get_allocated_memory),
+	MON_U64("allocated_ecc", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_ECC_DRAM, get_allocated_memory),
+	MON_U64("allocated_p2p_ecc", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_P2P_ECC_DRAM, get_allocated_memory),
+	MON_U64("allocated_sram", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_SRAM, get_allocated_memory),
+	MON_U64("allocated_scratch", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_SCRATCH, get_allocated_memory),
 };
 #define N_DRIVER_MON_ITEMS ARRAY_SIZE(driver_mon_items_w_cb)
 
