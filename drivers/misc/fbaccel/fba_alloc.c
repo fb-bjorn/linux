@@ -170,7 +170,7 @@ static struct fba_dma *fba_alloc_translate_dma(struct fba_ctx *ctx,
 					       void __user *buf_addr,
 					       uint64_t enc_size)
 {
-	size_t size = enc_size & AT_DMA_SIZE_MASK;
+	uint64_t size = enc_size & AT_DMA_SIZE_MASK;
 	enum dma_data_direction dir;
 	uint64_t enc_dir;
 

@@ -51,6 +51,13 @@
  */
 #define MAX_CHANNELS 128
 
+/* Constants which describe driver-device PRP list binary format */
+#define FBA_PAGE_SHIFT 12
+#define FBA_PAGE_SIZE (1ULL << FBA_PAGE_SHIFT)
+#define FBA_PAGE_MASK (~(FBA_PAGE_SIZE - 1))
+#define FBA_MAX_SEGMENT_SIZE (FBA_PAGE_SIZE * (1ULL << (FBA_PAGE_SHIFT - 1)))
+#define FBA_NEXT_PRP_PAGE_INDEX ((FBA_PAGE_SIZE / sizeof(uint64_t)) - 1)
+
 struct fba_alloc;
 struct fba_ctx;
 struct fba_channel;
@@ -435,7 +442,7 @@ void *fba_alloc_map_to_va(struct fba_alloc *alloc, __le64 addr);
 
 /* DMA Operations */
 struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
-			    size_t size, int dir, bool force_prp);
+			    uint64_t size, int dir, bool force_prp);
 void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma);
 
 /*

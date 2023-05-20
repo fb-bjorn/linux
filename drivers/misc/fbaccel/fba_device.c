@@ -901,7 +901,6 @@ static int fba_pci_init(struct fba_device *fba_dev)
 		goto err_release_regions;
 	}
 
-	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 	dma_set_seg_boundary(&pdev->dev, ULONG_MAX);
 
 	pci_set_master(pdev);

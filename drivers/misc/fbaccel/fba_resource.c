@@ -334,12 +334,41 @@ err_put_resources:
 	return ret;
 }
 
+static int fba_init_max_seg_size(struct fba_device *fba_dev)
+{
+	int ret;
+
+	fba_dev->max_dma_segment_size =
+		min(fba_dev->max_dma_segment_size, FBA_MAX_SEGMENT_SIZE);
+
+	if ((fba_dev->max_dma_segment_size & ~FBA_PAGE_MASK) != 0) {
+		fba_dev_err(
+			fba_dev,
+			"max_dma_segment_size=%lu must be a multiple of %lu",
+			fba_dev->max_dma_segment_size, FBA_PAGE_SIZE);
+		return -EINVAL;
+	}
+
+	ret = dma_set_max_seg_size(&fba_dev->pdev->dev,
+				   fba_dev->max_dma_segment_size);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed to set DMA max segment size");
+		return ret;
+	}
+
+	return 0;
+}
+
 int fba_resource_init(struct fba_device *fba_dev)
 {
 	int ret;
 
 	ret = fba_fetch_info_words(fba_dev);
 	if (ret < 0)
+		return ret;
+
+	ret = fba_init_max_seg_size(fba_dev);
+	if (ret != 0)
 		return ret;
 
 	return fba_init_resources(fba_dev);

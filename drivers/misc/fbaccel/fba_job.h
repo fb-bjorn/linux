@@ -58,7 +58,7 @@ void fba_job_set_callback(struct fba_job *job, fba_job_cb_t cb, void *cb_data);
 
 /* Map a DMA buffer and add it to the list of DMAs tracked by the job */
 struct fba_dma *fba_job_dma_map(struct fba_ctx *ctx, struct fba_job *job,
-				void __user *data, size_t size, int dir,
+				void __user *data, uint64_t size, int dir,
 				bool force_prp_ok);
 
 /* Increment reference count of a job */
