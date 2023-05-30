@@ -55,7 +55,17 @@ int fba_request_irq(struct pci_dev *dev, unsigned int nr, irq_handler_t handler,
  */
 void fba_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 {
-	kfree(free_irq(pci_irq_vector(dev, nr), dev_id));
+	int ret;
+
+	ret = pci_irq_vector(dev, nr);
+	if (ret < 0) {
+		dev_err(&dev->dev,
+			"fba_free_irq: unable to get vector for %d, can't free the irq",
+			nr);
+		return;
+	}
+
+	kfree(free_irq(ret, dev_id));
 }
 
 void __iomem *fba_util_get_bar_ptr(struct fba_device *fba_dev, int bar,

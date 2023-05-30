@@ -47,6 +47,11 @@ module_param(disable_logger, bool, 0444);
 MODULE_PARM_DESC(disable_logger,
 		 "If true, disable out-of-band firmware logging");
 
+static int admin_cmd_timeout;
+module_param(admin_cmd_timeout, int, 0444);
+MODULE_PARM_DESC(admin_cmd_timeout,
+		 "Override default admin command timeout; in milliseconds");
+
 static void fba_async_probe(void *data, async_cookie_t cookie);
 
 static ssize_t boot_file_show(struct device *dev, struct device_attribute *attr,
@@ -729,7 +734,7 @@ static void fba_device_fw_setup_platform(struct fba_device *fba_dev)
 		fba_dev->num_retries = MAX_RETRIES;
 
 	fba_dev->admin_cmd_timeout_ms = get_admin_command_timeout(fba_dev);
-	if (!fba_dev->admin_cmd_timeout_ms) {
+	if (!fba_dev->admin_cmd_timeout_ms && admin_cmd_timeout == 0) {
 		if (fba_dev->platform_type == PLATFORM_SILICON)
 			fba_dev->admin_cmd_timeout_ms =
 				SAIL_ADMIN_CMD_MIN_TIMEOUT_MS;
@@ -1235,7 +1240,9 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	fba_dev->pcie_boot_en = pcie_boot_en;
 
 	fba_dev->num_retries = MAX_RETRIES;
-	fba_dev->admin_cmd_timeout_ms = SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+	fba_dev->admin_cmd_timeout_ms = admin_cmd_timeout ?
+						      admin_cmd_timeout :
+						      SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
 
 	return fba_device_init(fba_dev);
 }
