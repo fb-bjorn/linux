@@ -792,6 +792,8 @@ static int fba_device_fw_init(struct fba_device *fba_dev)
 		goto err_resource_exit;
 	}
 
+	fba_dev->fw_init_done = true;
+
 	fba_channel_start_heartbeats(fba_dev);
 
 	return 0;
@@ -808,6 +810,11 @@ err_channel_exit:
 static int fba_device_fw_exit(struct fba_device *fba_dev)
 {
 	int ret;
+
+	if (!fba_dev->fw_init_done) {
+		fba_dev_info(fba_dev, "FW not initialized, skipping exit");
+		return 0;
+	}
 
 	/*
 	 * Stop monitoring/polling and wait for any outstanding work to
@@ -1251,7 +1258,7 @@ static void fbaccel_remove(struct pci_dev *pdev)
 {
 	struct fba_device *fba_dev;
 
-	dev_info(&pdev->dev, "Remove.");
+	dev_info(&pdev->dev, "Remove device at %s", pdev->bus->name);
 
 	/* Wait for any FW load in progress to complete */
 	async_synchronize_full();

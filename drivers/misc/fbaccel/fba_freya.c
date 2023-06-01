@@ -1397,7 +1397,7 @@ static int freya_load_firmware(struct fba_device *fba_dev)
 /*
  * Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
  * callback is set to reset CCP and CIP. iATU Status page is used to listen
- * for when the CCP CIP reset is done.
+ * for when the CCP CIP reset is done. For resets, use minimum retry count
  */
 static int reset_ccp(struct fba_device *fba_dev)
 {
@@ -1410,19 +1410,23 @@ static int reset_ccp(struct fba_device *fba_dev)
 	set_mailbox(fba_dev, M7_MBOX_CTRL, CCP_CIP_RESET);
 	fba_dev_info(fba_dev, "Waiting for M7 to reset CCP and CIP.");
 	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_CIP_RESET_OFS,
-				  CCP_CIP_RESET_DONE, fba_dev->num_retries);
+				  CCP_CIP_RESET_DONE, MIN_RETRIES);
 	if (ret) {
 		fba_dev_err(fba_dev,
 			    "Failed waiting for iATU CIP Reset Done Status.");
 		return ret;
 	}
+
 	/* Resetting the iATU CIP Reset ACK signal */
 	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_CIP_RESET_OFS, 0,
 			  sizeof(uint32_t));
 	set_mailbox(fba_dev, M7_MBOX_CTRL, STATUS_RESET);
+	fba_dev_info(fba_dev, "Waiting for M7 to reset MBOX status");
 	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
-					STATUS_RESET_DONE,
-					fba_dev->num_retries);
+					STATUS_RESET_DONE, MIN_RETRIES);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed waiting for M7 status reset");
+	}
 	return ret;
 }
 

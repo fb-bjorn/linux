@@ -342,6 +342,9 @@ struct fba_device {
 	/* Indicated WDT on control core failed */
 	bool ccp_wdt_failed;
 
+	/* intialization status */
+	bool fw_init_done;
+
 	struct fba_mon mon;
 
 	/* UltraSoC sub-device */
