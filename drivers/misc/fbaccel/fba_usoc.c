@@ -53,7 +53,6 @@
 struct fba_usoc_dev {
 	spinlock_t lock;
 	int open_cnt;
-	struct completion usoc_idle;
 
 	struct pci_dev *pci_dev;
 	void __iomem *regs;
@@ -112,7 +111,6 @@ static int fba_usoc_release(struct inode *inode, struct file *file)
 
 		dev->us_efd_ctx = NULL;
 		dev->ds_efd_ctx = NULL;
-		complete(&dev->usoc_idle);
 	}
 
 	spin_unlock_irq(&dev->lock);
@@ -176,7 +174,6 @@ static void fba_usoc_vm_close(struct vm_area_struct *vma)
 
 		dev->us_efd_ctx = NULL;
 		dev->ds_efd_ctx = NULL;
-		complete(&dev->usoc_idle);
 	}
 	spin_unlock_irq(&dev->lock);
 	if (us_ctx != NULL)
@@ -294,7 +291,6 @@ fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
 	dev->msix_irq_ds = msix_irq_ds;
 	dev->msix_irq_us = msix_irq_us;
 	spin_lock_init(&dev->lock);
-	init_completion(&dev->usoc_idle);
 
 	ret = fba_request_irq(pdev, msix_irq_ds, fba_usoc_ds_isr, NULL, dev,
 			      "%s%d-usoc-ds", name, dev->id);
@@ -348,18 +344,7 @@ err_put_device:
 
 void fba_usoc_unregister(struct fba_usoc_dev *dev)
 {
-	bool wait_idle = false;
-
 	cdev_del(&dev->cdev);
-
-	spin_lock_irq(&dev->lock);
-	if (dev->open_cnt != 0) {
-		init_completion(&dev->usoc_idle);
-		wait_idle = true;
-	}
-	spin_unlock_irq(&dev->lock);
-	if (wait_idle)
-		wait_for_completion(&dev->usoc_idle);
 
 	/* disable device interrupts */
 	writel(0, dev->regs + USOC_AXI_US_INT_CTL_REG);
