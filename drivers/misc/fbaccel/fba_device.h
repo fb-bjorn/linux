@@ -86,11 +86,19 @@ struct logger_params {
 	char name[32];
 };
 
+/* Maps bus numbers to device IDs, assumes all bus numbers are unique */
+struct fba_id_map {
+	struct list_head head;
+	char bus_num;
+	int dev_id;
+};
+
 /* Per-application configuration parameters */
 struct fba_cfg {
 	/* Driver name prefix */
 	const char *name;
 	struct ida *devnode_ida;
+	struct list_head *devids;
 
 	/* Mailbox access params */
 	int host_ipc_bar;

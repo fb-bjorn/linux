@@ -273,7 +273,6 @@ static void fba_device_unregister(struct fba_device *fba_dev)
 	mutex_lock(&fba_devices_mtx);
 	fba_devices[fba_dev->minor] = NULL;
 	device_destroy(fba_class, MKDEV(MAJOR(fba_devt), fba_dev->minor));
-	ida_free(fba_dev->cfg->devnode_ida, fba_dev->id);
 	mutex_unlock(&fba_devices_mtx);
 }
 
@@ -1063,6 +1062,8 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 static int fba_device_init(struct fba_device *fba_dev)
 {
 	int i, ret;
+	struct list_head *elem;
+	struct fba_id_map *id_map;
 
 	kref_init(&fba_dev->ref);
 	spin_lock_init(&fba_dev->resources_lock);
@@ -1095,10 +1096,33 @@ static int fba_device_init(struct fba_device *fba_dev)
 		goto err_put_device;
 	}
 
-	fba_dev->id = ida_alloc(fba_dev->cfg->devnode_ida, GFP_KERNEL);
-	if (fba_dev->id < 0) {
-		ret = fba_dev->id;
-		goto err_free_minor;
+	id_map = NULL;
+	list_for_each(elem, fba_dev->cfg->devids) {
+		id_map = list_entry(elem, struct fba_id_map, head);
+		if (id_map->bus_num == fba_dev->pdev->bus->number) {
+			dev_info(&fba_dev->pdev->dev,
+				 "Matched bus 0x%x to allocated ID %d",
+				 id_map->bus_num, id_map->dev_id);
+			fba_dev->id = id_map->dev_id;
+			break;
+		}
+	}
+
+	if (id_map == NULL || id_map->bus_num != fba_dev->pdev->bus->number) {
+		fba_dev->id = ida_alloc(fba_dev->cfg->devnode_ida, GFP_KERNEL);
+		if (fba_dev->id < 0) {
+			ret = fba_dev->id;
+			goto err_free_minor;
+		}
+
+		id_map = kzalloc(sizeof(struct fba_id_map), GFP_KERNEL);
+		INIT_LIST_HEAD(&id_map->head);
+		id_map->dev_id = fba_dev->id;
+		id_map->bus_num = fba_dev->pdev->bus->number;
+		list_add(&id_map->head, fba_dev->cfg->devids);
+
+		dev_info(&fba_dev->pdev->dev, "Allocated bus 0x%x dev ID %d",
+			 id_map->bus_num, id_map->dev_id);
 	}
 
 	fba_dev->name =
@@ -1158,7 +1182,6 @@ err_pci_exit:
 err_free_wq:
 	destroy_workqueue(fba_dev->msix_wq);
 err_free_id:
-	ida_free(fba_dev->cfg->devnode_ida, fba_dev->id);
 err_free_minor:
 	mutex_lock(&fba_devices_mtx);
 	fba_devices[fba_dev->minor] = NULL;
@@ -1236,7 +1259,10 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct fba_device *fba_dev;
 
-	dev_info(&pdev->dev, "Probe.\n");
+	dev_info(&pdev->dev, "Probe slot=%s bus=%s bus_num=0x%x\n",
+		 pdev->slot ? pci_slot_name(pdev->slot) : "n/a",
+		 pdev->bus->name, pdev->bus->number);
+
 	fba_dev = kzalloc(sizeof(*fba_dev), GFP_KERNEL);
 	if (fba_dev == NULL)
 		return -ENOMEM;
@@ -1326,6 +1352,10 @@ static int __init fbaccel_driver_init(void)
 {
 	int ret;
 
+	INIT_LIST_HEAD(freya_cfg.devids);
+	INIT_LIST_HEAD(artemis_cfg.devids);
+	INIT_LIST_HEAD(tenjin_cfg.devids);
+
 	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
 	if (IS_ERR(fba_class))
 		return PTR_ERR(fba_class);
@@ -1357,6 +1387,27 @@ err_class_destroy:
 
 static void __exit fbaccel_driver_exit(void)
 {
+	struct list_head *elem;
+	struct fba_id_map *id_map;
+	struct list_head *maps[] = { freya_cfg.devids, artemis_cfg.devids,
+				     tenjin_cfg.devids };
+	struct ida *idas[] = {
+		freya_cfg.devnode_ida,
+		artemis_cfg.devnode_ida,
+		tenjin_cfg.devnode_ida,
+	};
+	int i;
+
+	// free device IDs that are allocated and maintained throughout
+	// the lifetime of the driver
+	for (i = 0; i < ARRAY_SIZE(maps); i++) {
+		list_for_each(elem, maps[i]) {
+			id_map = list_entry(elem, struct fba_id_map, head);
+			ida_free(idas[i], id_map->dev_id);
+			kfree(id_map);
+		}
+	}
+
 	fba_subdevice_driver_exit();
 	cdev_del(&fba_cdev);
 	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);

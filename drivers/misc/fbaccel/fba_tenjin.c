@@ -32,6 +32,7 @@ MODULE_PARM_DESC(tenjin_boot_args, "Boot arguments provided to firmware");
 
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(tenjin_ida);
+static struct list_head devids;
 
 #define BAR_0 0
 #define BAR_1 2
@@ -1124,6 +1125,7 @@ static const struct fba_impl_ops tenjin_impl_ops = {
 const struct fba_cfg tenjin_cfg = {
 	.name = DRV_NAME,
 	.devnode_ida = &tenjin_ida,
+	.devids = &devids,
 	.host_ipc_bar = HOST_IPC_BAR,
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
