@@ -24,11 +24,15 @@ static void free_prp_list(struct device *dev, struct list_head *head)
 	}
 }
 
-static inline uint64_t build_entry(dma_addr_t addr, uint64_t s)
+static uint64_t build_entry(dma_addr_t addr, size_t size)
 {
-	uint64_t pages = DIV_ROUND_UP(s, FBA_PAGE_SIZE) - 1;
+	uint64_t npages = DIV_ROUND_UP(size, FBA_PAGE_SIZE) - 1;
 
-	return (addr | (pages << 1ULL));
+	WARN_ON_ONCE(size == 0);
+	WARN_ON_ONCE(size > FBA_MAX_SEGMENT_SIZE);
+	WARN_ON_ONCE((addr & ~FBA_PAGE_MASK) != 0);
+
+	return addr | (npages << 1ULL);
 }
 
 static struct fba_dma_prp_node *build_prp_node(struct device *dev)
@@ -52,78 +56,6 @@ static struct fba_dma_prp_node *build_prp_node(struct device *dev)
 	return node;
 }
 
-/* Check assumptions about sg lists after dma_map_sg() */
-static int validate_sg_list(struct fba_device *fba_dev, struct scatterlist *sg,
-			    unsigned int map_cnt, uint64_t size,
-			    uint64_t max_seg_size)
-{
-	uint64_t sg_size, sg_addr, size_offs, addr_offs;
-	uint64_t size_accum = 0;
-	unsigned int sg_cnt = 0;
-	int ret = 0;
-
-	while (sg) {
-		sg_cnt += 1;
-
-		sg_addr = sg_dma_address(sg);
-		sg_size = sg_dma_len(sg);
-		size_accum += sg_size;
-
-		/* All sg sizes must be within [1..max_seg_size] inclusive */
-		if ((sg_size < 1) || (sg_size > max_seg_size)) {
-			fba_dev_err(
-				fba_dev,
-				"sg_size=%llu outside expected bounds [1..%llu]",
-				sg_size, max_seg_size);
-			ret = -EINVAL;
-		}
-
-		if (sg_cnt > 1) {
-			size_offs = sg_size & ~FBA_PAGE_MASK;
-			addr_offs = sg_addr & ~FBA_PAGE_MASK;
-
-			/* All sgs past the first must have page-aligned address */
-			if (addr_offs != 0) {
-				fba_dev_err(
-					fba_dev,
-					"sg[%u] addr=0x%llX is not page-aligned",
-					sg_cnt - 1, sg_addr);
-				ret = -EINVAL;
-			}
-
-			/* All sgs in the middle must have page-multiple size */
-			if ((sg_cnt < map_cnt) && (size_offs != 0)) {
-				fba_dev_err(
-					fba_dev,
-					"sg[%u] size=0x%llX is not page-multiple",
-					sg_cnt - 1, sg_size);
-				ret = -EINVAL;
-			}
-		}
-
-		if (sg_cnt >= map_cnt)
-			break;
-
-		sg = sg_next(sg);
-	}
-
-	if (sg_cnt != map_cnt) {
-		fba_dev_err(fba_dev,
-			    "Only traversed %u out of expected %u sg entries",
-			    sg_cnt, map_cnt);
-		ret = -EINVAL;
-	}
-
-	if (size_accum != size) {
-		fba_dev_err(fba_dev,
-			    "SG sizes only sum to %llu out of %llu bytes",
-			    size_accum, size);
-		ret = -EINVAL;
-	}
-
-	return ret;
-}
-
 /*
  * Generate PRP entries:
  * Each entry in the PRP has the following format:
@@ -145,12 +77,11 @@ static int generate_prp_list(struct fba_device *fba_dev, struct scatterlist *sg,
 {
 	struct device *dev = &fba_dev->pdev->dev;
 	struct fba_dma_prp_node *cur_node;
-	struct fba_dma_prp_node *next_node;
 	struct scatterlist *sg_cur;
 	dma_addr_t sg_paddr;
 	uint64_t sg_size, sg_size_rem, page_offset, page_rem;
 	uint32_t prp_idx;
-	unsigned int sg_cnt;
+	unsigned int sg_idx;
 	int ret;
 
 	/* We need at least 1 PRP page */
@@ -163,7 +94,7 @@ static int generate_prp_list(struct fba_device *fba_dev, struct scatterlist *sg,
 
 	prp_idx = 0;
 	sg_cur = sg;
-	sg_cnt = 1;
+	sg_idx = 0;
 	sg_paddr = sg_dma_address(sg_cur);
 	sg_size = sg_dma_len(sg_cur);
 
@@ -178,29 +109,44 @@ static int generate_prp_list(struct fba_device *fba_dev, struct scatterlist *sg,
 		sg_size_rem = sg_size;
 	}
 
-	if (sg_size_rem)
-		cur_node->prp[prp_idx++] =
-			build_entry(sg_paddr + page_rem, sg_size_rem);
+	sg_paddr += page_rem;
+	sg_size = sg_size_rem;
 
-	for (; (sg_cur = sg_next(sg_cur)) && (sg_cnt < map_cnt); sg_cnt++) {
-		if (unlikely(prp_idx == FBA_NEXT_PRP_PAGE_INDEX)) {
-			next_node = build_prp_node(dev);
-			if (!next_node) {
-				fba_dev_err(fba_dev,
-					    "failed to build PRP node");
-				ret = -ENOMEM;
-				goto error;
+	while (sg_cur && (sg_idx < map_cnt)) {
+		while (sg_size > 0) {
+			uint64_t entry_size;
+
+			if (unlikely(prp_idx == FBA_NEXT_PRP_PAGE_INDEX)) {
+				struct fba_dma_prp_node *next_node;
+
+				next_node = build_prp_node(dev);
+				if (!next_node) {
+					fba_dev_err(fba_dev,
+						    "failed to build PRP node");
+					ret = -ENOMEM;
+					goto error;
+				}
+
+				cur_node->prp[prp_idx] = next_node->paddr;
+				list_add_tail(&next_node->list, head_list);
+				cur_node = next_node;
+				prp_idx = 0;
 			}
 
-			cur_node->prp[prp_idx] = next_node->paddr;
-			list_add_tail(&next_node->list, head_list);
-			cur_node = next_node;
-			prp_idx = 0;
+			entry_size =
+				min(sg_size, fba_dev->max_dma_segment_size);
+			cur_node->prp[prp_idx++] =
+				build_entry(sg_paddr, entry_size);
+			sg_paddr += entry_size;
+			sg_size -= entry_size;
 		}
 
-		sg_paddr = sg_dma_address(sg_cur);
-		sg_size = sg_dma_len(sg_cur);
-		cur_node->prp[prp_idx++] = build_entry(sg_paddr, sg_size);
+		sg_cur = sg_next(sg_cur);
+		if (sg_cur) {
+			sg_paddr = sg_dma_address(sg_cur);
+			sg_size = sg_dma_len(sg_cur);
+		}
+		sg_idx++;
 	}
 
 	return 0;
@@ -278,9 +224,10 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 			ret = -EFAULT;
 		goto err_dma_free;
 	}
+
 	ret = sg_alloc_table_from_pages_segment(
 		&dma->sg, dma->pages, dma->get_cnt, user_addr & ~PAGE_MASK,
-		size, fba_dev->max_dma_segment_size, GFP_KERNEL);
+		size, dma_get_max_seg_size(dev), GFP_KERNEL);
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to allocate sg_table.");
 		goto err_dma_free;
@@ -291,16 +238,6 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 	if (dma->map_cnt == 0) {
 		fba_dev_err(fba_dev, "Failed to map sg.");
 		ret = -EINVAL;
-		goto err_dma_free;
-	}
-
-	ret = validate_sg_list(fba_dev, dma->sg.sgl, dma->map_cnt, size,
-			       fba_dev->max_dma_segment_size);
-	if (ret) {
-		fba_dev_err(
-			fba_dev,
-			"Failed to validate scatterlist: size=%llu, map_cnt=%u",
-			size, dma->map_cnt);
 		goto err_dma_free;
 	}
 
@@ -333,6 +270,7 @@ void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma)
 {
 	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
 	struct device *dev = &fba_dev->pdev->dev;
+	bool is_dirty;
 
 	if (dma->map_cnt)
 		dma_unmap_sg(dev, dma->sg.sgl, dma->sg.nents, dma->flags);
@@ -346,9 +284,11 @@ void fba_dma_free(struct fba_ctx *ctx, struct fba_dma *dma)
 	 * NOTE: If we are reading from device, always set pages dirty even on
 	 * failure in case we want to examine whatever we managed to get.
 	 */
-	unpin_user_pages_dirty_lock(dma->pages, dma->get_cnt,
-				    dma->flags == DMA_FROM_DEVICE ||
-					    dma->flags == DMA_BIDIRECTIONAL);
+	if (dma->get_cnt > 0) {
+		is_dirty = dma->flags == DMA_FROM_DEVICE ||
+			   dma->flags == DMA_BIDIRECTIONAL;
+		unpin_user_pages_dirty_lock(dma->pages, dma->get_cnt, is_dirty);
+	}
 
 	kvfree(dma->pages);
 

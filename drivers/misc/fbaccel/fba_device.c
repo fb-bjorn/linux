@@ -895,6 +895,12 @@ static int fba_pci_init(struct fba_device *fba_dev)
 		goto err_disable_device;
 	}
 
+	ret = dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed to set DMA max segment size.");
+		goto err_release_regions;
+	}
+
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
 		fba_dev_err(fba_dev, "Failed to set DMA mask.");
