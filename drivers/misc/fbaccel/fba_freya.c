@@ -34,7 +34,9 @@
 
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(freya_ida);
-static struct list_head devids;
+static DEFINE_IDA(artemis_ida);
+static struct list_head freya_devids;
+static struct list_head artemis_devids;
 
 static bool ddr_bypass;
 static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
@@ -1767,7 +1769,7 @@ static const struct fba_impl_ops artemis_impl_ops = {
 const struct fba_cfg freya_cfg = {
 	.name = FREYA_DRV_NAME,
 	.devnode_ida = &freya_ida,
-	.devids = &devids,
+	.devids = &freya_devids,
 	.host_ipc_bar = HOST_IPC_BAR,
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
@@ -1806,8 +1808,8 @@ const struct fba_cfg freya_cfg = {
 
 const struct fba_cfg artemis_cfg = {
 	.name = ARTEMIS_DRV_NAME,
-	.devnode_ida = &freya_ida,
-	.devids = &devids,
+	.devnode_ida = &artemis_ida,
+	.devids = &artemis_devids,
 	.host_ipc_bar = HOST_IPC_BAR,
 	.host_ipc_stride = HOST_IPC_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,

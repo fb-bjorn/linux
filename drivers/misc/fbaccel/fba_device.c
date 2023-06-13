@@ -1397,13 +1397,15 @@ static void __exit fbaccel_driver_exit(void)
 		tenjin_cfg.devnode_ida,
 	};
 	int i;
+	struct list_head *tmp;
 
 	// free device IDs that are allocated and maintained throughout
 	// the lifetime of the driver
 	for (i = 0; i < ARRAY_SIZE(maps); i++) {
-		list_for_each(elem, maps[i]) {
+		list_for_each_safe(elem, tmp, maps[i]) {
 			id_map = list_entry(elem, struct fba_id_map, head);
 			ida_free(idas[i], id_map->dev_id);
+			list_del(elem);
 			kfree(id_map);
 		}
 	}
