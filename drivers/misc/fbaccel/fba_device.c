@@ -1066,7 +1066,7 @@ static void fba_async_probe(void *data, async_cookie_t cookie)
 
 static int fba_device_init(struct fba_device *fba_dev)
 {
-	int i, ret;
+	int ret;
 	struct list_head *elem;
 	struct fba_id_map *id_map;
 
@@ -1085,22 +1085,6 @@ static int fba_device_init(struct fba_device *fba_dev)
 	init_waitqueue_head(&fba_dev->write_q);
 	INIT_LIST_HEAD(&fba_dev->ctx_list);
 
-	ret = -ENOSPC;
-	mutex_lock(&fba_devices_mtx);
-	for (i = 0; i < FBA_MAX_DEVS; i++) {
-		if (fba_devices[i] == NULL) {
-			fba_dev->minor = i;
-			fba_devices[i] = fba_dev;
-			ret = 0;
-			break;
-		}
-	}
-	mutex_unlock(&fba_devices_mtx);
-	if (ret) {
-		dev_err(&fba_dev->pdev->dev, "Failed to allocate device ID.");
-		goto err_put_device;
-	}
-
 	id_map = NULL;
 	list_for_each(elem, fba_dev->cfg->devids) {
 		id_map = list_entry(elem, struct fba_id_map, head);
@@ -1115,9 +1099,12 @@ static int fba_device_init(struct fba_device *fba_dev)
 
 	if (id_map == NULL || id_map->bus_num != fba_dev->pdev->bus->number) {
 		fba_dev->id = ida_alloc(fba_dev->cfg->devnode_ida, GFP_KERNEL);
-		if (fba_dev->id < 0) {
+		if (fba_dev->id < 0 || fba_dev->id >= FBA_MAX_DEVS) {
+			dev_err(&fba_dev->pdev->dev,
+				"Can't allocate ID for bus 0x%x\n",
+				id_map->bus_num);
 			ret = fba_dev->id;
-			goto err_free_minor;
+			goto err_put_device;
 		}
 
 		id_map = kzalloc(sizeof(struct fba_id_map), GFP_KERNEL);
@@ -1128,6 +1115,24 @@ static int fba_device_init(struct fba_device *fba_dev)
 
 		dev_info(&fba_dev->pdev->dev, "Allocated bus 0x%x dev ID %d",
 			 id_map->bus_num, id_map->dev_id);
+	}
+
+	// minor is kept the same as device ID
+	// minor is used to create usoc / uart device names
+	// device id is used to create device name
+	fba_dev->minor = fba_dev->id;
+	ret = -ENOSPC;
+	mutex_lock(&fba_devices_mtx);
+	if (fba_devices[fba_dev->minor] == NULL) {
+		fba_devices[fba_dev->minor] = fba_dev;
+		ret = 0;
+	}
+	mutex_unlock(&fba_devices_mtx);
+	if (ret) {
+		dev_err(&fba_dev->pdev->dev,
+			"Device minor %d already allocated in fba_device\n",
+			fba_dev->minor);
+		goto err_put_device;
 	}
 
 	fba_dev->name =
@@ -1187,10 +1192,6 @@ err_pci_exit:
 err_free_wq:
 	destroy_workqueue(fba_dev->msix_wq);
 err_free_id:
-err_free_minor:
-	mutex_lock(&fba_devices_mtx);
-	fba_devices[fba_dev->minor] = NULL;
-	mutex_unlock(&fba_devices_mtx);
 err_put_device:
 	fba_device_put(fba_dev);
 

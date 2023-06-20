@@ -600,6 +600,15 @@ struct fba_logger_dev *fba_logger_register(struct fba_device *fba_dev)
 	if (ret)
 		goto err_destroy_wq;
 
+	// dev_id is used all over this file as the minor, unlike in other devices
+	// so adding a sanity check to avoid confusion
+	if (fba_dev->id != fba_dev->minor) {
+		dev_err(&fba_dev->pdev->dev,
+			"%s: inconsistent dev ID and minor (%d and %d)",
+			fba_dev->name, fba_dev->id, fba_dev->minor);
+		goto err_free_irq;
+	}
+
 	pdev = device_create(fba_logger_class, parent,
 			     MKDEV(MAJOR(fba_logger_devt), fba_dev->id), ldev,
 			     "%slog", fba_dev->name);
