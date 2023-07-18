@@ -840,7 +840,9 @@ static void fba_device_free(struct kref *kref)
 	mutex_destroy(&fba_dev->ctx_mtx);
 	ida_destroy(&fba_dev->channel_ids);
 	ida_destroy(&fba_dev->ctx_ids);
-	destroy_workqueue(fba_dev->msix_wq);
+	if (fba_dev->msix_wq) {
+		destroy_workqueue(fba_dev->msix_wq);
+	}
 	kfree(fba_dev->name);
 
 	kfree(fba_dev);
