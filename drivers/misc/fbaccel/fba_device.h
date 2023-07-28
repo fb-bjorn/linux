@@ -44,6 +44,8 @@
 
 #define MAX_LOGGER_SRCS 2
 
+#define FBA_MAX_DEVS 32
+
 /*
  * MAX number of channels
  * This will be reduced to the number of advertised channels by the device
@@ -96,7 +98,7 @@ struct logger_params {
 /* Maps bus numbers to device IDs, assumes all bus numbers are unique */
 struct fba_id_map {
 	struct list_head head;
-	char bus_num;
+	unsigned char bus_num;
 	int dev_id;
 };
 

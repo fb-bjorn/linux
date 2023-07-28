@@ -20,8 +20,6 @@
 #include "fba_uart.h"
 #include "fba_usoc.h"
 
-#define FBA_MAX_DEVS 32
-
 static dev_t fba_devt;
 static struct class *fba_class;
 static struct cdev fba_cdev;

@@ -14,7 +14,6 @@
 #include "fba_device.h"
 
 #define DRV_NAME "fbalogger"
-#define LOGGER_PCI_MINORS 12
 
 /* Device buffer header offsets */
 #define READ_PTR_OFFSET 0
@@ -34,7 +33,7 @@ static struct class *fba_logger_class;
 static int driver_ringbuf_size = 0x20000;
 
 static DEFINE_MUTEX(fba_logger_mtx);
-static struct fba_logger_dev *fba_logger_devices[LOGGER_PCI_MINORS];
+static struct fba_logger_dev *fba_logger_devices[FBA_MAX_DEVS];
 
 module_param(driver_ringbuf_size, int, 0444);
 MODULE_PARM_DESC(driver_ringbuf_size,
@@ -689,7 +688,7 @@ int fba_logger_driver_init(void)
 	 * fba_logger_devt step is registering for the <major, minor> range of
 	 * device files.
 	 */
-	ret = alloc_chrdev_region(&fba_logger_devt, 0, LOGGER_PCI_MINORS,
+	ret = alloc_chrdev_region(&fba_logger_devt, 0, FBA_MAX_DEVS,
 				  "fba_logger");
 	if (ret < 0)
 		goto err_class_destroy;
@@ -700,14 +699,14 @@ int fba_logger_driver_init(void)
 	 */
 	cdev_init(&fba_logger_cdev, &fba_logger_fops);
 
-	ret = cdev_add(&fba_logger_cdev, fba_logger_devt, LOGGER_PCI_MINORS);
+	ret = cdev_add(&fba_logger_cdev, fba_logger_devt, FBA_MAX_DEVS);
 
 	if (ret < 0)
 		goto err_free_chrdev;
 
 	return ret;
 err_free_chrdev:
-	unregister_chrdev_region(fba_logger_devt, LOGGER_PCI_MINORS);
+	unregister_chrdev_region(fba_logger_devt, FBA_MAX_DEVS);
 err_class_destroy:
 	class_destroy(fba_logger_class);
 	return ret;
@@ -717,5 +716,5 @@ void fba_logger_driver_exit(void)
 {
 	cdev_del(&fba_logger_cdev);
 	class_destroy(fba_logger_class);
-	unregister_chrdev_region(fba_logger_devt, LOGGER_PCI_MINORS);
+	unregister_chrdev_region(fba_logger_devt, FBA_MAX_DEVS);
 }

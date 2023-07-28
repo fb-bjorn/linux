@@ -43,8 +43,6 @@
 #define USOC_AXI_DS_CFG_MGI_REG 0x30
 #define USOC_AXI_DS_CFG_MGI_VAL 0xb01
 
-#define USOC_PCI_MINORS 16
-
 #define DRIVER_DESC "PCI driver for Ultrasoc AXI Communicator"
 
 #define USOC_SET_US_EFD _IOR('U', 0x1, int)
@@ -373,8 +371,7 @@ int __init fba_usoc_driver_init(void)
 		return PTR_ERR(fba_usoc_class);
 	fba_usoc_class->devnode = fba_usoc_devnode;
 
-	ret = alloc_chrdev_region(&fba_usoc_devt, 0, USOC_PCI_MINORS,
-				  "fba_usoc");
+	ret = alloc_chrdev_region(&fba_usoc_devt, 0, FBA_MAX_DEVS, "fba_usoc");
 	if (ret < 0) {
 		class_destroy(fba_usoc_class);
 		return ret;
@@ -385,6 +382,6 @@ int __init fba_usoc_driver_init(void)
 
 void fba_usoc_driver_exit(void)
 {
-	unregister_chrdev_region(fba_usoc_devt, USOC_PCI_MINORS);
+	unregister_chrdev_region(fba_usoc_devt, FBA_MAX_DEVS);
 	class_destroy(fba_usoc_class);
 }

@@ -41,9 +41,6 @@
 #define FBA_UART_TX_FIFO_OFFS 4
 #define FBA_UART_RX_FIFO_OFFS 0x12
 
-/* FBA_UART_MAX_PORTS: maximum number of FBA UARTs */
-#define FBA_UART_MAX_PORTS 16
-
 /* FBA_UART_NAME: our driver's name that we pass to the operating system */
 #define FBA_UART_NAME "fba_uart"
 
@@ -401,7 +398,7 @@ static struct uart_driver fba_uart_uart_driver = {
 	.owner = THIS_MODULE,
 	.driver_name = FBA_UART_NAME,
 	.dev_name = FBA_UART_TTY_PREFIX,
-	.nr = FBA_UART_MAX_PORTS,
+	.nr = FBA_MAX_DEVS,
 };
 
 struct fba_uart_dev *fba_uart_register(struct fba_device *fba_dev,
