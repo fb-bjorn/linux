@@ -36,6 +36,7 @@
 #define USOC_BAR 1
 #define USOC_OFFSET 0x2000
 
+#define USOC_AXI_COMMUNICATOR_OFFSET 0x4000
 #define USOC_AXI_US_INT_CTL_REG 4
 #define USOC_AXI_US_INT_STS_REG 8
 #define USOC_AXI_DS_INT_CTL_REG 0x84
@@ -43,7 +44,7 @@
 #define USOC_AXI_DS_CFG_MGI_REG 0x30
 #define USOC_AXI_DS_CFG_MGI_VAL 0xb01
 
-#define DRIVER_DESC "PCI driver for Ultrasoc AXI Communicator"
+#define DRIVER_DESC "PCI driver for Ultrasoc"
 
 #define USOC_SET_US_EFD _IOR('U', 0x1, int)
 #define USOC_SET_DS_EFD _IOR('U', 0x2, int)
@@ -190,7 +191,7 @@ static int fba_usoc_mmap(struct file *file, struct vm_area_struct *vma)
 	int ret;
 
 	if (vma->vm_end < vma->vm_start || vma->vm_pgoff != 0 ||
-	    vma_pages(vma) != 1)
+	    (vma_pages(vma) != 10 && vma_pages(vma) != 1))
 		return -EINVAL;
 
 	vma->vm_private_data = dev;
@@ -271,9 +272,13 @@ fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
 	/* Verify mapping is valid. */
 	val = ioread32(regs + USOC_AXI_DS_CFG_MGI_REG);
 	if (val != USOC_AXI_DS_CFG_MGI_VAL) {
-		dev_warn(&pdev->dev, "usoc mapping not valid, %08x != %08x.\n",
-			 val, USOC_AXI_DS_CFG_MGI_VAL);
-		return ERR_PTR(-EIO);
+			val = ioread32(regs + USOC_AXI_COMMUNICATOR_OFFSET + USOC_AXI_DS_CFG_MGI_REG);
+			if (val != USOC_AXI_DS_CFG_MGI_VAL) {
+					dev_warn(&pdev->dev, "usoc mapping not valid, %08x != %08x.\n",
+									val, USOC_AXI_DS_CFG_MGI_VAL);
+					return ERR_PTR(-EIO);
+			}
+			regs += USOC_AXI_COMMUNICATOR_OFFSET;
 	}
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
