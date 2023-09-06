@@ -272,13 +272,15 @@ fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
 	/* Verify mapping is valid. */
 	val = ioread32(regs + USOC_AXI_DS_CFG_MGI_REG);
 	if (val != USOC_AXI_DS_CFG_MGI_VAL) {
-			val = ioread32(regs + USOC_AXI_COMMUNICATOR_OFFSET + USOC_AXI_DS_CFG_MGI_REG);
-			if (val != USOC_AXI_DS_CFG_MGI_VAL) {
-					dev_warn(&pdev->dev, "usoc mapping not valid, %08x != %08x.\n",
-									val, USOC_AXI_DS_CFG_MGI_VAL);
-					return ERR_PTR(-EIO);
-			}
-			regs += USOC_AXI_COMMUNICATOR_OFFSET;
+		val = ioread32(regs + USOC_AXI_COMMUNICATOR_OFFSET +
+			       USOC_AXI_DS_CFG_MGI_REG);
+		if (val != USOC_AXI_DS_CFG_MGI_VAL) {
+			dev_warn(&pdev->dev,
+				 "usoc mapping not valid, %08x != %08x.\n", val,
+				 USOC_AXI_DS_CFG_MGI_VAL);
+			return ERR_PTR(-EIO);
+		}
+		regs += USOC_AXI_COMMUNICATOR_OFFSET;
 	}
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
