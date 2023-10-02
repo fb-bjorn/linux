@@ -48,9 +48,6 @@
 #define MODULE_ERROR_TYPE_MASK GENMASK(7, 0)
 #define ASIC_MAX_TEMP 85
 
-/* Special case for resetting max temp and error counts in one write. */
-#define SB_MAX_ASIC_TEMP_OFS 0x7F
-
 #define SB_INT_MEM_ERR_CNT_OFS 0x80
 #define ASIC_PEC_BYTE_MASK GENMASK(31, 24)
 #define ASIC_SMBUS_ERROR_MASK GENMASK(23, 16)

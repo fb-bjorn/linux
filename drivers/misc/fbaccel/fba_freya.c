@@ -687,16 +687,21 @@ static void freya_boot_error_signal_reset(struct fba_device *fba_dev)
 	freya_write_cxram_sb(fba_dev, 0, SB_ERROR_CODE_OFS);
 
 	/*
-	 * This will reset all ASIC_ERROR_TYPE, MODULE_ERROR_TYPE, WARNING_FLAG,
-	 * INTERRUPT_FLAG
+	 * This will reset all ASIC_ERROR_TYPE
 	 */
 	freya_write_cxram_sb(fba_dev, 0, SB_ASIC_ERROR_TYPE_OFS);
 
 	/*
-	 * This will reset all MAX_ASIC_TEMP, INT_MEM_ERR_CNT, EXT_MEM_ERR_CNT,
+	 * This will reset all MODULE_ERROR_TYPE, WARNING_FLAG,
+	 * INTERRUPT_FLAG, MAX_ASIC_TEMP
+	 */
+	freya_write_cxram_sb(fba_dev, 0, SB_MODULE_ERROR_TYPE_OFS);
+
+	/*
+	 * This will reset all INT_MEM_ERR_CNT, EXT_MEM_ERR_CNT,
 	 * SMBUS_ERROR
 	 */
-	freya_write_cxram_sb(fba_dev, 0, SB_MAX_ASIC_TEMP_OFS);
+	freya_write_cxram_sb(fba_dev, 0, SB_INT_MEM_ERR_CNT_OFS);
 }
 
 static int freya_download_image(struct fba_device *fba_dev,
