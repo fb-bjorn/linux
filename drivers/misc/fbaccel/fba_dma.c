@@ -243,6 +243,8 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 
 	if (dma->map_cnt == 1 && !force_prp) {
 		dma->dma_addr = sg_dma_address(&dma->sg.sgl[0]);
+		trace_fba_dma_map_cnt(fba_dev->name, user_addr, size, dir,
+				      dma->dma_addr);
 		return dma;
 	}
 
@@ -257,6 +259,9 @@ struct fba_dma *fba_dma_map(struct fba_ctx *ctx, void __user *user_data,
 	node = list_entry(dma->prp_list_head.next, struct fba_dma_prp_node,
 			  list);
 	dma->prp_addr = node->paddr;
+
+	trace_fba_dma_map_prp(fba_dev->name, user_addr, size, dir,
+			      dma->prp_addr);
 
 	return dma;
 
