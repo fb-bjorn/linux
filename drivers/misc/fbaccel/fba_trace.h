@@ -8,6 +8,7 @@
 #define _TRACE_FBA_DRIVER_H
 
 #include <linux/tracepoint.h>
+#include <linux/dma-direction.h>
 
 TRACE_EVENT(fba_post_cmd,
 	TP_PROTO(const char *name, size_t n_sub, uint64_t user_data),
@@ -261,7 +262,7 @@ TRACE_EVENT(fba_dma_map_prp,
 
 	TP_printk("%s: va=0x%llx sz=0x%llx dir=%s prp_a=0x%llx",
 		__get_str(name), __entry->va, __entry->sz,
-		__entry->frdev ? "D2H" : "H2D",
+		__entry->frdev == DMA_FROM_DEVICE ? "D2H" : "H2D",
 		__entry->prp_a)
 );
 
