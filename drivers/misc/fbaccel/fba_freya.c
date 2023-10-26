@@ -31,12 +31,15 @@
 
 #define FREYA_DRV_NAME "freya"
 #define ARTEMIS_DRV_NAME "artemis"
+#define ATHENA_DRV_NAME "freya" /* For now */
 
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(freya_ida);
 static DEFINE_IDA(artemis_ida);
+static DEFINE_IDA(athena_ida);
 static struct list_head freya_devids;
 static struct list_head artemis_devids;
+static struct list_head athena_devids;
 
 static bool ddr_bypass;
 static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
@@ -1776,7 +1779,8 @@ const struct fba_cfg freya_cfg = {
 	.devnode_ida = &freya_ida,
 	.devids = &freya_devids,
 	.host_ipc_bar = HOST_IPC_BAR,
-	.host_ipc_stride = HOST_IPC_STRIDE,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = HOST_IPC_GROUP_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
@@ -1816,7 +1820,51 @@ const struct fba_cfg artemis_cfg = {
 	.devnode_ida = &artemis_ida,
 	.devids = &artemis_devids,
 	.host_ipc_bar = HOST_IPC_BAR,
-	.host_ipc_stride = HOST_IPC_STRIDE,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = HOST_IPC_GROUP_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
+	.usoc_bar = FREYA_USOC_BAR,
+	.usoc_pfn_ofs = FREYA_USOC_PFN_OFS,
+	.usoc_msi_irq_ds = USOC_DS_MSIX_VECTOR,
+	.usoc_msi_irq_us = USOC_US_MSIX_VECTOR,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
+	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+	},
+	.num_logger_srcs = FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
+	.impl_ops = &artemis_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
+};
+
+#define ATHENA_HOST_IPC_GROUP_STRIDE 0x1000
+
+const struct fba_cfg athena_cfg = {
+	.name = ATHENA_DRV_NAME,
+	.devnode_ida = &athena_ida,
+	.devids = &athena_devids,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = ATHENA_HOST_IPC_GROUP_STRIDE,
 	.host_ipc_offset = HOST_IPC_BAR_OFF,
 	.db_mbox_base = DB_MAILBOX_BASE,
 	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,

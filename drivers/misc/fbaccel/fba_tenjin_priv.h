@@ -35,12 +35,18 @@
 #define HW_MBOX_ENTRY_STRIDE 4
 
 /*
+ * Number or bytes in each mailbox group
+ */
+#define HW_MBOX_GROUP_STRIDE (HW_MBOX_ENTRY_STRIDE * HW_MBOX_GROUP_SIZE)
+
+/*
  *
  * Feature BAR Settings
  *
  */
 #define HOST_IPC_BAR 0
-#define HOST_IPC_STRIDE HW_MBOX_ENTRY_STRIDE
+#define HOST_IPC_ENTRY_STRIDE HW_MBOX_ENTRY_STRIDE
+#define HOST_IPC_GROUP_STRIDE HW_MBOX_GROUP_STRIDE
 #define HOST_IPC_BAR_OFF 0x2000
 
 #define HOST_USOC_BAR 0

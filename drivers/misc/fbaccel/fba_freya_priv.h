@@ -249,12 +249,18 @@ struct payload_exec_result {
 #define HW_MBOX_ENTRY_STRIDE 8
 
 /*
+ * Number or bytes in each mailbox group
+ */
+#define HW_MBOX_GROUP_STRIDE (HW_MBOX_ENTRY_STRIDE * HW_MBOX_GROUP_SIZE)
+
+/*
  *
  * Feature BAR Settings
  *
  */
 #define HOST_IPC_BAR 1
-#define HOST_IPC_STRIDE HW_MBOX_ENTRY_STRIDE
+#define HOST_IPC_ENTRY_STRIDE HW_MBOX_ENTRY_STRIDE
+#define HOST_IPC_GROUP_STRIDE HW_MBOX_GROUP_STRIDE
 #define HOST_IPC_BAR_OFF 0
 #define HOST_IPC_BAR_IDX (BAR_TO_IDX(HOST_IPC_BAR))
 

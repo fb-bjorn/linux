@@ -273,7 +273,7 @@ static long fba_ioctl_get_details(struct fba_device *fba_dev,
 
 	memset(detail, 0, sizeof(*detail));
 	detail->host_ipc_bar = fba_dev->cfg->host_ipc_bar;
-	detail->host_ipc_stride = fba_dev->cfg->host_ipc_stride;
+	detail->host_ipc_stride = fba_dev->cfg->host_ipc_entry_stride;
 	detail->host_ipc_offset = fba_dev->cfg->host_ipc_offset;
 	detail->irq_num = CHANNEL_MSIX_VECTOR_BASE + fba_dev->channel_total;
 	for (i = 0; i < BAR_CNT; i++) {

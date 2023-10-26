@@ -1261,9 +1261,26 @@ void fba_free_streaming_channel(struct fba_channel *chan)
 	ida_free(&chan->fba_dev->channel_ids, chan->chan_id);
 }
 
+#define PCI_VENDOR_ID_FACEBOOK 0x1d9b
+#define PCI_DEVICE_ID_FACEBOOK_FREYA 0x0200
+#define PCI_DEVICE_ID_FACEBOOK_ARTEMIS 0x0201
+#define PCI_DEVICE_ID_FACEBOOK_ATHENA 0x0202
+
+#define PCI_VENDOR_ID_BROADCOM 0x14e4
+#define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
+
 static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct fba_device *fba_dev;
+
+	/*
+	 * Silently ignore anything, but  PF0 on Athena
+	 */
+	if (pdev->vendor == PCI_VENDOR_ID_FACEBOOK &&
+	    pdev->device == PCI_DEVICE_ID_FACEBOOK_ATHENA &&
+	    PCI_FUNC(pdev->devfn) != 0) {
+		return -ENODEV;
+	}
 
 	dev_info(&pdev->dev, "Probe slot=%s bus=%s bus_num=0x%x\n",
 		 pdev->slot ? pci_slot_name(pdev->slot) : "n/a",
@@ -1299,16 +1316,10 @@ static void fbaccel_remove(struct pci_dev *pdev)
 	fba_device_exit(fba_dev);
 }
 
-#define PCI_VENDOR_ID_FACEBOOK 0x1d9b
-#define PCI_DEVICE_ID_FACEBOOK_FREYA 0x0200
-#define PCI_DEVICE_ID_FACEBOOK_ARTEMIS 0x0201
-
-#define PCI_VENDOR_ID_BROADCOM 0x14e4
-#define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
-
 static const struct pci_device_id fbaccel_ids[] = {
 	{ PCI_DEVICE_DATA(FACEBOOK, FREYA, &freya_cfg) },
 	{ PCI_DEVICE_DATA(FACEBOOK, ARTEMIS, &artemis_cfg) },
+	{ PCI_DEVICE_DATA(FACEBOOK, ATHENA, &athena_cfg) },
 	{ PCI_DEVICE_DATA(BROADCOM, VIPER, &tenjin_cfg) },
 	{}
 };
@@ -1360,6 +1371,7 @@ static int __init fbaccel_driver_init(void)
 
 	INIT_LIST_HEAD(freya_cfg.devids);
 	INIT_LIST_HEAD(artemis_cfg.devids);
+	INIT_LIST_HEAD(athena_cfg.devids);
 	INIT_LIST_HEAD(tenjin_cfg.devids);
 
 	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
@@ -1396,10 +1408,11 @@ static void __exit fbaccel_driver_exit(void)
 	struct list_head *elem;
 	struct fba_id_map *id_map;
 	struct list_head *maps[] = { freya_cfg.devids, artemis_cfg.devids,
-				     tenjin_cfg.devids };
+				     artemis_cfg.devids, tenjin_cfg.devids };
 	struct ida *idas[] = {
 		freya_cfg.devnode_ida,
 		artemis_cfg.devnode_ida,
+		athena_cfg.devnode_ida,
 		tenjin_cfg.devnode_ida,
 	};
 	int i;

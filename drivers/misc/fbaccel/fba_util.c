@@ -77,8 +77,11 @@ void __iomem *fba_util_get_bar_ptr(struct fba_device *fba_dev, int bar,
 
 static void __iomem *get_mbox_ptr(struct fba_device *fba_dev, int mbox)
 {
+	int group = mbox / FBA_HW_MBOX_GROUP_SIZE;
+	int entry = mbox % FBA_HW_MBOX_GROUP_SIZE;
 	uint64_t off = fba_dev->cfg->host_ipc_offset +
-		       (mbox * fba_dev->cfg->host_ipc_stride);
+		       group * fba_dev->cfg->host_ipc_group_stride +
+		       entry * fba_dev->cfg->host_ipc_entry_stride;
 	return fba_util_get_bar_ptr(fba_dev, fba_dev->cfg->host_ipc_bar, off);
 }
 

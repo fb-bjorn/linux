@@ -47,6 +47,12 @@
 #define FBA_MAX_DEVS 32
 
 /*
+ * Common value for the number of entries per mailbox group.
+ * Migrate to device parameter if supported devices ever differ.
+ */
+#define FBA_HW_MBOX_GROUP_SIZE 32
+
+/*
  * MAX number of channels
  * This will be reduced to the number of advertised channels by the device
  * and the number of MSIX interrupts available
@@ -111,7 +117,8 @@ struct fba_cfg {
 
 	/* Mailbox access params */
 	int host_ipc_bar;
-	int host_ipc_stride;
+	int host_ipc_entry_stride;
+	int host_ipc_group_stride;
 	uint64_t host_ipc_offset;
 
 	/* Starting index of doorbell mailboxes */
@@ -154,6 +161,7 @@ struct fba_cfg {
 
 extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg artemis_cfg;
+extern const struct fba_cfg athena_cfg;
 extern const struct fba_cfg tenjin_cfg;
 
 /*
