@@ -369,6 +369,7 @@ static irqreturn_t fbia_coredump_msix_handler(int irq, void *data)
 	fba_device_abort(fba_dev, "CCP triggered coredump");
 
 	mutex_lock(&fba_dev->coredump_mutex);
+	fba_dev->device_fatal_err_detected = true;
 	if (!fba_dev->coredump_disabled)
 		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
 	mutex_unlock(&fba_dev->coredump_mutex);
