@@ -2486,19 +2486,28 @@ __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 {
 	struct page *page;
 
-	if (IS_ENABLED(CONFIG_CMA)) {
-		/*
-		 * Balance movable allocations between regular and CMA areas by
-		 * allocating from CMA when over half of the zone's free memory
-		 * is in the CMA area.
-		 */
-		if (alloc_flags & ALLOC_CMA &&
-		    zone_page_state(zone, NR_FREE_CMA_PAGES) >
-		    zone_page_state(zone, NR_FREE_PAGES) / 2) {
-			page = __rmqueue_cma_fallback(zone, order);
-			if (page)
-				return page;
-		}
+	/*
+	 * META: Upstream preserves CMA until non-CMA memory is almost
+	 * depleted. This is to keep CMA allocation latencies (e.g. a
+	 * camera app starting up) as low as possible. However, only
+	 * movable allocations can use CMA, and we keep getting into
+	 * situations where the only free memory left is CMA, and then
+	 * GFP_KERNEL requests fail and thrash and OOM prematurely.
+	 *
+	 * Ususally memory can be reclaimed from the regular pool and
+	 * then re-allocated from the CMA pool if necessary. IOW,
+	 * reclaim naturally rebalances the pools under pressure.
+	 *
+	 * However, this doesn't work for workloads like memcache,
+	 * which are mostly anon/tmpfs and refuse to add swap, so they
+	 * don't have functional page reclaim. But they do file SEVs
+	 * when it breaks. So as a bandaid, fill CMA first to improve
+	 * our odds. We don't care so much about camera drivers.
+	 */
+	if (IS_ENABLED(CONFIG_CMA) && (alloc_flags & ALLOC_CMA)) {
+		page = __rmqueue_cma_fallback(zone, order);
+		if (page)
+			return page;
 	}
 
 	/*
