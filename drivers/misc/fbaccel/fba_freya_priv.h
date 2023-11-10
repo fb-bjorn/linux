@@ -305,6 +305,9 @@ struct payload_exec_result {
 #define ARTEMIS_DEF_BOOT1_FILENAME "artemis-boot1.hbin"
 #define ARTEMIS_DEF_BOOT2_FILENAME "artemis-ccp.hbin"
 
+#define ATHENA_DEF_BOOT1_FILENAME "athena-boot1.hbin"
+#define ATHENA_DEF_BOOT2_FILENAME "athena-ccp.hbin"
+
 /* from fbia/freya/fbia_coredump.h: */
 
 #define MAGIC_NUMBER 0xFACEB00C

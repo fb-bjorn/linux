@@ -25,6 +25,8 @@
 #define FREYA_CXRAM_SIZE 0x100000
 #define ARTEMIS_CXRAM_BASE 0x20C00000
 #define ARTEMIS_CXRAM_SIZE 0x400000
+#define ATHENA_CXRAM_BASE 0xD0400000
+#define ATHENA_CXRAM_SIZE 0x400000
 
 #include "fba_freya_priv.h"
 #include "fba_device.h"
@@ -1381,6 +1383,13 @@ static void artemis_get_fw_filenames(struct fba_device *fba_dev,
 	*boot2 = ARTEMIS_DEF_BOOT2_FILENAME;
 }
 
+static void athena_get_fw_filenames(struct fba_device *fba_dev,
+				    const char **boot1, const char **boot2)
+{
+	*boot1 = ATHENA_DEF_BOOT1_FILENAME;
+	*boot2 = ATHENA_DEF_BOOT2_FILENAME;
+}
+
 static int freya_load_firmware(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv = fba_dev->impl_priv;
@@ -1659,6 +1668,10 @@ static const struct fbia_priv_data artemis_data = {
 	.cxram_sideband_ofs = ARTEMIS_CXRAM_SIZE - SIDEBAND_SIZE,
 };
 
+static const struct fbia_priv_data athena_data = {
+	.cxram_sideband_ofs = ATHENA_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
 static int freya_init(struct fba_device *fba_dev)
 {
 	struct freya_priv *priv;
@@ -1711,6 +1724,74 @@ static int artemis_init(struct fba_device *fba_dev)
 	case HW_TYPE_EMU_LONG:
 		fba_dev_info(fba_dev,
 			     "Artemis Hardware Type is Emulation (Long)");
+		priv->boot_timeouts = &emu_long_boot_timeouts;
+		break;
+	case HW_TYPE_UNK:
+	default:
+		fba_dev_err(
+			fba_dev,
+			"Unknown Hardware Type %d, setting timeouts to ASIC by default",
+			hw_type);
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	}
+	return 0;
+}
+
+static int athena_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int ret;
+	uint32_t hw_raw_type, hw_type;
+
+	ret = freya_init_priv(fba_dev, &athena_data);
+	if (ret != 0)
+		return ret;
+
+	priv = fba_dev->impl_priv;
+	priv->cxram_upgrade_ofs =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_START_OFS) -
+		ATHENA_CXRAM_BASE;
+	priv->cxram_upgrade_sz =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
+	hw_raw_type = FIELD_GET(
+		HW_TYPE_MASK, (freya_read_cxram_sb(fba_dev, SB_CIP_CFG1_OFS)));
+
+	/* Translate hw_type to enum - no 1:1 mapping for Athena */
+	switch (hw_raw_type) {
+	case 0:
+		hw_type = HW_TYPE_ASIC;
+		break;
+	case 1:
+		hw_type = HW_TYPE_EMU_LONG;
+		break;
+	case 2:
+		hw_type = HW_TYPE_EMU;
+		break;
+	case 4:
+		hw_type = HW_TYPE_SIM;
+		break;
+	default:
+		hw_type = HW_TYPE_UNK;
+		break;
+	}
+
+	switch (hw_type) {
+	case HW_TYPE_ASIC:
+		fba_dev_info(fba_dev, "Athena Hardware Type is ASIC");
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	case HW_TYPE_EMU:
+		fba_dev_info(fba_dev, "Athena Hardware Type is Emulation");
+		priv->boot_timeouts = &emu_boot_timeouts;
+		break;
+	case HW_TYPE_SIM:
+		fba_dev_info(fba_dev, "Athena Hardware Type is Simulation");
+		priv->boot_timeouts = &sim_boot_timeouts;
+		break;
+	case HW_TYPE_EMU_LONG:
+		fba_dev_info(fba_dev,
+			     "Athena Hardware Type is Emulation (Long)");
 		priv->boot_timeouts = &emu_long_boot_timeouts;
 		break;
 	case HW_TYPE_UNK:
@@ -1857,6 +1938,27 @@ const struct fba_cfg artemis_cfg = {
 	},
 };
 
+static const struct fba_impl_ops athena_impl_ops = {
+	.impl_init = athena_init,
+	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = athena_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
+	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
+};
+
 #define ATHENA_HOST_IPC_GROUP_STRIDE 0x1000
 
 const struct fba_cfg athena_cfg = {
@@ -1894,7 +1996,7 @@ const struct fba_cfg athena_cfg = {
 	},
 	.num_logger_srcs = FREYA_LOGGER_SRCS,
 	.logger_bar_num = BAR_CXRAM,
-	.impl_ops = &artemis_impl_ops,
+	.impl_ops = &athena_impl_ops,
 	.ctx_limits = {
 		.sub_cnt = CONTEXT_SUB_CAP,
 	},
