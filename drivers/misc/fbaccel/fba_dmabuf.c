@@ -88,12 +88,19 @@ struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
 	struct scatterlist *sg;
 
 	if (check_add_overflow((unsigned long)offset, (unsigned long)size,
-			       &end))
+			       &end)) {
+		fba_dev_err(fba_dev,
+			    "%s: check_add_overflow err: offset=0x%x size=0x%x",
+			    __func__, offset, size);
 		return ERR_PTR(ret);
+	}
 
 	dmabuf = dma_buf_get(fd);
-	if (IS_ERR(dmabuf))
+	if (IS_ERR(dmabuf)) {
+		fba_dev_err(fba_dev, "%s: dma_buf_get err: fd=%d ret=%d",
+			    __func__, fd, PTR_ERR(dmabuf));
 		return (struct fba_dmabuf_attach *)dmabuf;
+	}
 	if (dmabuf->ops != &fba_dmabuf_ops)
 		goto out_release_dmabuf;
 
@@ -103,6 +110,8 @@ struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
 	attach = dma_buf_attach(dmabuf, &fba_dev->pdev->dev);
 	if (IS_ERR(attach)) {
 		ret = PTR_ERR(attach);
+		fba_dev_err(fba_dev, "%s: dma_buf_attach err: ret=%d", __func__,
+			    ret);
 		goto out_release_dmabuf;
 	}
 
@@ -113,6 +122,8 @@ struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
 	sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(sgt)) {
 		ret = PTR_ERR(sgt);
+		fba_dev_err(fba_dev, "%s: dma_buf_map_attachment err: ret=%d",
+			    __func__, ret);
 		goto out_free_detach;
 	}
 

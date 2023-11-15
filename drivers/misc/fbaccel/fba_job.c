@@ -59,8 +59,13 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 	fba_alloc_translate_setup(fba_dev, job, job->req.sub_cnt);
 	for (i = 0; i < job->req.sub_cnt; i++) {
 		ret = fba_alloc_translate_sub(ctx, job, &job->sub_array[i]);
-		if (ret < 0)
+		if (ret < 0) {
+			fba_dev_err(
+				fba_dev,
+				"fba_alloc_translate_sub failed: %zu / %zu, ret=%d",
+				i, job->req.sub_cnt, ret);
 			goto err_put_job;
+		}
 	}
 	/* Setup tail, and assign context ID. */
 	for (i = 0; i < job->req.sub_cnt; i++) {

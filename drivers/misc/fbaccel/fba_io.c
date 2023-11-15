@@ -111,13 +111,18 @@ static long fba_ioctl_post_id(struct fba_ctx *ctx, struct post_ioctl *post_req)
 	/* Allocate the job. */
 	subs = u64_to_user_ptr(post_req->subs_ptr);
 	job = fba_job_alloc(ctx, subs, post_req->count, post_req->user_data);
-	if (IS_ERR(job))
+	if (IS_ERR(job)) {
+		fba_dev_err(fba_dev, "Failed job alloc ERR=%d.", PTR_ERR(job));
 		return PTR_ERR(job);
+	}
 
 	if (post_req->eventfd >= 0) {
 		ret = fba_setup_eventfd_cb(job, post_req->eventfd);
-		if (ret != 0)
+		if (ret != 0) {
+			fba_dev_err(fba_dev, "Failed setup_eventfd_cb ERR=%d.",
+				    ret);
 			goto err_put_job;
+		}
 	}
 	fba_job_trace_post(fba_dev->name, job);
 
@@ -689,11 +694,16 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_POST_ID: {
 		struct post_ioctl post_req;
 
-		if (!fba_ctx_is_open(streaming_ctx))
+		if (!fba_ctx_is_open(streaming_ctx)) {
+			fba_dev_err(fba_dev, "post_id: ctx not open\n");
 			return -EACCES;
+		}
 
-		if (copy_from_user(&post_req, data, sizeof(post_req)))
+		if (copy_from_user(&post_req, data, sizeof(post_req))) {
+			fba_dev_err(fba_dev,
+				    "post_id: copy from user failed\n");
 			return -EFAULT;
+		}
 
 		ret = fba_ioctl_post_id(streaming_ctx, &post_req);
 		return ret;

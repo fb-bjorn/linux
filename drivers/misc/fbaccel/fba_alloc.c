@@ -213,6 +213,12 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 
 		case AT_RID:
 			ret = fba_alloc_convert_job(job, iargs[i], 0, ptr);
+			if (ret != 0) {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_RID alloc_convert_job failed, ret=%d",
+					__func__, ret);
+			}
 			break;
 
 		case AT_RID_ARG32:
@@ -222,6 +228,12 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 
 			size = iargs[i + 1] & 0xFFFFFFFF;
 			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			if (ret != 0) {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_RID_ARG32 alloc_convert_job failed, ret=%d",
+					__func__, ret);
+			}
 			break;
 
 		case AT_ARG32_RID:
@@ -230,6 +242,12 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 				return -EINVAL;
 			size = iargs[i - 1] >> 32;
 			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			if (ret != 0) {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_ARG32_RID alloc_convert_job failed, ret=%d",
+					__func__, ret);
+			}
 			break;
 
 		case AT_ARG64_RID:
@@ -240,6 +258,12 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			if ((size & AT_DMA_OPSZ))
 				size = size & AT_DMA_SIZE_MASK;
 			ret = fba_alloc_convert_job(job, iargs[i], size, ptr);
+			if (ret != 0) {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_ARG64_RID alloc_convert_job failed, ret=%d",
+					__func__, ret);
+			}
 			break;
 
 		case AT_VA_DMA64: {
@@ -253,6 +277,10 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			dma = fba_alloc_translate_dma(
 				ctx, job, u64_to_user_ptr(iargs[i]), size);
 			if (IS_ERR(dma)) {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_VA_DMA64 alloc_translate_dma failed, %p",
+					__func__, dma);
 				ret = PTR_ERR(dma);
 				break;
 			}
@@ -275,6 +303,12 @@ int fba_alloc_translate_sub(struct fba_ctx *ctx, struct fba_job *job,
 			ret = fba_alloc_translate_p2p(job, iargs[i], size, ptr);
 			if (!ret)
 				iargs[i + 1] |= AT_DMA_OPSZ;
+			else {
+				fba_dev_err(
+					fba_dev,
+					"%s: AT_P2P_DMA64 alloc_translate_p2p failed, ret=%d",
+					__func__, ret);
+			}
 			break;
 		}
 
