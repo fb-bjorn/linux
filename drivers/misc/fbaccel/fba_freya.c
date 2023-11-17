@@ -1110,31 +1110,31 @@ static void payload_exec_send_input(struct fba_device *fba_dev,
 	if (params->use_default_args && params->use_default_func) {
 		cxram_sideband_clearbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
 					SB_TRANSFER_HEADER_MODE_OFS);
-		data2 = 0;
 	} else {
 		cxram_sideband_setbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
 				      SB_TRANSFER_HEADER_MODE_OFS);
 		data2 = params->func;
 		if (params->use_default_args == 0)
 			data2 |= PAYLOAD_EXEC_CUSTOM_ARGS;
+
+		/* FW XORs first 6 dwords and verifies it matches parity bits from the host */
+		parity = SB_TRANSFER_DATA_PACKET_UID ^
+			 SB_TRANSFER_DATA_PACKET_VERSION ^ data2 ^
+			 params->arg1 ^ params->arg2 ^ params->arg3;
+
+		data_packet = (struct payload_exec_data){
+			cpu_to_le32(SB_TRANSFER_DATA_PACKET_UID),
+			cpu_to_le32(SB_TRANSFER_DATA_PACKET_VERSION),
+			cpu_to_le32(data2),
+			cpu_to_le32(params->arg1),
+			cpu_to_le32(params->arg2),
+			cpu_to_le32(params->arg3),
+			cpu_to_le32(parity),
+			0
+		};
+		memcpy_toio(device_packet_buf, &data_packet,
+			    sizeof(data_packet));
 	}
-
-	/* FW XORs first 6 dwords and verifies it matches parity bits from the host */
-	parity = SB_TRANSFER_DATA_PACKET_UID ^ SB_TRANSFER_DATA_PACKET_VERSION ^
-		 data2 ^ params->arg1 ^ params->arg2 ^ params->arg3;
-
-	data_packet = (struct payload_exec_data){
-		cpu_to_le32(SB_TRANSFER_DATA_PACKET_UID),
-		cpu_to_le32(SB_TRANSFER_DATA_PACKET_VERSION),
-		cpu_to_le32(data2),
-		cpu_to_le32(params->arg1),
-		cpu_to_le32(params->arg2),
-		cpu_to_le32(params->arg3),
-		cpu_to_le32(parity),
-		0
-	};
-
-	memcpy_toio(device_packet_buf, &data_packet, sizeof(data_packet));
 }
 
 static int payload_exec_read_result_data(
@@ -1211,7 +1211,6 @@ static int freya_payload_exec(struct fba_device *fba_dev,
 		fba_dev_err(fba_dev, "Executable HBIN load failed.");
 		goto out_unlock;
 	}
-
 	device_packet_buf = fba_util_get_bar_ptr(
 		fba_dev, BAR_CXRAM, SB_TRANSFER_DATA_PACKET_DATA_OFS);
 	payload_exec_send_input(fba_dev, params, device_packet_buf);
@@ -1237,10 +1236,12 @@ static int freya_payload_exec(struct fba_device *fba_dev,
 	result = FIELD_GET(EXEC_RESULT_MASK,
 			   freya_read_cxram_sb(fba_dev, SB_EXEC_RESULT_OFS));
 	if (result == EXEC_RESULT_PASS) {
-		ret = payload_exec_read_result_data(fba_dev, params,
-						    device_packet_buf,
-						    results_buf,
-						    actual_results_size);
+		if (!params->use_default_args && !params->use_default_func) {
+			ret = payload_exec_read_result_data(
+				fba_dev, params, device_packet_buf, results_buf,
+				actual_results_size);
+		}
+		ret = 0;
 	} else {
 		ret = -EBADE;
 		fba_dev_err(fba_dev, "Payload HBIN execution failed");
