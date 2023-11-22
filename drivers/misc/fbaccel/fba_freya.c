@@ -33,7 +33,7 @@
 
 #define FREYA_DRV_NAME "freya"
 #define ARTEMIS_DRV_NAME "artemis"
-#define ATHENA_DRV_NAME "freya" /* For now */
+#define ATHENA_DRV_NAME "athena"
 
 /* Used to give each class of device it's own id space */
 static DEFINE_IDA(freya_ida);
