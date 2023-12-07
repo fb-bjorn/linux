@@ -250,9 +250,12 @@ static void fba_logger_copy_entry(struct fba_log_source *src, size_t entry_len)
 		if (tail_bytes) {
 			uint8_t bytes[sizeof(uint32_t)];
 
-			memcpy_fromio(&bytes, (void __iomem *)(src_addr + src->rd_ptr + word_bytes),
+			memcpy_fromio(&bytes,
+				      (void __iomem *)(src_addr + src->rd_ptr +
+						       word_bytes),
 				      sizeof(bytes));
-			memcpy(ldev->data + ldev->wr_ptr + word_bytes, &bytes, tail_bytes);
+			memcpy(ldev->data + ldev->wr_ptr + word_bytes, &bytes,
+			       tail_bytes);
 		}
 		bytes_copied += n;
 		src->rd_ptr = (src->rd_ptr + n) % src->ringbuf_size;
