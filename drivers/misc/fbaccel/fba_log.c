@@ -221,7 +221,7 @@ static void fba_logger_copy_entry(struct fba_log_source *src, size_t entry_len)
 	struct fba_logger_dev *ldev = src->ldev;
 	void __iomem *src_addr;
 	int bytes_copied = 0;
-	int n;
+	int n, word_bytes, tail_bytes;
 
 	src_addr = ldev->logger_bar_offset + src->logger_data_off;
 	/*
@@ -239,8 +239,21 @@ static void fba_logger_copy_entry(struct fba_log_source *src, size_t entry_len)
 		n = min_t(size_t, entry_len - bytes_copied,
 			  driver_ringbuf_size - ldev->wr_ptr);
 		n = min_t(size_t, n, src->ringbuf_size - src->rd_ptr);
-		memcpy_fromio(ldev->data + ldev->wr_ptr,
-			      (void __iomem *)(src_addr + src->rd_ptr), n);
+
+		tail_bytes = n % sizeof(uint32_t);
+		word_bytes = n - tail_bytes;
+		if (word_bytes != 0) {
+			memcpy_fromio(ldev->data + ldev->wr_ptr,
+				      (void __iomem *)(src_addr + src->rd_ptr),
+				      word_bytes);
+		}
+		if (tail_bytes) {
+			uint8_t bytes[sizeof(uint32_t)];
+
+			memcpy_fromio(&bytes, (void __iomem *)(src_addr + src->rd_ptr + word_bytes),
+				      sizeof(bytes));
+			memcpy(ldev->data + ldev->wr_ptr + word_bytes, &bytes, tail_bytes);
+		}
 		bytes_copied += n;
 		src->rd_ptr = (src->rd_ptr + n) % src->ringbuf_size;
 		ldev->wr_ptr = (ldev->wr_ptr + n) % driver_ringbuf_size;
