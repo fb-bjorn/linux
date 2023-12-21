@@ -695,7 +695,7 @@ int fba_logger_driver_init(void)
 {
 	int ret;
 
-	fba_logger_class = class_create(THIS_MODULE, DRV_NAME);
+	fba_logger_class = class_create(DRV_NAME);
 	if (IS_ERR(fba_logger_class))
 		return PTR_ERR(fba_logger_class);
 

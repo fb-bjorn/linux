@@ -1374,7 +1374,7 @@ static int __init fbaccel_driver_init(void)
 	INIT_LIST_HEAD(athena_cfg.devids);
 	INIT_LIST_HEAD(tenjin_cfg.devids);
 
-	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
+	fba_class = class_create(KBUILD_MODNAME);
 	if (IS_ERR(fba_class))
 		return PTR_ERR(fba_class);
 	fba_class->dev_groups = fba_device_groups;

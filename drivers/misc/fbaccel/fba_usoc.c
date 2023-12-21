@@ -361,7 +361,7 @@ void fba_usoc_unregister(struct fba_usoc_dev *dev)
 	device_del(&dev->char_dev);
 }
 
-static char *fba_usoc_devnode(struct device *dev, umode_t *mode)
+static char *fba_usoc_devnode(const struct device *dev, umode_t *mode)
 {
 	if (mode)
 		*mode = 0600;
@@ -373,7 +373,7 @@ int __init fba_usoc_driver_init(void)
 {
 	int ret;
 
-	fba_usoc_class = class_create(THIS_MODULE, "fba_usoc");
+	fba_usoc_class = class_create("fba_usoc");
 	if (IS_ERR(fba_usoc_class))
 		return PTR_ERR(fba_usoc_class);
 	fba_usoc_class->devnode = fba_usoc_devnode;

@@ -338,7 +338,7 @@ static void fba_uart_shutdown(struct uart_port *port)
 }
 
 static void fba_uart_set_termios(struct uart_port *port,
-				 struct ktermios *termios, struct ktermios *old)
+				 struct ktermios *termios, const struct ktermios *old)
 {
 	struct fba_uart_dev *fbau = port_to_fba_uart_dev(port);
 	unsigned long flags;
