@@ -635,6 +635,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	if (parent_ctx)
 		ctx = parent_ctx;
 
+	if (atomic_read(&fba_dev->has_failed))
+		return -EIO;
+
 	switch (cmd) {
 	case FBA_IOCTL_RESOURCE_INFO: {
 		struct res_info_ioctl res_req;
