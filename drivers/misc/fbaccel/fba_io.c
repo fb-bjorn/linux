@@ -635,9 +635,6 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	if (parent_ctx)
 		ctx = parent_ctx;
 
-	if (atomic_read(&fba_dev->has_failed))
-		return -EIO;
-
 	switch (cmd) {
 	case FBA_IOCTL_RESOURCE_INFO: {
 		struct res_info_ioctl res_req;
@@ -697,6 +694,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_POST_ID: {
 		struct post_ioctl post_req;
 
+		if (atomic_read(&fba_dev->has_failed))
+			return -EIO;
+
 		if (!fba_ctx_is_open(streaming_ctx)) {
 			fba_dev_err(fba_dev, "post_id: ctx not open\n");
 			return -EACCES;
@@ -714,6 +714,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_READ_ID: {
 		struct read_ioctl read_req;
 		struct result_info __user *results;
+
+		if (atomic_read(&fba_dev->has_failed))
+			return -EIO;
 
 		if (copy_from_user(&read_req, data, sizeof(read_req)))
 			return -EFAULT;
@@ -745,6 +748,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	case FBA_IOCTL_MON_SET_DATA:
 		return fba_mon_data_set_ioctl(fba_dev, data);
 	case FBA_IOCTL_SET_STATE:
+		if (atomic_read(&fba_dev->has_failed))
+			return -EIO;
+
 		/* No need to set state anymore, but still need side effect */
 		ret = fba_ctx_open(ctx);
 
@@ -771,6 +777,9 @@ static long fba_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	}
 	case FBA_IOCTL_STREAM_CREATE: {
 		struct stream_ioctl stream_req;
+
+		if (atomic_read(&fba_dev->has_failed))
+			return -EIO;
 
 		if (copy_from_user(&stream_req, data,
 				   sizeof(struct stream_ioctl)))
