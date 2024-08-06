@@ -59,3 +59,6 @@ subprogs_extable
 task_kfunc/test_task_acquire_release_argument
 task_kfunc/test_task_acquire_release_current
 tracing_struct
+
+# tests depending on speculation mitigation being off internally while on upstream.
+verifier_movsx/MOV32SX*@unpriv                  # See yhs comment in https://www.internalfb.com/diff/D60610844?transaction_fbid=1032811231711873
