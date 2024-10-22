@@ -977,7 +977,7 @@ void tcp_send_window_probe(struct sock *sk);
 
 static inline u64 tcp_clock_ns(void)
 {
-	return ktime_get_ns();
+	return ktime_get_ns_non_monotonic();
 }
 
 static inline u64 tcp_clock_us(void)
