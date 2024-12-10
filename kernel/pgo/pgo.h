@@ -43,7 +43,7 @@
 		 (u64)'R' << 8  |	\
 		 (u64)129)
 
-#define LLVM_INSTR_PROF_RAW_VERSION		8
+#define LLVM_INSTR_PROF_RAW_VERSION		10
 #define LLVM_INSTR_PROF_DATA_ALIGNMENT		8
 #define LLVM_INSTR_PROF_IPVK_FIRST		0
 #define LLVM_INSTR_PROF_IPVK_LAST		1
@@ -64,10 +64,15 @@
  *   counters.
  * @padding_bytes_after_counters: the number of padding bytes after the
  *   counters.
+ * @bits_size: the size in bytes of the LLVM MC/DC counters.
+ * @padding_bytes_after_bits: the number of paddings bytes after the bitmap bytes.
  * @names_size: the size in bytes of the LLVM profile section containing the
  *   counters' names.
  * @counters_delta: the beginning of the LLMV profile counters section.
+ * @bits_delta: the beginning of the LLVM profile MC/DC bitmap section.
  * @names_delta: the beginning of the LLMV profile names section.
+ * @num_vtables: the number of profiled vtable entries.
+ * @vnames_size: the byte size of compressed vtable names.
  * @value_kind_last: the last profile value kind.
  */
 struct llvm_prf_header {
@@ -78,9 +83,14 @@ struct llvm_prf_header {
 	u64 padding_bytes_before_counters;
 	u64 counters_size;
 	u64 padding_bytes_after_counters;
+	u64 bits_size;
+	u64 padding_bytes_after_bits;
 	u64 names_size;
 	u64 counters_delta;
+	u64 bits_delta;
 	u64 names_delta;
+	u64 num_vtables;
+	u64 vnames_size;
 	u64 value_kind_last;
 };
 
@@ -98,10 +108,12 @@ struct llvm_prf_data {
 	const u64 name_ref;
 	const u64 func_hash;
 	const void *counter_ptr;
+	const void *bitmap_ptr;
 	const void *function_ptr;
 	void *values;
 	const u32 num_counters;
 	const u16 num_value_sites[LLVM_INSTR_PROF_IPVK_LAST + 1];
+	const u32 num_bitmapbytes;
 } __aligned(LLVM_INSTR_PROF_DATA_ALIGNMENT);
 
 /**
@@ -172,6 +184,9 @@ extern u64 __llvm_prf_cnts_end[];
 extern char __llvm_prf_names_start[];
 extern char __llvm_prf_names_end[];
 
+extern u64 __llvm_prf_bits_start[];
+extern u64 __llvm_prf_bits_end[];
+
 extern struct llvm_prf_value_node __llvm_prf_vnds_start[];
 extern struct llvm_prf_value_node __llvm_prf_vnds_end[];
 
@@ -206,6 +221,7 @@ void __llvm_profile_instrument_memop(u64 target_value, void *data,
 __DEFINE_PRF_SIZE(data);
 __DEFINE_PRF_SIZE(cnts);
 __DEFINE_PRF_SIZE(names);
+__DEFINE_PRF_SIZE(bits);
 __DEFINE_PRF_SIZE(vnds);
 
 #undef __DEFINE_PRF_SIZE

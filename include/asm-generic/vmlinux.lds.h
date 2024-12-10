@@ -385,6 +385,11 @@
 		__llvm_prf_vnds_start = .;				\
 		*(__llvm_prf_vnds)					\
 		__llvm_prf_vnds_end = .;				\
+	}								\
+	__llvm_prf_bits : AT(ADDR(__llvm_prf_bits) - LOAD_OFFSET) {	\
+		__llvm_prf_bits_start = .;				\
+		*(__llvm_prf_bits)					\
+		__llvm_prf_bits_end = .;				\
 	}
 #else
 #define PGO_CLANG_DATA

@@ -66,9 +66,14 @@ static void prf_fill_header(void **buffer)
 	header->padding_bytes_before_counters = 0;
 	header->counters_size = prf_cnts_count();
 	header->padding_bytes_after_counters = 0;
+	header->bits_size = prf_bits_count();
+	header->padding_bytes_after_bits = 0;
 	header->names_size = prf_names_count();
 	header->counters_delta = (u64)__llvm_prf_cnts_start - (u64)__llvm_prf_data_start;
+	header->bits_delta = (u64)__llvm_prf_bits_start - (u64)__llvm_prf_data_start;
 	header->names_delta = (u64)__llvm_prf_names_start;
+	header->num_vtables = 0;
+	header->vnames_size = 0;
 	header->value_kind_last = LLVM_INSTR_PROF_IPVK_LAST;
 
 	*buffer += sizeof(*header);
