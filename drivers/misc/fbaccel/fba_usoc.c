@@ -14,6 +14,7 @@
  * The driver only allows a single open at a time.
  */
 
+#include <linux/version.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/eventfd.h>
@@ -36,7 +37,6 @@
 #define USOC_BAR 1
 #define USOC_OFFSET 0x2000
 
-#define USOC_AXI_COMMUNICATOR_OFFSET 0x4000
 #define USOC_AXI_US_INT_CTL_REG 4
 #define USOC_AXI_US_INT_STS_REG 8
 #define USOC_AXI_DS_INT_CTL_REG 0x84
@@ -190,9 +190,12 @@ static int fba_usoc_mmap(struct file *file, struct vm_area_struct *vma)
 	struct fba_usoc_dev *dev = file->private_data;
 	int ret;
 
+	// Freya/Artemis/Athena needs to have 1/10/18 pages mapped to access the AXIComm registers
 	if (vma->vm_end < vma->vm_start || vma->vm_pgoff != 0 ||
-	    (vma_pages(vma) != 10 && vma_pages(vma) != 1))
+	    (vma_pages(vma) != 1 && vma_pages(vma) != 10 &&
+	     vma_pages(vma) != 18)) {
 		return -EINVAL;
+	}
 
 	vma->vm_private_data = dev;
 	vma->vm_ops = &fba_usoc_vm_ops;
@@ -227,7 +230,11 @@ static irqreturn_t fba_usoc_ds_isr(int irq, void *dev)
 	spin_lock_irqsave(&udev->lock, flags);
 
 	if (udev->ds_efd_ctx != NULL)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
 		eventfd_signal(udev->ds_efd_ctx, 1);
+#else
+		eventfd_signal(udev->ds_efd_ctx);
+#endif
 
 	spin_unlock_irqrestore(&udev->lock, flags);
 
@@ -244,7 +251,11 @@ static irqreturn_t fba_usoc_us_isr(int irq, void *dev)
 	spin_lock_irqsave(&udev->lock, flags);
 
 	if (udev->us_efd_ctx != NULL)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
 		eventfd_signal(udev->us_efd_ctx, 1);
+#else
+		eventfd_signal(udev->us_efd_ctx);
+#endif
 
 	spin_unlock_irqrestore(&udev->lock, flags);
 
@@ -262,7 +273,7 @@ static void fba_usoc_free_dev(struct device *dev)
 
 struct fba_usoc_dev *
 fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
-		  const char *name, int id, void __iomem *regs,
+		  const char *name, uint64_t offset, int id, void __iomem *regs,
 		  unsigned long map_pfn, int msix_irq_ds, int msix_irq_us)
 {
 	struct fba_usoc_dev *dev;
@@ -270,17 +281,11 @@ fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
 	int ret;
 
 	/* Verify mapping is valid. */
-	val = ioread32(regs + USOC_AXI_DS_CFG_MGI_REG);
+	val = ioread32(regs + offset + USOC_AXI_DS_CFG_MGI_REG);
 	if (val != USOC_AXI_DS_CFG_MGI_VAL) {
-		val = ioread32(regs + USOC_AXI_COMMUNICATOR_OFFSET +
-			       USOC_AXI_DS_CFG_MGI_REG);
-		if (val != USOC_AXI_DS_CFG_MGI_VAL) {
-			dev_warn(&pdev->dev,
-				 "usoc mapping not valid, %08x != %08x.\n", val,
-				 USOC_AXI_DS_CFG_MGI_VAL);
-			return ERR_PTR(-EIO);
-		}
-		regs += USOC_AXI_COMMUNICATOR_OFFSET;
+		dev_warn(&pdev->dev, "usoc mapping not valid, %08x != %08x.\n",
+			 val, USOC_AXI_DS_CFG_MGI_VAL);
+		return ERR_PTR(-EIO);
 	}
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -361,7 +366,11 @@ void fba_usoc_unregister(struct fba_usoc_dev *dev)
 	device_del(&dev->char_dev);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+static char *fba_usoc_devnode(struct device *dev, umode_t *mode)
+#else
 static char *fba_usoc_devnode(const struct device *dev, umode_t *mode)
+#endif
 {
 	if (mode)
 		*mode = 0600;
@@ -373,7 +382,11 @@ int __init fba_usoc_driver_init(void)
 {
 	int ret;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+	fba_usoc_class = class_create(THIS_MODULE, "fba_usoc");
+#else
 	fba_usoc_class = class_create("fba_usoc");
+#endif
 	if (IS_ERR(fba_usoc_class))
 		return PTR_ERR(fba_usoc_class);
 	fba_usoc_class->devnode = fba_usoc_devnode;

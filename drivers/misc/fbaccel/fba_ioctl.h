@@ -38,7 +38,7 @@ struct resource_info {
 	__u64 avail;
 };
 
-/* IOCTL struct to retreive Resource Info from device. */
+/* IOCTL struct to retrieve Resource Info from device. */
 struct res_info_ioctl {
 	__u64 count; /* Number of resources wanted */
 	__u64 offset; /* Starting index of resources wanted */
@@ -129,7 +129,7 @@ struct get_details_ioctl {
 	__u64 dma_addr; /* Physical address of shared DMA buffer. */
 	__u32 dma_size; /* Size of shared DMA buffer. */
 	__u32 state; /* Current state of driver. */
-	__u64 irq_num; /* Number of IRQs aquired. */
+	__u64 irq_num; /* Number of IRQs acquired. */
 	__u64 irq_seen; /* Deprecated, set to 0. */
 	__u64 resource_cnt; /* Number of resources available. */
 	__u64 context_cnt; /* Number of contexts available. */
@@ -344,7 +344,7 @@ struct get_coredump_region_data_ioctl {
  * the application to distinguish results.
  *
  * NOTE:
- *   On success, a seperate result per packet will be delievered, and should
+ *   On success, a separate result per packet will be delievered, and should
  *   be drained to avoid exhausting per file context resources.
  *
  * RETURNS:
@@ -455,7 +455,7 @@ struct get_coredump_region_data_ioctl {
  * -EINVAL - If the device has not started polling for coredump trigger.
  * Negative value if eventfd registration fails.
  */
-#define FBA_IOCTL_GET_COREDUMP_STATUS                                          \
+#define FBA_IOCTL_GET_COREDUMP_STATUS \
 	_IOWR('f', 12, struct coredump_status_ioctl)
 
 /*
@@ -488,7 +488,7 @@ struct get_coredump_region_data_ioctl {
  * 0 - Success.
  * -EFAULT - If IOCTL struct is invalid.
  */
-#define FBA_IOCTL_GET_COREDUMP_INFO                                            \
+#define FBA_IOCTL_GET_COREDUMP_INFO \
 	_IOWR('f', 14, struct get_coredump_info_ioctl)
 
 /*
@@ -502,7 +502,7 @@ struct get_coredump_region_data_ioctl {
  * -ENOMEM - If memory allocation fails.
  * -EINVAL - If size of the buffer provided by user is less than amount needed.
  */
-#define FBA_IOCTL_GET_COREDUMP_REGIONS                                         \
+#define FBA_IOCTL_GET_COREDUMP_REGIONS \
 	_IOWR('f', 15, struct get_coredump_region_ioctl)
 
 /*
@@ -514,7 +514,7 @@ struct get_coredump_region_data_ioctl {
  * 0 - Success.
  * -EFAULT - If IOCTL struct is invalid or if pointers in struct are invalid.
  */
-#define FBA_IOCTL_GET_COREDUMP_REGION_DATA                                     \
+#define FBA_IOCTL_GET_COREDUMP_REGION_DATA \
 	_IOWR('f', 16, struct get_coredump_region_data_ioctl)
 
 /*
@@ -593,7 +593,7 @@ struct get_coredump_region_data_ioctl {
  *   0 - Success.
  *   non-zero - Other, lower level errors.
  */
-#define FBA_IOCTL_P2P_RESOURCE_EXPORT                                          \
+#define FBA_IOCTL_P2P_RESOURCE_EXPORT \
 	_IOWR('f', 23, struct res_p2p_export_ioctl)
 
 /*

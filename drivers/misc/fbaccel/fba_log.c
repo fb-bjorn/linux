@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
 
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/cdev.h>
@@ -153,8 +154,12 @@ static void fba_logger_src_update_rdptr(struct fba_log_source *src)
 	struct fba_logger_dev *ldev = src->ldev;
 	struct fba_device *fba_dev = ldev->fba_dev;
 
-	fba_write_bar(fba_dev, src->rd_ptr, ldev->logger_bar_num,
-		      src->ringbuf_off + READ_PTR_OFFSET);
+	if (src->params->use_rd_ptr_mbox) {
+		set_mailbox(fba_dev, src->params->rd_ptr_mbox, src->rd_ptr);
+	} else {
+		fba_write_bar(fba_dev, src->rd_ptr, ldev->logger_bar_num,
+			      src->ringbuf_off + READ_PTR_OFFSET);
+	}
 }
 
 static void fba_logger_device_free(struct kref *kref)
@@ -372,12 +377,18 @@ static void fba_logger_srcs_init(struct fba_logger_dev *ldev)
 			get_mailbox(fba_dev, src->params->size_mbox);
 		src->logger_data_off = fba_logger_src_read32(src, DATA_OFFSET) +
 				       src->ringbuf_off;
-		src->rd_ptr = fba_logger_src_read32(src, READ_PTR_OFFSET);
-		src->log_header_length =
-			snprintf(src->log_header, sizeof(src->log_header),
-				 "%s: %s: %s: ", fba_dev->name,
-				 dev_name(&fba_dev->pdev->dev),
-				 src->params->name);
+		if (src->params->use_rd_ptr_mbox) {
+			src->rd_ptr =
+				get_mailbox(fba_dev, src->params->rd_ptr_mbox);
+		} else {
+			src->rd_ptr =
+				fba_logger_src_read32(src, READ_PTR_OFFSET);
+		}
+		src->log_header_length = snprintf(src->log_header,
+						  sizeof(src->log_header),
+						  "%s: %s: %s: ", fba_dev->name,
+						  dev_name(&fba_dev->pdev->dev),
+						  src->params->name);
 	}
 }
 
@@ -458,8 +469,16 @@ static bool fba_logger_src_ringbuff_invalid(struct fba_device *fba_dev)
 				   fba_dev->cfg->logger_params[i].size_mbox);
 		src_ringbuf_off = get_mailbox(
 			fba_dev, fba_dev->cfg->logger_params[i].off_mbox);
-		src_rd_ptr = fba_read_bar(fba_dev, fba_dev->cfg->logger_bar_num,
-					  src_ringbuf_off + READ_PTR_OFFSET);
+
+		if (fba_dev->cfg->logger_params[i].use_rd_ptr_mbox) {
+			src_rd_ptr = get_mailbox(
+				fba_dev,
+				fba_dev->cfg->logger_params[i].rd_ptr_mbox);
+		} else {
+			src_rd_ptr = fba_read_bar(
+				fba_dev, fba_dev->cfg->logger_bar_num,
+				src_ringbuf_off + READ_PTR_OFFSET);
+		}
 		if ((size > driver_ringbuf_size) || (src_rd_ptr > size))
 			return true;
 	}
@@ -695,7 +714,11 @@ int fba_logger_driver_init(void)
 {
 	int ret;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+	fba_logger_class = class_create(THIS_MODULE, DRV_NAME);
+#else
 	fba_logger_class = class_create(DRV_NAME);
+#endif
 	if (IS_ERR(fba_logger_class))
 		return PTR_ERR(fba_logger_class);
 

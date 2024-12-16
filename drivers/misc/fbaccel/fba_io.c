@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/anon_inodes.h>
 #include <linux/file.h>
+#include <linux/version.h>
 
 #include "fba_ioctl.h"
 #include "fba_device.h"
@@ -94,7 +95,12 @@ static void fba_eventfd_cb(int completed, void *data)
 
 	/* TODO: T84471228 check return value of eventfd_signal */
 	if (completed)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
 		eventfd_signal(ectx, 1);
+#else
+		eventfd_signal(ectx);
+#endif
+
 	eventfd_ctx_put(ectx);
 }
 

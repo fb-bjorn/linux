@@ -6,7 +6,7 @@
 /*
  * FBA Channel
  *
- * Channels provides a mechanism for transfering Jobs from the host to
+ * Channels provides a mechanism for transferring Jobs from the host to
  * the device and gathering the result.
  */
 

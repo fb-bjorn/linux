@@ -121,22 +121,22 @@ enum mon_raw_type {
 };
 
 /* Helper for MON_ITM_CB() */
-#define MON_ITM(name_, group_, source_, raw_type_, size_, unit_, is_static_)   \
-	{                                                                      \
-		.name = (name_), .group = (group_), .source = (source_),       \
-		.size = (size_), .raw_type = (raw_type_), .unit = (unit_),     \
-		.is_static = (is_static_),                                     \
+#define MON_ITM(name_, group_, source_, raw_type_, size_, unit_, is_static_) \
+	{                                                                    \
+		.name = (name_), .group = (group_), .source = (source_),     \
+		.size = (size_), .raw_type = (raw_type_), .unit = (unit_),   \
+		.is_static = (is_static_),                                   \
 	}
 
 /* Helper for populating item definitions */
-#define MON_ITM_CB(name_, group_, source_, raw_type_, size_, unit_,            \
-		   is_static_, user_data_, get_value_cb_)                      \
-	{                                                                      \
-		MON_ITM(name_, group_, source_, raw_type_, size_, unit_,       \
-			is_static_),                                           \
-			.user_data = (user_data_),                             \
-			.get_value_cb = (get_value_cb_),                       \
-			.set_value_cb = (NULL)                                 \
+#define MON_ITM_CB(name_, group_, source_, raw_type_, size_, unit_,      \
+		   is_static_, user_data_, get_value_cb_)                \
+	{                                                                \
+		MON_ITM(name_, group_, source_, raw_type_, size_, unit_, \
+			is_static_),                                     \
+			.user_data = (user_data_),                       \
+			.get_value_cb = (get_value_cb_),                 \
+			.set_value_cb = (NULL)                           \
 	}
 
 #define MON_ITM_CB_RD_WR(name_, group_, source_, raw_type_, size_, unit_,      \
@@ -149,12 +149,12 @@ enum mon_raw_type {
 			.set_value_cb = (set_value_cb_)                        \
 	}
 
-#define MON_BOOL(name_, group_, source_, user_data_, get_value_cb_)            \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_BOOL, sizeof(uint8_t),     \
+#define MON_BOOL(name_, group_, source_, user_data_, get_value_cb_)        \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_BOOL, sizeof(uint8_t), \
 		   SAIL_MTU_NONE, MON_ITM_DYNAMIC, user_data_, get_value_cb_)
 
-#define MON_BOOL_STATIC(name_, group_, source_, user_data_, get_value_cb_)     \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_BOOL, sizeof(uint8_t),     \
+#define MON_BOOL_STATIC(name_, group_, source_, user_data_, get_value_cb_) \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_BOOL, sizeof(uint8_t), \
 		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
 
 #define MON_ITM_STATIC (1)
@@ -163,23 +163,23 @@ enum mon_raw_type {
 #define MON_VER_TYPE uint64_t
 
 /* Static uint32_t */
-#define MON_U32(name_, group_, source_, user_data_, get_value_cb_)             \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t),    \
+#define MON_U32(name_, group_, source_, user_data_, get_value_cb_)          \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t), \
 		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
 
 // Static uint64_t
-#define MON_U64(name_, group_, source_, user_data_, get_value_cb_)             \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint64_t),    \
+#define MON_U64(name_, group_, source_, user_data_, get_value_cb_)          \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint64_t), \
 		   SAIL_MTU_NONE, MON_ITM_STATIC, user_data_, get_value_cb_)
 
 /* Define a monitored item of type string */
-#define MON_STR(name_, group_, source_, user_data_, get_value_cb_)             \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_CSTR,                      \
-		   (MON_VALUE_SIZE - 1), SAIL_MTU_NONE, MON_ITM_STATIC,        \
+#define MON_STR(name_, group_, source_, user_data_, get_value_cb_)      \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_CSTR,               \
+		   (MON_VALUE_SIZE - 1), SAIL_MTU_NONE, MON_ITM_STATIC, \
 		   user_data_, get_value_cb_)
 
-#define MON_CRC_U32(name_, group_, source_, user_data_, get_value_cb_)         \
-	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t),    \
+#define MON_CRC_U32(name_, group_, source_, user_data_, get_value_cb_)      \
+	MON_ITM_CB(name_, group_, source_, SAIL_MTT_UINT, sizeof(uint32_t), \
 		   SAIL_MTU_HEX, MON_ITM_DYNAMIC, user_data_, get_value_cb_)
 
 /*
@@ -191,9 +191,9 @@ enum mon_raw_type {
  * SAIL_MTG_xxx: MTG stands for MoniToring Group. It is defined by caller
  * to uniqley identify groups.
  */
-#define MON_GRP(id_, name_)                                                    \
-	{                                                                      \
-		.id = (id_), .name = (name_),                                  \
+#define MON_GRP(id_, name_)                   \
+	{                                     \
+		.id = (id_), .name = (name_), \
 	}
 
 /*
@@ -573,6 +573,8 @@ static struct fba_mon_item_w_cb driver_mon_items_w_cb[] = {
 		(void *)MT_P2P_ECC_DRAM, get_allocated_memory),
 	MON_U64("allocated_sram", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
 		(void *)MT_SRAM, get_allocated_memory),
+	MON_U64("allocated_uncached_sram", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
+		(void *)MT_UNCACHED_SRAM, get_allocated_memory),
 	MON_U64("allocated_scratch", MTG_ASIC_INFO, SAIL_MTS_DRIVER,
 		(void *)MT_SCRATCH, get_allocated_memory),
 };
@@ -590,9 +592,9 @@ static void update_driver_data(struct fba_device *fba_dev)
 		if (item_cb->item.is_static && data->is_init)
 			continue;
 
-		data->ret =
-			item_cb->get_value_cb(fba_dev, item_cb->user_data,
-					      data->value, item_cb->item.size);
+		data->ret = item_cb->get_value_cb(fba_dev, item_cb->user_data,
+						  data->value,
+						  item_cb->item.size);
 	}
 }
 

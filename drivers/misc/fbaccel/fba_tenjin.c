@@ -93,10 +93,11 @@ static struct list_head devids;
 #define REL_MAGIC_TAG 0x68617368
 #define REL_MAGIC_TAG_LEN 4
 
-#define TENJIN_BAR1_GET_SOTP_DAUTH_MAGIC_ADDR(index)                           \
-	(TENJIN_BAR1_SOTP_DAUTH_VALID_OFFSET + (index)*0x50)
-#define TENJIN_BAR1_GET_SOTP_DAUTH_VALID_ADDR(index)                           \
-	(TENJIN_BAR1_SOTP_DAUTH_VALID_OFFSET + REL_MAGIC_TAG_LEN + (index)*0x50)
+#define TENJIN_BAR1_GET_SOTP_DAUTH_MAGIC_ADDR(index) \
+	(TENJIN_BAR1_SOTP_DAUTH_VALID_OFFSET + (index) * 0x50)
+#define TENJIN_BAR1_GET_SOTP_DAUTH_VALID_ADDR(index)               \
+	(TENJIN_BAR1_SOTP_DAUTH_VALID_OFFSET + REL_MAGIC_TAG_LEN + \
+	 (index) * 0x50)
 
 #define SOTP_DAUTH_VALID_MASK GENMASK(7, 0)
 #define SOTP_DAUTH_VALID_VALUE '1'
@@ -143,10 +144,10 @@ static const char *const fbv_reset_reason_str[] = {
 	[UNKNOWN_RESET] = "UNKNOWN_RESET"
 };
 
-#define RESET_REASON_LOG_MASK                                                  \
-	((1 << M7_WATCH_DOG_RESET) | (1 << OVER_TEMP_RESET) |                  \
-	 (1 << THERMAL_TRAP_RESET) | (1 << L1_SYSTEM_RESET) |                  \
-	 (1 << L0_SYSTEM_RESET) | (1 << RISCV_WATCH_DOG_RESET) |               \
+#define RESET_REASON_LOG_MASK                                    \
+	((1 << M7_WATCH_DOG_RESET) | (1 << OVER_TEMP_RESET) |    \
+	 (1 << THERMAL_TRAP_RESET) | (1 << L1_SYSTEM_RESET) |    \
+	 (1 << L0_SYSTEM_RESET) | (1 << RISCV_WATCH_DOG_RESET) | \
 	 (1 << UNKNOWN_RESET))
 
 /* Coredump status */
@@ -308,8 +309,8 @@ static bool did_ccp_panic(struct fba_device *fba_dev)
 
 static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
 {
-	int mailbox_id =
-		cpu_id == 0 ? CCP_COREDUMP_MBOX_ID : M7_COREDUMP_MBOX_ID;
+	int mailbox_id = cpu_id == 0 ? CCP_COREDUMP_MBOX_ID :
+				       M7_COREDUMP_MBOX_ID;
 	uint32_t alert_type = get_mailbox(fba_dev, mailbox_id);
 	struct tenjin_priv *priv = fba_dev->impl_priv;
 
@@ -335,7 +336,7 @@ static void tenjin_coredump_handler(struct fba_device *fba_dev, int cpu_id)
 		if (cpu_id == 0)
 			priv->ccp_panic = true;
 
-		fba_dev_err(fba_dev, "Coredump triggered: Unkown reason.");
+		fba_dev_err(fba_dev, "Coredump triggered: Unknown reason.");
 		break;
 	}
 

@@ -15,6 +15,7 @@
  * - drivers/tty/serial/omap-serial.c
  * - drivers/pwm/pwm-sifive.c
  */
+#include <linux/version.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -54,11 +55,14 @@
 #define FBA_UART_RX_FIFO_DEPTH FBA_UART_TX_FIFO_DEPTH
 
 #define FBA_UART_REMOTE_TAIL(x) (((x) >> 16) & 0xFFFF)
-#define FBA_UART_REMOTE_HEAD(x) ((x)&0xFFFF)
+#define FBA_UART_REMOTE_HEAD(x) ((x) & 0xFFFF)
 
 #define FBA_UART_TX_IEN 1
 #define FBA_UART_RX_IEN 2
 #define FBA_UART_DEV_ENABLE 4
+
+/* Meta fbaccel virtual UART */
+#define PORT_FBA_UART 124
 
 /**
  * fba_uart_dev - driver-specific data extension to struct uart_port
@@ -338,7 +342,12 @@ static void fba_uart_shutdown(struct uart_port *port)
 }
 
 static void fba_uart_set_termios(struct uart_port *port,
-				 struct ktermios *termios, const struct ktermios *old)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
+				 struct ktermios *termios, struct ktermios *old)
+#else
+				 struct ktermios *termios,
+				 const struct ktermios *old)
+#endif
 {
 	struct fba_uart_dev *fbau = port_to_fba_uart_dev(port);
 	unsigned long flags;

@@ -338,7 +338,7 @@ static int fba_init_max_seg_size(struct fba_device *fba_dev)
 {
 	if (fba_dev->max_dma_segment_size > FBA_MAX_SEGMENT_SIZE) {
 		fba_dev_info(fba_dev,
-			     "Clamping max DMA segment size from %lu to %lu",
+			     "Clamping max DMA segment size from %llu to %llu",
 			     fba_dev->max_dma_segment_size,
 			     FBA_MAX_SEGMENT_SIZE);
 		fba_dev->max_dma_segment_size = FBA_MAX_SEGMENT_SIZE;
@@ -347,7 +347,7 @@ static int fba_init_max_seg_size(struct fba_device *fba_dev)
 	if ((fba_dev->max_dma_segment_size & ~FBA_PAGE_MASK) != 0) {
 		fba_dev_err(
 			fba_dev,
-			"max_dma_segment_size=%lu must be a multiple of %lu",
+			"max_dma_segment_size=%llu must be a multiple of %llu",
 			fba_dev->max_dma_segment_size, FBA_PAGE_SIZE);
 		return -EINVAL;
 	}

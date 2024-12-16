@@ -80,7 +80,7 @@ enum {
  * [15:12] SQES - SQ Entry Size (2^N)
  * [31:16] ENTR - Number of entries per channel.
  */
-#define SAIL_CDES_CNUM(cdes) ((cdes)&0xFF)
+#define SAIL_CDES_CNUM(cdes) ((cdes) & 0xFF)
 #define SAIL_CDES_CQES(cdes) (1 << (((cdes) >> 8) & 0xF))
 #define SAIL_CDES_SQES(cdes) (1 << (((cdes) >> 12) & 0xF))
 #define SAIL_CDES_PQEC(cdes) (((cdes) >> 16) & 0xFFFF)
@@ -99,7 +99,7 @@ enum {
  * [30:30] HCQ - Host provided CQ Buffer.
  * [31:31] HSQ - Host provided SQ Buffer.
  */
-#define SAIL_BDES_STPC(bdes) ((bdes)&0xFF) /* Size of Status in pages. */
+#define SAIL_BDES_STPC(bdes) ((bdes) & 0xFF) /* Size of Status in pages. */
 #define SAIL_BDES_HCQ (1u << 30) /* Host provided CQ */
 #define SAIL_BDES_HSQ (1u << 31) /* Host provided SQ */
 
@@ -110,7 +110,7 @@ enum {
  * [07:00] FLGS - Host provided flags.
  * [31:24] SCPC - Scratch Page Count (number of 4K pages).
  */
-#define SAIL_HDES_DEFINE(scratch_page_cnt, flags)                              \
+#define SAIL_HDES_DEFINE(scratch_page_cnt, flags) \
 	((scratch_page_cnt << 24) | (flags))
 
 /*
@@ -120,7 +120,7 @@ enum {
  * [15:00] PACKET_SIZE_MAX - Max submission entries in a legacy packet
  * [31:16] STREAMING_PACKET_SIZE_MAX - Max submission entries in a streaming packet
  */
-#define SAIL_PKT_SIZE_MAX(pkt) ((pkt)&0xFFFF)
+#define SAIL_PKT_SIZE_MAX(pkt) ((pkt) & 0xFFFF)
 #define SAIL_PKT_STREAMING_SIZE_MAX(pkt) (((pkt) >> 16) & 0xFFFF)
 
 /*
@@ -140,7 +140,7 @@ enum {
  * [15:00] CNUM - Number of channels
  * [31:16] PQEC - Number of descriptor entries in each channel
  */
-#define SAIL_STRM_CNUM(strm) ((strm)&0xFFFF)
+#define SAIL_STRM_CNUM(strm) ((strm) & 0xFFFF)
 #define SAIL_STRM_PQEC(strm) (((strm) >> 16) & 0xFFFF)
 
 #define SAIL_SCRATCH_PAGE_CNT 16
@@ -235,7 +235,7 @@ enum argument_type {
 #define AT_DMA_FROM_DEVICE (0x02ULL << AT_DMA_FLAG_SHIFT) /* From device op. */
 #define AT_DMA_PRP (0x40ULL << AT_DMA_FLAG_SHIFT) /* Addr is PRP not Contig. */
 #define AT_DMA_OPSZ (0x80ULL << AT_DMA_FLAG_SHIFT) /* Size as OP Flags. */
-#define AT_DMA_GET_SZ(x) ((x)&AT_DMA_SIZE_MASK)
+#define AT_DMA_GET_SZ(x) ((x) & AT_DMA_SIZE_MASK)
 #define AT_DMA_GET_OP(x) ((x) & ~AT_DMA_SIZE_MASK)
 #define AT_DMA_GET_DIR(x) ((x) & (AT_DMA_TO_DEVICE | AT_DMA_FROM_DEVICE))
 
@@ -351,6 +351,8 @@ enum mem_type {
 	MT_P2P_DRAM = 4,
 	MT_ECC_DRAM = 5,
 	MT_P2P_ECC_DRAM = 6,
+	MT_NO_ECC_DRAM = 7,
+	MT_UNCACHED_SRAM = 8,
 };
 
 struct resource_def {

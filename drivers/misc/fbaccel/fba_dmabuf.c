@@ -89,15 +89,16 @@ struct fba_dmabuf_attach *fba_translate_p2p_setup(struct fba_ctx *ctx, int fd,
 
 	if (check_add_overflow((unsigned long)offset, (unsigned long)size,
 			       &end)) {
-		fba_dev_err(fba_dev,
-			    "%s: check_add_overflow err: offset=0x%x size=0x%x",
-			    __func__, offset, size);
+		fba_dev_err(
+			fba_dev,
+			"%s: check_add_overflow err: offset=0x%zx size=0x%zx",
+			__func__, offset, size);
 		return ERR_PTR(ret);
 	}
 
 	dmabuf = dma_buf_get(fd);
 	if (IS_ERR(dmabuf)) {
-		fba_dev_err(fba_dev, "%s: dma_buf_get err: fd=%d ret=%d",
+		fba_dev_err(fba_dev, "%s: dma_buf_get err: fd=%d ret=%ld",
 			    __func__, fd, PTR_ERR(dmabuf));
 		return (struct fba_dmabuf_attach *)dmabuf;
 	}

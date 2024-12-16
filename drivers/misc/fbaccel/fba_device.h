@@ -97,6 +97,8 @@ struct fba_limits {
 struct logger_params {
 	uint64_t off_mbox;
 	uint64_t size_mbox;
+	uint64_t rd_ptr_mbox;
+	bool use_rd_ptr_mbox;
 	int msix_int;
 	char name[32];
 };
@@ -157,11 +159,15 @@ struct fba_cfg {
 
 	/* Special boot mode type. */
 	const char *boot_mode;
+
+	/* USoC AXIComm offset from BAR1 */
+	uint64_t usoc_axicomm_offset;
 };
 
 extern const struct fba_cfg freya_cfg;
 extern const struct fba_cfg artemis_cfg;
 extern const struct fba_cfg athena_cfg;
+extern const struct fba_cfg iris_cfg;
 extern const struct fba_cfg tenjin_cfg;
 
 /*
@@ -260,6 +266,14 @@ struct fba_impl_ops {
 	bool (*is_secure_boot)(struct fba_device *fba_dev);
 	/* heartbeat failure callback */
 	void (*heartbeat_failed)(struct fba_device *fba_dev);
+};
+
+enum hw_type {
+	HW_TYPE_ASIC = 0,
+	HW_TYPE_EMU,
+	HW_TYPE_SIM,
+	HW_TYPE_EMU_LONG = 4,
+	HW_TYPE_UNK
 };
 
 #include "fba_channel.h"
@@ -383,6 +397,9 @@ struct fba_device {
 	uint32_t admin_cmd_timeout_ms;
 	/* Number of retries for state update check */
 	int num_retries;
+
+	/* Hardware Type of the current platform */
+	uint32_t hw_type;
 };
 
 struct fba_dmabuf_attach {
@@ -474,15 +491,15 @@ void fba_translate_p2p_teardown(struct fba_ctx *ctx,
 int fba_get_dmabuf(struct fba_ctx *ctx, uint64_t rid, int *rfd);
 void fba_dmabuf_exit(struct fba_alloc *alloc);
 
-#define fba_dev_err(fba_dev, fmt, ...)                                         \
-	dev_err(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,           \
+#define fba_dev_err(fba_dev, fmt, ...)                               \
+	dev_err(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name, \
 		##__VA_ARGS__)
-#define fba_dev_info(fba_dev, fmt, ...)                                        \
-	dev_info(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,          \
+#define fba_dev_info(fba_dev, fmt, ...)                               \
+	dev_info(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name, \
 		 ##__VA_ARGS__)
-#define fba_dev_dbg(fba_dev, fmt, ...)                                         \
-	dev_dbg(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,           \
+#define fba_dev_dbg(fba_dev, fmt, ...)                               \
+	dev_dbg(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name, \
 		##__VA_ARGS__)
-#define fba_dev_warn(fba_dev, fmt, ...)                                        \
-	dev_warn(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name,          \
+#define fba_dev_warn(fba_dev, fmt, ...)                               \
+	dev_warn(&fba_dev->pdev->dev, "%s: " fmt "\n", fba_dev->name, \
 		 ##__VA_ARGS__)

@@ -14,6 +14,6 @@ struct fba_usoc_dev;
 
 struct fba_usoc_dev *
 fba_usoc_register(struct pci_dev *pdev, struct device *parent, int minor,
-		  const char *name, int id, void __iomem *regs,
+		  const char *name, uint64_t offset, int id, void __iomem *regs,
 		  unsigned long vm_pgoff, int msix_irq_ds, int msix_irq_us);
 void fba_usoc_unregister(struct fba_usoc_dev *dev);

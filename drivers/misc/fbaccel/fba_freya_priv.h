@@ -13,17 +13,17 @@
 #define SRAM_UPGRADE_MEM_SIZE REGION_UPGRADE_MEM_SIZE
 #define SIDEBAND_SIZE 0x100
 #define SRAM_END_ADDR(cxram_base, cxram_size) (cxram_base + cxram_size)
-#define SIDEBAND_BASE_ADDR(cxram_base, cxram_size)                             \
+#define SIDEBAND_BASE_ADDR(cxram_base, cxram_size) \
 	(SRAM_END_ADDR(cxram_base, cxram_size) - SIDEBAND_SIZE)
 
-#define SRAM_INBAND_BASE_ADDR(cxram_base, cxram_size)                          \
-	(SRAM_END_ADDR(cxram_base, cxram_size) - REGION_SIDEBAND_SIZE -        \
+#define SRAM_INBAND_BASE_ADDR(cxram_base, cxram_size)                   \
+	(SRAM_END_ADDR(cxram_base, cxram_size) - REGION_SIDEBAND_SIZE - \
 	 REGION_INBAND_SIZE)
 
-#define SRAM_UPGRADE_MEM_BASE_ADDR(cxram_base, cxram_size)                     \
+#define SRAM_UPGRADE_MEM_BASE_ADDR(cxram_base, cxram_size) \
 	(SRAM_INBAND_BASE_ADDR(cxram_base, cxram_size) - SRAM_UPGRADE_MEM_SIZE)
 
-#define SRAM_UPGRADE_OFS(cxram_base, cxram_size)                               \
+#define SRAM_UPGRADE_OFS(cxram_base, cxram_size) \
 	(SRAM_UPGRADE_MEM_BASE_ADDR(cxram_base, cxram_size) - cxram_base)
 
 #define BAR_CXRAM 2
@@ -120,9 +120,9 @@
 
 #define MBIST_EXEC_TIMEOUT_MS 0x7FFFFFF
 
-#define EMU_DEFAULT_TIMEOUT_MS 60000
+#define EMU_DEFAULT_TIMEOUT_MS 240000
 #define EMU_CCP_BOOT_RETRIES 500
-#define EMU_LONG_DEFAULT_TIMEOUT_MS 120000
+#define EMU_LONG_DEFAULT_TIMEOUT_MS 240000
 #define EMU_LONG_CCP_BOOT_RETRIES 1000
 #define SIM_DEFAULT_TIMEOUT_MS 60000
 #define SIM_CCP_BOOT_RETRIES 500
@@ -241,6 +241,7 @@ struct payload_exec_result {
 #define LOGBUF_MBOX_GROUP_START ((CPP_MBOX_GROUP_OFFS + 3) * HW_MBOX_GROUP_SIZE)
 #define CCP_LOGBUF_SIZE_MBOX (LOGBUF_MBOX_GROUP_START + 1)
 #define CCP_LOGBUF_OFFSET_MBOX (LOGBUF_MBOX_GROUP_START + 2)
+#define CCP_LOGBUF_RDPTR_MBOX (LOGBUF_MBOX_GROUP_START + 3)
 
 /*
  * Number of total entries
@@ -269,6 +270,15 @@ struct payload_exec_result {
 
 #define FREYA_USOC_BAR 1
 #define FREYA_USOC_PFN_OFS 2
+
+#define ARTEMIS_USOC_BAR 1
+#define ARTEMIS_USOC_PFN_OFS 2
+
+#define ATHENA_USOC_BAR 1
+#define ATHENA_USOC_PFN_OFS 33
+
+#define IRIS_USOC_BAR 1
+#define IRIS_USOC_PFN_OFS 2
 
 #define FREYA_UART_BAR 1
 #define FREYA_UART_MBOX_OFFSET (UART_MBOX_GROUP_OFFS * HW_MBOX_GROUP_SIZE)
@@ -308,6 +318,9 @@ struct payload_exec_result {
 #define ATHENA_DEF_BOOT1_FILENAME "athena-boot1.hbin"
 #define ATHENA_DEF_BOOT2_FILENAME "athena-ccp.hbin"
 
+#define IRIS_DEF_BOOT1_FILENAME "iris-boot1.hbin"
+#define IRIS_DEF_BOOT2_FILENAME "iris-ccp.hbin"
+
 /* from fbia/freya/fbia_coredump.h: */
 
 #define MAGIC_NUMBER 0xFACEB00C
@@ -337,34 +350,34 @@ struct coredump_region {
  * CXRAM offset for storing gdb on Zephyr start up enablement with boot
  * parameter
  */
-#define CXRAM_GDB_ON_BOOT_OFFSET                                               \
+#define CXRAM_GDB_ON_BOOT_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + GDB_ON_BOOT_CXRAM_INDEX)
 /* CXRAM offset for storing llc configuration setting through boot parameter */
-#define CXRAM_LLC_CONFIG_OFFSET                                                \
+#define CXRAM_LLC_CONFIG_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (LLC_CONFIG_CXRAM_INDEX * 0x4))
 /*
  * CXRAM offset for storing PE lossless print mode enablement through boot
  * parameter
  */
-#define CXRAM_PE_PRINT_MODE_OFFSET                                             \
+#define CXRAM_PE_PRINT_MODE_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (PE_PRINT_MODE_CXRAM_INDEX * 0x4))
 /* CXRAM offset for storing PCIe console enable boot parameter */
-#define CXRAM_ENABLE_PCIE_CONSOLE_OFFSET                                       \
+#define CXRAM_ENABLE_PCIE_CONSOLE_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (ENABLE_PCIE_CONSOLE_CXRAM_INDEX * 0x4))
 /* CXRAM offset for storing PE icache dcache disable config */
-#define CXRAM_PE_IDCACHE_CONFIG_OFFSET                                         \
+#define CXRAM_PE_IDCACHE_CONFIG_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (CXRAM_PE_IDCACHE_CONFIG_INDEX * 0x4))
 
 /* CXRAM offset for storing ECC Region Size */
-#define CXRAM_ECC_REGION_SIZE_OFFSET                                           \
+#define CXRAM_ECC_REGION_SIZE_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (ECC_REGION_SIZE_CXRAM_INDEX * 0x4))
 
 /* CXRAM offset for storing ECC Region Size */
-#define CXRAM_P2P_ECC_SIZE_OFFSET                                              \
+#define CXRAM_P2P_ECC_SIZE_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + (P2P_ECC_SIZE_CXRAM_INDEX * 0x4))
 
 /* CXRAM offset for storing core dump region specification */
-#define CXRAM_CCP_CRASH_STATUS_OFFSET                                          \
+#define CXRAM_CCP_CRASH_STATUS_OFFSET \
 	(CXRAM_BOOT_PARAM_OFFSET + ((CXRAM_BOOT_PARAM_MAX_INDEX + 1) * 0x4))
 
 /* CXRAM offset for storing latest core dump CRC code */
@@ -377,7 +390,7 @@ struct coredump_region {
 #define CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET (CXRAM_CORE_DUMP_OFFSET + 0x4)
 
 /* CXRAM offset for storing core dump region info */
-#define CXRAM_CORE_DUMP_REGION_INFO_OFFSET                                     \
+#define CXRAM_CORE_DUMP_REGION_INFO_OFFSET \
 	(CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET + 0x4)
 
 #define FREYA_LOGGER_SRCS 2

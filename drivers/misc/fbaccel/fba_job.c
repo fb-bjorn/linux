@@ -62,7 +62,7 @@ struct fba_job *fba_job_alloc(struct fba_ctx *ctx,
 		if (ret < 0) {
 			fba_dev_err(
 				fba_dev,
-				"fba_alloc_translate_sub failed: %zu / %zu, ret=%d",
+				"fba_alloc_translate_sub failed: %u / %u, ret=%d",
 				i, job->req.sub_cnt, ret);
 			goto err_put_job;
 		}

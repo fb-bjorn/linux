@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Copyright (c) Meta Platforms, Inc. and affiliates */
 
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/aer.h>
 #include <linux/completion.h>
@@ -51,6 +52,36 @@ MODULE_PARM_DESC(admin_cmd_timeout,
 		 "Override default admin command timeout; in milliseconds");
 
 static void fba_async_probe(void *data, async_cookie_t cookie);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define PCI_EXP_AER_FLAGS                                                   \
+	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | PCI_EXP_DEVCTL_FERE | \
+	 PCI_EXP_DEVCTL_URRE)
+
+MODULE_IMPORT_NS(CXL);
+
+static int pci_enable_pcie_error_reporting(struct pci_dev *dev)
+{
+	int rc;
+
+	if (!pcie_aer_is_native(dev))
+		return -EIO;
+
+	rc = pcie_capability_set_word(dev, PCI_EXP_DEVCTL, PCI_EXP_AER_FLAGS);
+	return pcibios_err_to_errno(rc);
+}
+
+static int pci_disable_pcie_error_reporting(struct pci_dev *dev)
+{
+	int rc;
+
+	if (!pcie_aer_is_native(dev))
+		return -EIO;
+
+	rc = pcie_capability_clear_word(dev, PCI_EXP_DEVCTL, PCI_EXP_AER_FLAGS);
+	return pcibios_err_to_errno(rc);
+}
+#endif
 
 static ssize_t boot_file_show(struct device *dev, struct device_attribute *attr,
 			      char *buf)
@@ -340,9 +371,11 @@ static int __fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg,
 		if (bail_early && READ_ONCE(fba_dev->exiting))
 			return -ETIMEDOUT;
 
-		fba_dev_info(fba_dev, "Scan state %d try %d/%d.", reg, i,
-			     tries);
 		val = get_mailbox(fba_dev, reg);
+		fba_dev_info(
+			fba_dev,
+			"Scan state [%d]=0x%08x, expected 0x%08x, try %d/%d.",
+			reg, val, state, i, tries);
 		if (val == state)
 			return 0;
 		set_current_state(TASK_UNINTERRUPTIBLE);
@@ -438,13 +471,20 @@ static int fba_device_usoc_init(struct fba_device *fba_dev)
 	void __iomem *usoc_regs;
 	int ret = 0;
 
+	// only silicon and emulation platforms have USoC
+	if (fba_dev->hw_type != HW_TYPE_ASIC &&
+	    fba_dev->hw_type != HW_TYPE_EMU) {
+		return ret;
+	}
+
 	if (fba_dev->cfg->usoc_bar >= 0) {
 		usoc_regs = fba_util_get_bar_ptr(
 			fba_dev, fba_dev->cfg->usoc_bar,
 			fba_dev->cfg->usoc_pfn_ofs * PAGE_SIZE);
 		fba_dev->usoc_dev = fba_usoc_register(
 			fba_dev->pdev, fba_dev->dev, fba_dev->minor,
-			fba_dev->cfg->name, fba_dev->id, usoc_regs,
+			fba_dev->cfg->name, fba_dev->cfg->usoc_axicomm_offset,
+			fba_dev->id, usoc_regs,
 			(pci_resource_start(fba_dev->pdev,
 					    fba_dev->cfg->usoc_bar) >>
 			 PAGE_SHIFT) +
@@ -1120,7 +1160,7 @@ static int fba_device_init(struct fba_device *fba_dev)
 	// minor is kept the same as device ID
 	// minor is used to create usoc / uart device names
 	// device id is used to create device name
-	fba_dev->minor = fba_dev->id;
+	fba_dev->minor = fba_dev->id + fba_dev->pdev->devfn;
 	ret = -ENOSPC;
 	mutex_lock(&fba_devices_mtx);
 	if (fba_devices[fba_dev->minor] == NULL) {
@@ -1135,8 +1175,13 @@ static int fba_device_init(struct fba_device *fba_dev)
 		goto err_put_device;
 	}
 
-	fba_dev->name =
-		kasprintf(GFP_KERNEL, "%s%d", fba_dev->cfg->name, fba_dev->id);
+	fba_dev->name = fba_dev->pdev->devfn == 0 ?
+				kasprintf(GFP_KERNEL, "%s%d",
+					  fba_dev->cfg->name, fba_dev->id) :
+				kasprintf(GFP_KERNEL, "%s%d.%d",
+					  fba_dev->cfg->name, fba_dev->id,
+					  fba_dev->pdev->devfn);
+
 	if (!fba_dev->name) {
 		ret = -ENOMEM;
 		goto err_free_id;
@@ -1265,6 +1310,10 @@ void fba_free_streaming_channel(struct fba_channel *chan)
 #define PCI_DEVICE_ID_FACEBOOK_FREYA 0x0200
 #define PCI_DEVICE_ID_FACEBOOK_ARTEMIS 0x0201
 #define PCI_DEVICE_ID_FACEBOOK_ATHENA 0x0202
+#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0205
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0206
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0207
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0208
 
 #define PCI_VENDOR_ID_BROADCOM 0x14e4
 #define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
@@ -1274,17 +1323,30 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct fba_device *fba_dev;
 
 	/*
-	 * Silently ignore anything, but  PF0 on Athena
+	 * Silently ignore anything, but  PF0 on Athena, PF0 and PF1 on Iris
 	 */
 	if (pdev->vendor == PCI_VENDOR_ID_FACEBOOK &&
-	    pdev->device == PCI_DEVICE_ID_FACEBOOK_ATHENA &&
-	    PCI_FUNC(pdev->devfn) != 0) {
+	    ((pdev->device == PCI_DEVICE_ID_FACEBOOK_ATHENA &&
+	      PCI_FUNC(pdev->devfn) != 0) ||
+	     (pdev->device == PCI_DEVICE_ID_FACEBOOK_IRIS &&
+	      PCI_FUNC(pdev->devfn) > 1))) {
+		dev_info(&pdev->dev, "Ignore devfn=%d\n", pdev->devfn);
 		return -ENODEV;
 	}
 
 	dev_info(&pdev->dev, "Probe slot=%s bus=%s bus_num=0x%x\n",
 		 pdev->slot ? pci_slot_name(pdev->slot) : "n/a",
 		 pdev->bus->name, pdev->bus->number);
+
+	// hack for Iris - do not support devices in amodel on any bus other than 1
+	// since grid #2 will only be supported on PF1 and secondary PCIE links
+	// should not be used for control
+	if (pdev->device == PCI_DEVICE_ID_FACEBOOK_IRIS &&
+	    pdev->bus->number != 1) {
+		dev_info(&pdev->dev, "Unsupported bus_num=0x%x\n",
+			 pdev->bus->number);
+		return -ENODEV;
+	}
 
 	fba_dev = kzalloc(sizeof(*fba_dev), GFP_KERNEL);
 	if (fba_dev == NULL)
@@ -1297,8 +1359,8 @@ static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	fba_dev->num_retries = MAX_RETRIES;
 	fba_dev->admin_cmd_timeout_ms = admin_cmd_timeout ?
-						      admin_cmd_timeout :
-						      SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+						admin_cmd_timeout :
+						SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
 
 	return fba_device_init(fba_dev);
 }
@@ -1320,6 +1382,7 @@ static const struct pci_device_id fbaccel_ids[] = {
 	{ PCI_DEVICE_DATA(FACEBOOK, FREYA, &freya_cfg) },
 	{ PCI_DEVICE_DATA(FACEBOOK, ARTEMIS, &artemis_cfg) },
 	{ PCI_DEVICE_DATA(FACEBOOK, ATHENA, &athena_cfg) },
+	{ PCI_DEVICE_DATA(FACEBOOK, IRIS, &iris_cfg) },
 	{ PCI_DEVICE_DATA(BROADCOM, VIPER, &tenjin_cfg) },
 	{}
 };
@@ -1372,9 +1435,14 @@ static int __init fbaccel_driver_init(void)
 	INIT_LIST_HEAD(freya_cfg.devids);
 	INIT_LIST_HEAD(artemis_cfg.devids);
 	INIT_LIST_HEAD(athena_cfg.devids);
+	INIT_LIST_HEAD(iris_cfg.devids);
 	INIT_LIST_HEAD(tenjin_cfg.devids);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
+#else
 	fba_class = class_create(KBUILD_MODNAME);
+#endif
 	if (IS_ERR(fba_class))
 		return PTR_ERR(fba_class);
 	fba_class->dev_groups = fba_device_groups;
@@ -1408,11 +1476,11 @@ static void __exit fbaccel_driver_exit(void)
 	struct list_head *elem;
 	struct fba_id_map *id_map;
 	struct list_head *maps[] = { freya_cfg.devids, artemis_cfg.devids,
-				     artemis_cfg.devids, tenjin_cfg.devids };
+				     athena_cfg.devids, iris_cfg.devids,
+				     tenjin_cfg.devids };
 	struct ida *idas[] = {
-		freya_cfg.devnode_ida,
-		artemis_cfg.devnode_ida,
-		athena_cfg.devnode_ida,
+		freya_cfg.devnode_ida,	artemis_cfg.devnode_ida,
+		athena_cfg.devnode_ida, iris_cfg.devnode_ida,
 		tenjin_cfg.devnode_ida,
 	};
 	int i;
