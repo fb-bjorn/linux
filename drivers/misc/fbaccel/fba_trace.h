@@ -9,6 +9,7 @@
 
 #include <linux/tracepoint.h>
 #include <linux/dma-direction.h>
+#include <linux/version.h>
 
 TRACE_EVENT(fba_post_cmd,
 	TP_PROTO(const char *name, size_t n_sub, uint64_t user_data),
@@ -21,7 +22,11 @@ TRACE_EVENT(fba_post_cmd,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->n_sub = n_sub;
 	),
 
@@ -41,7 +46,11 @@ TRACE_EVENT(fba_job_post,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->job = job;
 		__entry->ectx = ectx;
 		__entry->sub_cnt = sub_cnt;
@@ -66,7 +75,11 @@ TRACE_EVENT(fba_job_admin_post,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->job = job;
 		__entry->ectx = ectx;
 		__entry->sub_cnt = sub_cnt;
@@ -92,7 +105,11 @@ TRACE_EVENT(fba_job_read_results,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->job = job;
 		__entry->ectx = ectx;
 		__entry->sub_cnt = sub_cnt;
@@ -119,7 +136,11 @@ TRACE_EVENT(fba_job_done,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->job = job;
 		__entry->ectx = ectx;
 		__entry->sub_cnt = sub_cnt;
@@ -143,7 +164,11 @@ TRACE_EVENT(fba_channel_post_sub,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->chan_id = chan_id;
 		__entry->cmd_id = cmd_id;
 		__entry->opcode = opcode;
@@ -164,7 +189,11 @@ TRACE_EVENT(fba_channel_post,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->chan_id = chan_id;
 		__entry->cmd_id = cmd_id;
 		__entry->sub_cnt = sub_cnt;
@@ -186,7 +215,11 @@ TRACE_EVENT(fba_channel_done,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->chan_id = chan_id;
 		__entry->cmd_id = cmd_id;
 		__entry->cqueue_head = cqueue_head;
@@ -206,7 +239,11 @@ TRACE_EVENT(fba_time_sync,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->tv_sec = tv_sec;
 		__entry->tv_nsec = tv_nsec;
 	),
@@ -227,7 +264,11 @@ TRACE_EVENT(fba_dma_map_cnt,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->va = va;
 		__entry->sz = sz;
 		__entry->frdev = frdev;
@@ -253,7 +294,11 @@ TRACE_EVENT(fba_dma_map_prp,
 	),
 
 	TP_fast_assign(
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		__assign_str(name, name);
+#else
+		__assign_str(name);
+#endif
 		__entry->va = va;
 		__entry->sz = sz;
 		__entry->frdev = frdev;

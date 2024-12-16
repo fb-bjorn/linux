@@ -119,33 +119,54 @@ static inline bool fba_uart_rx_empty(struct fba_uart_dev *fbau)
  */
 static void fbau_transmit_chars(struct fba_uart_dev *fbau)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	struct circ_buf *xmit = &fbau->port.state->xmit;
+#else
+	struct tty_port *tport = &fbau->port.state->port;
+#endif
 	int count;
 
 	if (fbau->port.x_char) {
 		fbau->port.x_char = 0;
 		return;
 	}
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	if (uart_circ_empty(xmit) || uart_tx_stopped(&fbau->port))
+#else
+	if (kfifo_is_empty(&tport->xmit_fifo) || uart_tx_stopped(&fbau->port))
+#endif
 		return;
 
 	count = 0;
 	while (!fba_uart_tx_full(fbau)) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 		fbau_write_mbox(fbau, xmit->buf[xmit->tail],
 				FBA_UART_TX_FIFO_OFFS + fbau->tx_tail);
+
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		fbau->tx_tail = (fbau->tx_tail + 1) % FBA_UART_TX_FIFO_DEPTH;
 		fbau->port.icount.tx++;
 		count++;
 		if (uart_circ_empty(xmit))
 			break;
+#else
+		unsigned char ch;
+		if (!uart_fifo_get(&fbau->port, &ch))
+			break;
+		fbau_write_mbox(fbau, ch,
+				FBA_UART_TX_FIFO_OFFS + fbau->tx_tail);
+		count++;
+#endif
 	}
 
 	if (count)
 		fbau_write_mbox(fbau, fbau->tx_tail, FBA_UART_TX_CTRL_OFFS);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 10, 0)
 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
+#else
+	if (kfifo_len(&tport->xmit_fifo) < WAKEUP_CHARS)
+#endif
 		uart_write_wakeup(&fbau->port);
 }
 
