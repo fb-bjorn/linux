@@ -1136,6 +1136,11 @@ static u64 read_tsc(struct clocksource *cs)
 	return (u64)rdtsc_ordered();
 }
 
+static u64 read_tsc_non_monotonic(struct clocksource *cs)
+{
+	return (u64)rdtsc();
+}
+
 static void tsc_cs_mark_unstable(struct clocksource *cs)
 {
 	if (tsc_unstable)
@@ -1169,6 +1174,7 @@ static struct clocksource clocksource_tsc_early = {
 	.name			= "tsc-early",
 	.rating			= 299,
 	.read			= read_tsc,
+	.read_non_monotonic	= read_tsc_non_monotonic,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
 				  CLOCK_SOURCE_MUST_VERIFY,
@@ -1190,6 +1196,7 @@ static struct clocksource clocksource_tsc = {
 	.name			= "tsc",
 	.rating			= 300,
 	.read			= read_tsc,
+	.read_non_monotonic	= read_tsc_non_monotonic,
 	.mask			= CLOCKSOURCE_MASK(64),
 	.flags			= CLOCK_SOURCE_IS_CONTINUOUS |
 				  CLOCK_SOURCE_CAN_INLINE_READ |
