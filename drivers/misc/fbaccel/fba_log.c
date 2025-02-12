@@ -707,7 +707,7 @@ static const struct file_operations fba_logger_fops = {
 	.open = fba_logger_open,
 	.release = fba_logger_release,
 	.read = fba_logger_read,
-	.llseek = no_llseek,
+	.llseek = noop_llseek,
 };
 
 int fba_logger_driver_init(void)

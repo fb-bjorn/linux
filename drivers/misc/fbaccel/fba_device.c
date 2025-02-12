@@ -58,7 +58,11 @@ static void fba_async_probe(void *data, async_cookie_t cookie);
 	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | PCI_EXP_DEVCTL_FERE | \
 	 PCI_EXP_DEVCTL_URRE)
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("CXL");
+#else
 MODULE_IMPORT_NS(CXL);
+#endif
 
 static int pci_enable_pcie_error_reporting(struct pci_dev *dev)
 {
@@ -935,11 +939,7 @@ static int fba_pci_init(struct fba_device *fba_dev)
 		goto err_disable_device;
 	}
 
-	ret = dma_set_max_seg_size(&pdev->dev, UINT_MAX);
-	if (ret) {
-		fba_dev_err(fba_dev, "Failed to set DMA max segment size.");
-		goto err_release_regions;
-	}
+	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 
 	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (ret) {
@@ -1531,5 +1531,9 @@ module_exit(fbaccel_exit);
 MODULE_DESCRIPTION("Meta Accelerator Host Driver");
 MODULE_AUTHOR("Meta Platforms, Inc.");
 MODULE_LICENSE("GPL v2");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
 MODULE_IMPORT_NS(DMA_BUF);
+#endif
 MODULE_VERSION(FBACCEL_VERSION);
