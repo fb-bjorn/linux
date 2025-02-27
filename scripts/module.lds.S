@@ -61,6 +61,27 @@ SECTIONS {
 		*(.rodata..L*)
 	}
 
+#ifdef CONFIG_PGO_CLANG
+	__llvm_prf_data : {
+		*(__llvm_prf_data)
+	}
+	.rela__llvm_prf_data : {
+		*(.rela__llvm_prf_data)
+	}
+	__llvm_prf_cnts : {
+		*(__llvm_prf_cnts)
+	}
+	__llvm_prf_names : {
+		*(__llvm_prf_names)
+	}
+	__llvm_prf_vals : {
+		*(__llvm_prf_vals)
+	}
+	__llvm_prf_vnds : {
+		*(__llvm_prf_vnds)
+	}
+#endif
+
 	MOD_SEPARATE_CODETAG_SECTIONS()
 }
 
