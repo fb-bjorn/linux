@@ -103,8 +103,10 @@ xfs_inode_alloc(
 
 	/* VFS doesn't initialise i_mode! */
 	VFS_I(ip)->i_mode = 0;
-	mapping_set_folio_min_order(VFS_I(ip)->i_mapping,
-				    M_IGEO(mp)->min_folio_order);
+	mapping_set_folio_order_range(VFS_I(ip)->i_mapping,
+				     M_IGEO(mp)->min_folio_order,
+				     xfs_large_folios ? MAX_PAGECACHE_ORDER :
+							M_IGEO(mp)->min_folio_order);
 
 	XFS_STATS_INC(mp, xs_inodes_active);
 	ASSERT(atomic_read(&ip->i_pincount) == 0);
@@ -348,8 +350,10 @@ xfs_reinit_inode(
 	inode->i_uid = uid;
 	inode->i_gid = gid;
 	inode_state_assign_raw(inode, state);
-	mapping_set_folio_min_order(inode->i_mapping,
-				    M_IGEO(mp)->min_folio_order);
+	mapping_set_folio_order_range(inode->i_mapping,
+				     M_IGEO(mp)->min_folio_order,
+				     xfs_large_folios ? MAX_PAGECACHE_ORDER :
+							M_IGEO(mp)->min_folio_order);
 	return error;
 }
 

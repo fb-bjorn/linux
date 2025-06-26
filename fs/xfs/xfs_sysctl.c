@@ -167,6 +167,15 @@ static const struct ctl_table xfs_table[] = {
 		.extra1		= &xfs_params.blockgc_timer.min,
 		.extra2		= &xfs_params.blockgc_timer.max,
 	},
+	{
+		.procname	= "large_folios",
+		.data		= &xfs_params.large_folios.val,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &xfs_params.large_folios.min,
+		.extra2		= &xfs_params.large_folios.max,
+	},
 	/* please keep this the last entry */
 #ifdef CONFIG_PROC_FS
 	{
