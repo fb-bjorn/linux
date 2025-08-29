@@ -4817,6 +4817,18 @@ void pci_reset_secondary_bus(struct pci_dev *dev)
 
 	ctrl &= ~PCI_BRIDGE_CTL_BUS_RESET;
 	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, ctrl);
+	/*
+	 * FIXME: This static sleep was removed in ac91e698056: PCI: Unify delay
+	 * handling for reset and resume.
+	 *
+	 * With Broadcom PEX89144 downstream switch ports, config space reads
+	 * of the attached device succeed immediately, before either the link is up
+	 * or the attached device completes reset. This causes us to unmask
+	 * hotplug interrupts before reset completed, and the link presence change
+	 * when device reset has *actually* completed triggers a hotplug.
+	 */
+	if (dev->vendor == PCI_VENDOR_ID_LSI_LOGIC && dev->device == 0xc030)
+		ssleep(1);
 }
 
 void __weak pcibios_reset_secondary_bus(struct pci_dev *dev)

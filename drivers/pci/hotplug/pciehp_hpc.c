@@ -947,12 +947,17 @@ int pciehp_reset_slot(struct hotplug_slot *hotplug_slot, bool probe)
 
 	down_write_nested(&ctrl->reset_lock, ctrl->depth);
 
-	pci_hp_ignore_link_change(pdev);
+	if (pdev->vendor == PCI_VENDOR_ID_LSI_LOGIC && pdev->device == 0xc030)
+		pcie_disable_notification(ctrl);
+	else
+		pci_hp_ignore_link_change(pdev);
 
 	rc = pci_bridge_secondary_bus_reset(ctrl->pcie->port);
 
-	pci_hp_unignore_link_change(pdev);
-
+	if (pdev->vendor == PCI_VENDOR_ID_LSI_LOGIC && pdev->device == 0xc030)
+		pcie_enable_notification(ctrl);
+	else
+		pci_hp_unignore_link_change(pdev);
 	up_write(&ctrl->reset_lock);
 	return rc;
 }
