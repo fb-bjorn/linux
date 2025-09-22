@@ -558,8 +558,10 @@ static ssize_t reset_subordinate_store(struct device *dev,
 	struct pci_dev *pdev = to_pci_dev(dev);
 	unsigned long val;
 
+	/* fb-only: don't require CAP_SYS_ADMIN for reset_subordinate
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	*/
 
 	if (kstrtoul(buf, 0, &val) < 0)
 		return -EINVAL;
