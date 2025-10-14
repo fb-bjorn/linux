@@ -2866,7 +2866,7 @@ scmi_txrx_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
  */
 static int scmi_channels_setup(struct scmi_info *info)
 {
-	int ret;
+	int ret, idx;
 	struct fwnode_handle *child, *fwnode = dev_fwnode(info->dev);
 
 	/* Initialize a common generic channel at first */
@@ -2885,6 +2885,17 @@ static int scmi_channels_setup(struct scmi_info *info)
 				"Out of range protocol %d\n", prot_id);
 
 		ret = scmi_txrx_setup(info, child, prot_id);
+		if (ret)
+			return ret;
+	}
+
+	if (acpi_disabled)
+		return 0;
+
+	for (idx = 1; idx < ARRAY_SIZE(scmi_dsd_info_list); idx++) {
+		int prot_id = scmi_dsd_info_list[idx].protocol_id;
+
+		ret = scmi_txrx_setup(info, fwnode, prot_id);
 		if (ret)
 			return ret;
 	}
@@ -3259,7 +3270,7 @@ static void scmi_device_check_create(struct fwnode_handle *fwnode, int prot_id,
 
 static int scmi_probe(struct platform_device *pdev)
 {
-	int ret;
+	int ret, idx;
 	char *err_str = "probe failure\n";
 	struct scmi_handle *handle;
 	const struct scmi_desc *desc;
@@ -3387,6 +3398,15 @@ static int scmi_probe(struct platform_device *pdev)
 			continue;
 
 		scmi_device_check_create(child, prot_id, info);
+	}
+
+	if (acpi_disabled)
+		return 0;
+
+	for (idx = 1; idx < ARRAY_SIZE(scmi_dsd_info_list); idx++) {
+		int prot_id = scmi_dsd_info_list[idx].protocol_id;
+
+		scmi_device_check_create(dev_fwnode(dev), prot_id, info);
 	}
 
 	return 0;
