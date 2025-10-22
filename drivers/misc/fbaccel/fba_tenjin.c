@@ -43,11 +43,13 @@ static struct list_head devids;
 #define COREDUMP_M7_BAR_OFFSET 0x13000
 /* RISCV coredump region follows after M7 coredump region */
 #define COREDUMP_CCP_BAR_OFFSET (COREDUMP_M7_BAR_OFFSET + COREDUMP_M7_SIZE)
+/* A72 coredump region follows after CCP coredump region */
+#define COREDUMP_A72_BAR_OFFSET (COREDUMP_CCP_BAR_OFFSET + COREDUMP_CCP_SIZE)
 
 #define RISCV_BOOT_ARGS_BAR 2
-#define RISCV_BOOT_ARGS_BAR_OFFSET (COREDUMP_CCP_BAR_OFFSET + COREDUMP_CCP_SIZE)
+#define RISCV_BOOT_ARGS_BAR_OFFSET (COREDUMP_A72_BAR_OFFSET + COREDUMP_A72_SIZE)
 
-#define TENJIN_NUM_OF_CPU 2
+#define TENJIN_NUM_OF_CPU 3
 /* Offset in BAR0 - Mapped to CRMU_IHOST_SW_PERSISTENT_REG1(0x40070C78)*/
 #define BAR_BOOTSRC_SELECT 0xC78
 /* BOOTSRC definitions */
@@ -189,10 +191,15 @@ static const struct coredump_region tenjin_coredump_regions[] = {
 		.offset = COREDUMP_M7_BAR_OFFSET,
 		.size = COREDUMP_M7_SIZE,
 	},
+	{
+		.bar = COREDUMP_BAR,
+		.offset = COREDUMP_A72_BAR_OFFSET,
+		.size = COREDUMP_A72_SIZE,
+	},
 };
 #define N_COREDUMP_CPUS ARRAY_SIZE(tenjin_coredump_regions)
 
-#define MAX_COREDUMP_SIZE (COREDUMP_M7_SIZE + COREDUMP_CCP_SIZE)
+#define MAX_COREDUMP_SIZE (COREDUMP_M7_SIZE + COREDUMP_CCP_SIZE + COREDUMP_A72_SIZE)
 
 struct fbv_coredump {
 	/* To check if coredump init is called */

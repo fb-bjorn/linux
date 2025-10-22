@@ -82,6 +82,7 @@
 
 #define COREDUMP_M7_SIZE (16 * 1024)
 #define COREDUMP_CCP_SIZE (64 * 1024)
+#define COREDUMP_A72_SIZE (8 * 1024)
 #define RISCV_BOOT_ARGS_REGION_SIZE 4096
 /*
  * Use low vector numbers for fixed functionality
