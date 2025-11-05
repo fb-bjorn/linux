@@ -420,7 +420,12 @@ static int cxl_to_mem_cmd_raw(struct cxl_mem_command *mem_cmd,
 	if (!cxl_mem_raw_command_allowed(send_cmd->raw.opcode))
 		return -EPERM;
 
-	dev_WARN_ONCE(cxl_mbox->host, true, "raw command path used\n");
+	/*
+	 * META: We use this path for Vistara device management, and this
+	 * warning creates unwanted noise.  Silence it.
+	 *
+	 * dev_WARN_ONCE(cxl_mbox->host, true, "raw command path used\n");
+	 */
 
 	*mem_cmd = (struct cxl_mem_command) {
 		.info = {
