@@ -5084,6 +5084,18 @@ static int  pci_quirk_wangxun_nic_acs(struct pci_dev *dev, u16 acs_flags)
 	return false;
 }
 
+/* Broadcom switch can have a service management endpoint present as a function on
+ * the upstream port (USP). The port doesn't have ACS capabilities and thus Linux
+ * assumes it is not isolated. We assume that the service endpoint cannot issue direct
+ * requests directly to its neighbouring downstream ports.
+ */
+static int pci_quirk_brcm_atlas_upsteam_acs(struct pci_dev *dev, u16 acs_flags)
+{
+	if (!pci_is_pcie(dev) || (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM))
+		return -ENOTTY;
+	return pci_quirk_mf_endpoint_acs(dev, acs_flags);
+}
+
 static const struct pci_dev_acs_enabled {
 	u16 vendor;
 	u16 device;
@@ -5198,6 +5210,7 @@ static const struct pci_dev_acs_enabled {
 	{ PCI_VENDOR_ID_BROADCOM, 0x1762, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0x1763, pci_quirk_mf_endpoint_acs },
 	{ PCI_VENDOR_ID_BROADCOM, 0xD714, pci_quirk_brcm_acs },
+	{ PCI_VENDOR_ID_LSI_LOGIC, 0xC040, pci_quirk_brcm_atlas_upsteam_acs }, /* Atlas3 */
 	/* Loongson PCIe Root Ports */
 	{ PCI_VENDOR_ID_LOONGSON, 0x3C09, pci_quirk_loongson_acs },
 	{ PCI_VENDOR_ID_LOONGSON, 0x3C19, pci_quirk_loongson_acs },
