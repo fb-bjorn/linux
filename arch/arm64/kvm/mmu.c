@@ -1964,7 +1964,8 @@ static int kvm_s2_fault_compute_prot(const struct kvm_s2_fault_desc *s2fd,
 		*prot |= KVM_PGTABLE_PROT_X;
 
 	if (s2vi->map_non_cacheable)
-		*prot |= (s2vi->vm_flags & VM_ALLOW_ANY_UNCACHED) ?
+		*prot |= (!cpus_have_cap(ARM64_WORKAROUND_NC_TO_NGNRE) &&
+			  (s2vi->vm_flags & VM_ALLOW_ANY_UNCACHED)) ?
 			KVM_PGTABLE_PROT_NORMAL_NC : KVM_PGTABLE_PROT_DEVICE;
 	else if (cpus_have_final_cap(ARM64_HAS_CACHE_DIC))
 		*prot |= KVM_PGTABLE_PROT_X;
