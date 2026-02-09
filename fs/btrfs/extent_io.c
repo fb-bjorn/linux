@@ -368,8 +368,10 @@ out:
  */
 EXPORT_FOR_TESTS
 noinline_for_stack bool find_lock_delalloc_range(struct inode *inode,
-						 struct folio *locked_folio,
-						 u64 *start, u64 *end)
+				    struct folio *locked_folio,
+				    struct writeback_control *wbc, u64 *start,
+				    u64 *end, loff_t i_size,
+				    bool skip_last_page)
 {
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(inode);
 	struct extent_io_tree *tree = &BTRFS_I(inode)->io_tree;
@@ -378,10 +380,10 @@ noinline_for_stack bool find_lock_delalloc_range(struct inode *inode,
 	u64 max_bytes = fs_info->max_extent_size;
 	u64 delalloc_start;
 	u64 delalloc_end;
-	bool found;
 	struct extent_state *cached_state = NULL;
 	int ret;
 	int loops = 0;
+	bool found;
 
 	/* Caller should pass a valid @end to indicate the search range end */
 	ASSERT(orig_end > orig_start);
@@ -424,6 +426,13 @@ again:
 	 */
 	if (delalloc_end + 1 - delalloc_start > max_bytes)
 		delalloc_end = delalloc_start + max_bytes - 1;
+
+	/*
+	 * Don't include the last page if it is a partial page and we're
+	 * O_APPEND.
+	 */
+	if (skip_last_page && delalloc_end >= i_size)
+		delalloc_end = round_down(i_size, PAGE_SIZE) - 1;
 
 	/* step two, lock all the folios after the folios that has start */
 	ret = lock_delalloc_folios(inode, locked_folio, delalloc_start,
@@ -1414,7 +1423,8 @@ static bool find_next_delalloc_bitmap(struct folio *folio,
  */
 static noinline_for_stack int writepage_delalloc(struct btrfs_inode *inode,
 						 struct folio *folio,
-						 struct btrfs_bio_ctrl *bio_ctrl)
+						 struct btrfs_bio_ctrl *bio_ctrl,
+						 loff_t i_size, bool skip_last_page)
 {
 	struct btrfs_fs_info *fs_info = inode_to_fs_info(&inode->vfs_inode);
 	struct writeback_control *wbc = bio_ctrl->wbc;
@@ -1465,8 +1475,9 @@ static noinline_for_stack int writepage_delalloc(struct btrfs_inode *inode,
 	/* Lock all (subpage) delalloc ranges inside the folio first. */
 	while (delalloc_start < page_end) {
 		delalloc_end = page_end;
-		if (!find_lock_delalloc_range(&inode->vfs_inode, folio,
-					      &delalloc_start, &delalloc_end)) {
+		if (!find_lock_delalloc_range(&inode->vfs_inode, folio, wbc,
+					      &delalloc_start, &delalloc_end,
+					      i_size, skip_last_page)) {
 			delalloc_start = delalloc_end + 1;
 			continue;
 		}
@@ -1837,6 +1848,14 @@ static int extent_writepage(struct folio *folio, struct btrfs_bio_ctrl *bio_ctrl
 	loff_t i_size = i_size_read(&inode->vfs_inode);
 	const pgoff_t end_index = i_size >> PAGE_SHIFT;
 	const unsigned int blocks_per_folio = btrfs_blocks_per_folio(fs_info, folio);
+	/*
+	 * Skip writing out the last page for background writeback of O_APPEND,
+	 * unless we're explicitly trying to free space.
+	 */
+	bool skip_last_page = (bio_ctrl->wbc->sync_mode == WB_SYNC_NONE &&
+			       bio_ctrl->wbc->reason != WB_REASON_FS_FREE_SPACE &&
+			       test_bit(BTRFS_INODE_APPEND_WRITE,
+					&inode->runtime_flags));
 
 	trace_extent_writepage(folio, &inode->vfs_inode, bio_ctrl->wbc);
 
@@ -1850,8 +1869,13 @@ static int extent_writepage(struct folio *folio, struct btrfs_bio_ctrl *bio_ctrl
 		return 0;
 	}
 
-	if (folio_contains(folio, end_index))
+	if (folio_contains(folio, end_index) && !skip_last_page) {
 		folio_zero_range(folio, pg_offset, folio_size(folio) - pg_offset);
+	} else if (folio_contains(folio, end_index)) {
+		folio_redirty_for_writepage(bio_ctrl->wbc, folio);
+		folio_unlock(folio);
+		return 0;
+	}
 
 	/*
 	 * Default to unlock the whole folio.
@@ -1886,7 +1910,7 @@ static int extent_writepage(struct folio *folio, struct btrfs_bio_ctrl *bio_ctrl
 	if (ret < 0)
 		goto done;
 
-	ret = writepage_delalloc(inode, folio, bio_ctrl);
+	ret = writepage_delalloc(inode, folio, bio_ctrl, i_size, skip_last_page);
 	if (ret == 1)
 		return 0;
 	if (ret)

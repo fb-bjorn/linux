@@ -8,6 +8,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/sizes.h>
+#include <linux/writeback.h>
 #include "btrfs-tests.h"
 #include "../ctree.h"
 #include "../extent_io.h"
@@ -120,6 +121,7 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	u64 start, end, test_start;
 	bool found;
 	int ret = -EINVAL;
+	struct writeback_control wbc = { .sync_mode = WB_SYNC_ALL };
 
 	test_msg("running find delalloc tests");
 
@@ -179,8 +181,8 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	btrfs_set_extent_bit(tmp, 0, sectorsize - 1, EXTENT_DELALLOC, NULL);
 	start = 0;
 	end = start + PAGE_SIZE - 1;
-	found = find_lock_delalloc_range(inode, page_folio(locked_page), &start,
-					 &end);
+	found = find_lock_delalloc_range(inode, page_folio(locked_page), &wbc, &start, &end,
+					 LLONG_MAX, false);
 	if (!found) {
 		test_err("should have found at least one delalloc");
 		goto out_bits;
@@ -210,8 +212,8 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	btrfs_set_extent_bit(tmp, sectorsize, max_bytes - 1, EXTENT_DELALLOC, NULL);
 	start = test_start;
 	end = start + PAGE_SIZE - 1;
-	found = find_lock_delalloc_range(inode, page_folio(locked_page), &start,
-					 &end);
+	found = find_lock_delalloc_range(inode, page_folio(locked_page), &wbc, &start, &end,
+					 LLONG_MAX, false);
 	if (!found) {
 		test_err("couldn't find delalloc in our range");
 		goto out_bits;
@@ -244,8 +246,8 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	}
 	start = test_start;
 	end = start + PAGE_SIZE - 1;
-	found = find_lock_delalloc_range(inode, page_folio(locked_page), &start,
-					 &end);
+	found = find_lock_delalloc_range(inode, page_folio(locked_page), &wbc, &start, &end,
+					 LLONG_MAX, false);
 	if (found) {
 		test_err("found range when we shouldn't have");
 		goto out_bits;
@@ -265,8 +267,8 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	btrfs_set_extent_bit(tmp, max_bytes, total_dirty - 1, EXTENT_DELALLOC, NULL);
 	start = test_start;
 	end = start + PAGE_SIZE - 1;
-	found = find_lock_delalloc_range(inode, page_folio(locked_page), &start,
-					 &end);
+	found = find_lock_delalloc_range(inode, page_folio(locked_page), &wbc, &start, &end,
+					 LLONG_MAX, false);
 	if (!found) {
 		test_err("didn't find our range");
 		goto out_bits;
@@ -306,8 +308,8 @@ static int test_find_delalloc(u32 sectorsize, u32 nodesize)
 	 * this changes at any point in the future we will need to fix this
 	 * tests expected behavior.
 	 */
-	found = find_lock_delalloc_range(inode, page_folio(locked_page), &start,
-					 &end);
+	found = find_lock_delalloc_range(inode, page_folio(locked_page), &wbc, &start, &end,
+					 LLONG_MAX, false);
 	if (!found) {
 		test_err("didn't find our range");
 		goto out_bits;

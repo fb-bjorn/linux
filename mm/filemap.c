@@ -370,13 +370,14 @@ static int filemap_check_and_keep_errors(struct address_space *mapping)
 
 static int filemap_writeback(struct address_space *mapping, loff_t start,
 		loff_t end, enum writeback_sync_modes sync_mode,
-		long *nr_to_write)
+		long *nr_to_write, enum wb_reason reason)
 {
 	struct writeback_control wbc = {
 		.sync_mode	= sync_mode,
 		.nr_to_write	= nr_to_write ? *nr_to_write : LONG_MAX,
 		.range_start	= start,
 		.range_end	= end,
+		.reason		= reason,
 	};
 	int ret;
 
@@ -410,7 +411,8 @@ static int filemap_writeback(struct address_space *mapping, loff_t start,
 int filemap_fdatawrite_range(struct address_space *mapping, loff_t start,
 		loff_t end)
 {
-	return filemap_writeback(mapping, start, end, WB_SYNC_ALL, NULL);
+	return filemap_writeback(mapping, start, end, WB_SYNC_ALL, NULL,
+			WB_REASON_BACKGROUND);
 }
 EXPORT_SYMBOL(filemap_fdatawrite_range);
 
@@ -434,7 +436,8 @@ EXPORT_SYMBOL(filemap_fdatawrite);
 int filemap_flush_range(struct address_space *mapping, loff_t start,
 				  loff_t end)
 {
-	return filemap_writeback(mapping, start, end, WB_SYNC_NONE, NULL);
+	return filemap_writeback(mapping, start, end, WB_SYNC_NONE, NULL,
+			WB_REASON_BACKGROUND);
 }
 EXPORT_SYMBOL_GPL(filemap_flush_range);
 
@@ -461,9 +464,33 @@ EXPORT_SYMBOL(filemap_flush);
 int filemap_flush_nr(struct address_space *mapping, long *nr_to_write)
 {
 	return filemap_writeback(mapping, 0, LLONG_MAX, WB_SYNC_NONE,
-			nr_to_write);
+			nr_to_write, WB_REASON_BACKGROUND);
 }
 EXPORT_SYMBOL_FOR_MODULES(filemap_flush_nr, "btrfs");
+
+/*
+ * META-ONLY: Like filemap_flush() but with a writeback reason.
+ * Used by btrfs to propagate WB_REASON_FS_FREE_SPACE through to
+ * extent_writepage() so it can distinguish ENOSPC flushes from
+ * background writeback.
+ */
+int filemap_flush_reason(struct address_space *mapping, enum wb_reason reason)
+{
+	return filemap_writeback(mapping, 0, LLONG_MAX, WB_SYNC_NONE,
+			NULL, reason);
+}
+EXPORT_SYMBOL_FOR_MODULES(filemap_flush_reason, "btrfs");
+
+/*
+ * META-ONLY: Like filemap_flush_nr() but with a writeback reason.
+ */
+int filemap_flush_nr_reason(struct address_space *mapping, long *nr_to_write,
+			    enum wb_reason reason)
+{
+	return filemap_writeback(mapping, 0, LLONG_MAX, WB_SYNC_NONE,
+			nr_to_write, reason);
+}
+EXPORT_SYMBOL_FOR_MODULES(filemap_flush_nr_reason, "btrfs");
 
 /**
  * filemap_range_has_page - check if a page exists in range.
