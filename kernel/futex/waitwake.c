@@ -667,7 +667,7 @@ retry_private:
 	return ret;
 }
 
-int __futex_wait(u32 __user *uaddr, unsigned int flags, u32 val,
+noinline int __futex_wait(u32 __user *uaddr, unsigned int flags, u32 val,
 		 struct hrtimer_sleeper *to, u32 bitset)
 {
 	struct futex_q q = futex_q_init;

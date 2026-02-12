@@ -88,7 +88,7 @@ static inline int cap_capable_helper(const struct cred *cred,
 		if (ns->level <= cred_ns->level)
 			return -EPERM;
 
-		/* 
+		/*
 		 * The owner of the user namespace in the parent of the
 		 * user namespace has all caps.
 		 */
@@ -121,7 +121,7 @@ static inline int cap_capable_helper(const struct cred *cred,
  * has_ns_capability_noaudit(), and has_capability_noaudit() return a
  * bool true (1) for this case.
  */
-int cap_capable(const struct cred *cred, struct user_namespace *target_ns,
+noinline int cap_capable(const struct cred *cred, struct user_namespace *target_ns,
 		int cap, unsigned int opts)
 {
 	const struct user_namespace *cred_ns = cred->user_ns;

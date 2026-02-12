@@ -2734,7 +2734,7 @@ int security_file_receive(struct file *file)
  *
  * Return: Returns 0 if permission is granted.
  */
-int security_file_open(struct file *file)
+noinline int security_file_open(struct file *file)
 {
 	return call_int_hook(file_open, file);
 }

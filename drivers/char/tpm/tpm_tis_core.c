@@ -242,7 +242,7 @@ static int tpm_tis_request_locality(struct tpm_chip *chip, int l)
 	return ret;
 }
 
-static u8 tpm_tis_status(struct tpm_chip *chip)
+static noinline u8 tpm_tis_status(struct tpm_chip *chip)
 {
 	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
 	int rc;

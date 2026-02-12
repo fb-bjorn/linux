@@ -749,7 +749,7 @@ out:
 	sock_put(sk);
 }
 
-void tcp_syn_ack_timeout(const struct request_sock *req)
+noinline void tcp_syn_ack_timeout(const struct request_sock *req)
 {
 	struct net *net = read_pnet(&inet_rsk(req)->ireq_net);
 

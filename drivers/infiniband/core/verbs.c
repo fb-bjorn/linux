@@ -1823,7 +1823,7 @@ static bool is_qp_type_connected(const struct ib_qp *qp)
 /*
  * IB core internal function to perform QP attributes modification.
  */
-static int _ib_modify_qp(struct ib_qp *qp, struct ib_qp_attr *attr,
+static noinline int _ib_modify_qp(struct ib_qp *qp, struct ib_qp_attr *attr,
 			 int attr_mask, struct ib_udata *udata)
 {
 	u32 port = attr_mask & IB_QP_PORT ? attr->port_num : qp->port;

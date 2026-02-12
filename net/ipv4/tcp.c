@@ -1443,7 +1443,7 @@ out_err:
 }
 EXPORT_SYMBOL_GPL(tcp_sendmsg_locked);
 
-int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
+noinline int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)
 {
 	int ret;
 
