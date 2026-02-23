@@ -844,6 +844,30 @@ void ethtool_mmsv_set_mm(struct ethtool_mmsv *mmsv, struct ethtool_mm_cfg *cfg);
 void ethtool_mmsv_init(struct ethtool_mmsv *mmsv, struct net_device *dev,
 		       const struct ethtool_mmsv_ops *ops);
 
+#define ETHTOOL_LOOPBACK_MAX_ENTRIES	16
+
+/**
+ * struct ethtool_loopback_entry - per-layer loopback configuration
+ * @layer: loopback layer (%ETHTOOL_LOOPBACK_LAYER_*)
+ * @direction: loopback direction (%ETHTOOL_LOOPBACK_DIRECTION_*)
+ * @enabled: whether loopback is enabled on this layer
+ */
+struct ethtool_loopback_entry {
+	u32 layer;
+	u32 direction;
+	u8 enabled;
+};
+
+/**
+ * struct ethtool_loopback_cfg - loopback configuration
+ * @entries: array of per-layer loopback configurations
+ * @n_entries: number of valid entries in the array
+ */
+struct ethtool_loopback_cfg {
+	struct ethtool_loopback_entry entries[ETHTOOL_LOOPBACK_MAX_ENTRIES];
+	u32 n_entries;
+};
+
 /**
  * struct ethtool_rxfh_param - RXFH (RSS) parameters
  * @hfunc: Defines the current RSS hash function used by HW (or to be set to).
@@ -1303,6 +1327,11 @@ struct ethtool_ops {
 	int	(*set_mm)(struct net_device *dev, struct ethtool_mm_cfg *cfg,
 			  struct netlink_ext_ack *extack);
 	void	(*get_mm_stats)(struct net_device *dev, struct ethtool_mm_stats *stats);
+	int	(*get_loopback)(struct net_device *dev,
+				struct ethtool_loopback_cfg *cfg);
+	int	(*set_loopback)(struct net_device *dev,
+				const struct ethtool_loopback_cfg *cfg,
+				struct netlink_ext_ack *extack);
 };
 
 int ethtool_check_ops(const struct ethtool_ops *ops);

@@ -421,6 +421,8 @@ ethnl_default_requests[__ETHTOOL_MSG_USER_CNT] = {
 	[ETHTOOL_MSG_TSCONFIG_SET]	= &ethnl_tsconfig_request_ops,
 	[ETHTOOL_MSG_PHY_GET]		= &ethnl_phy_request_ops,
 	[ETHTOOL_MSG_MSE_GET]		= &ethnl_mse_request_ops,
+	[ETHTOOL_MSG_LOOPBACK_GET]	= &ethnl_loopback_request_ops,
+	[ETHTOOL_MSG_LOOPBACK_SET]	= &ethnl_loopback_request_ops,
 };
 
 static struct ethnl_dump_ctx *ethnl_dump_context(struct netlink_callback *cb)
@@ -925,7 +927,8 @@ static int ethnl_default_set_doit(struct sk_buff *skb, struct genl_info *info)
 	swap(dev->cfg, dev->cfg_pending);
 	if (!ret)
 		goto out_ops;
-	ethnl_notify(dev, ops->set_ntf_cmd, req_info);
+	if (ops->set_ntf_cmd)
+		ethnl_notify(dev, ops->set_ntf_cmd, req_info);
 
 	ret = 0;
 out_ops:
@@ -1543,6 +1546,22 @@ static const struct genl_ops ethtool_genl_ops[] = {
 		.done	= ethnl_perphy_done,
 		.policy = ethnl_mse_get_policy,
 		.maxattr = ARRAY_SIZE(ethnl_mse_get_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_LOOPBACK_GET,
+		.doit	= ethnl_default_doit,
+		.start	= ethnl_default_start,
+		.dumpit	= ethnl_default_dumpit,
+		.done	= ethnl_default_done,
+		.policy = ethnl_loopback_get_policy,
+		.maxattr = ARRAY_SIZE(ethnl_loopback_get_policy) - 1,
+	},
+	{
+		.cmd	= ETHTOOL_MSG_LOOPBACK_SET,
+		.flags	= GENL_UNS_ADMIN_PERM,
+		.doit	= ethnl_default_set_doit,
+		.policy = ethnl_loopback_set_policy,
+		.maxattr = ARRAY_SIZE(ethnl_loopback_set_policy) - 1,
 	},
 };
 
