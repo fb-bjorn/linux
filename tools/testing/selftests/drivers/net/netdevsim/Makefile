@@ -7,6 +7,7 @@ TEST_PROGS := \
 	ethtool-coalesce.sh \
 	ethtool-features.sh \
 	ethtool-fec.sh \
+	ethtool-loopback.sh \
 	ethtool-pause.sh \
 	fib.sh \
 	fib_notifications.sh \
