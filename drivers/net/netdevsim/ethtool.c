@@ -276,6 +276,8 @@ static const struct ethtool_ops nsim_ethtool_ops = {
 	.get_ts_info			= nsim_get_ts_info,
 	.get_module_eeprom_by_page	= nsim_get_module_eeprom_by_page,
 	.set_module_eeprom_by_page	= nsim_set_module_eeprom_by_page,
+	.get_loopback			= ethtool_cmis_get_loopback,
+	.set_loopback			= ethtool_cmis_set_loopback,
 };
 
 static void nsim_ethtool_ring_init(struct netdevsim *ns)
