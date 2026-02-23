@@ -868,6 +868,25 @@ struct ethtool_loopback_cfg {
 	u32 n_entries;
 };
 
+#if IS_ENABLED(CONFIG_ETHTOOL_NETLINK)
+int ethtool_cmis_get_loopback(struct net_device *dev, struct ethtool_loopback_cfg *cfg);
+int ethtool_cmis_set_loopback(struct net_device *dev, const struct ethtool_loopback_cfg *cfg,
+			      struct netlink_ext_ack *extack);
+#else
+static inline int ethtool_cmis_get_loopback(struct net_device *dev,
+					    struct ethtool_loopback_cfg *cfg)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ethtool_cmis_set_loopback(struct net_device *dev,
+					    const struct ethtool_loopback_cfg *cfg,
+					    struct netlink_ext_ack *extack)
+{
+	return -EOPNOTSUPP;
+}
+#endif
+
 /**
  * struct ethtool_rxfh_param - RXFH (RSS) parameters
  * @hfunc: Defines the current RSS hash function used by HW (or to be set to).
