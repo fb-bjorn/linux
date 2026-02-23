@@ -211,6 +211,46 @@ definitions:
         name: discard
         value: 31
 
+  -
+    name: loopback-layer
+    type: enum
+    doc: |
+      Loopback layer / scope. Defines where in the network path
+      the loopback occurs.
+    entries:
+      -
+        name: sw
+        doc: Software / Kernel stack loopback
+      -
+        name: mac
+        doc: MAC / Controller internal loopback
+      -
+        name: pcs
+        doc: Physical Coding Sublayer (Digital) loopback
+      -
+        name: pma
+        doc: SerDes / Analog-Digital boundary loopback
+      -
+        name: pmd-host
+        doc: Transceiver Host-facing side
+      -
+        name: pmd-media
+        doc: Transceiver Media-facing side
+      -
+        name: ext
+        doc: External physical plug / cable loopback
+  -
+    name: loopback-direction
+    type: enum
+    doc: Loopback direction.
+    entries:
+      -
+        name: host-loop-host
+        doc: Host -> Loop -> Host (local / terminal)
+      -
+        name: line-loop-line
+        doc: Line -> Loop -> Line (remote / facility)
+
 attribute-sets:
   -
     name: header
@@ -1890,6 +1930,46 @@ attribute-sets:
         name: link
         type: nest
         nested-attributes: mse-snapshot
+  -
+    name: loopback-entry
+    doc: Per-layer loopback configuration entry.
+    attr-cnt-name: __ethtool-a-loopback-entry-cnt
+    attributes:
+      -
+        name: unspec
+        type: unused
+        value: 0
+      -
+        name: layer
+        type: u32
+        enum: loopback-layer
+        doc: Loopback layer / scope
+      -
+        name: direction
+        type: u32
+        enum: loopback-direction
+        doc: Loopback direction
+      -
+        name: enabled
+        type: u8
+        doc: Whether loopback is enabled on this layer
+  -
+    name: loopback
+    attr-cnt-name: __ethtool-a-loopback-cnt
+    attributes:
+      -
+        name: unspec
+        type: unused
+        value: 0
+      -
+        name: header
+        type: nest
+        nested-attributes: header
+      -
+        name: entry
+        type: nest
+        multi-attr: true
+        nested-attributes: loopback-entry
 
 operations:
   enum-model: directional
@@ -2842,6 +2922,30 @@ operations:
             - worst-channel
             - link
       dump: *mse-get-op
+    -
+      name: loopback-get
+      doc: Get loopback configuration and state.
+
+      attribute-set: loopback
+
+      do: &loopback-get-op
+        request:
+          attributes:
+            - header
+        reply:
+          attributes: &loopback
+            - header
+            - entry
+      dump: *loopback-get-op
+    -
+      name: loopback-set
+      doc: Set loopback configuration.
+
+      attribute-set: loopback
+
+      do:
+        request:
+          attributes: *loopback
 
 mcast-groups:
   list:
