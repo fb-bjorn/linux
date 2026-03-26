@@ -1,0 +1,56 @@
+Total vector instructions: 69418
+From hand-written crypto/RAID: ~8559
+NEW compiler-generated: ~60859
+New functions with vector instructions: 12084
+
+Top 50 NEW functions by vector instruction count:
+     343  HUF_fillDTableX2ForWeight
+     290  drm_fb_xrgb8888_to_rgb565be_line
+     196  drm_fb_xrgb8888_to_gray8_line
+     159  drm_fb_argb8888_to_argb4444_line
+     157  drm_fb_xrgb8888_to_rgb332_line
+     154  ZSTD_decompressSequencesLong_default.constprop.0
+     154  ZSTD_decompressSequencesLong_bmi2.constprop.0
+     121  drm_fb_xrgb8888_to_rgb565_line
+     121  drm_fb_xrgb8888_to_xrgb1555_line
+     120  establish_demotion_targets
+     118  ZSTD_rescaleFreqs
+     116  drm_fb_xrgb8888_to_argb1555_line
+     116  drm_fb_xrgb8888_to_rgba5551_line
+     115  check_alu_op
+     111  drm_fb_xrgb8888_to_bgr888_line
+      98  fb_set_var
+      97  ZSTD_resetCCtx_usingCDict
+      88  fib_multipath_hash
+      87  adjust_scalar_min_max_vals
+      84  rt6_multipath_hash
+      80  mpol_parse_str
+      78  ZSTD_decompressSequencesSplitLitBuffer_default.constprop.0
+      72  devinet_init_net
+      71  load_elf_binary
+      69  ZSTD_createCDict_advanced2
+      68  ZSTD_decompressSequencesSplitLitBuffer_bmi2.constprop.0
+      66  drm_fb_xrgb8888_to_rgb888_line
+      64  cgroup_base_stat_flush
+      64  copy_group_source_from_sockptr
+      63  vgacon_invert_region
+      60  preferred_group_nid
+      60  tty_mode_ioctl
+      60  ata_attach_transport
+      60  fix_separator_chars
+      60  mas_topiary_replace
+      59  ZSTD_resetCCtx_internal
+      58  __bitmap_resize
+      57  do_machine_check
+      56  cache_type_store
+      55  prctl_set_mm
+      55  em_update_performance_limits
+      55  blake2s_compress_ssse3
+      55  xfrm_state_find
+      53  copy_process
+      52  copy_from_sockptr_offset.constprop.0
+      52  ip6_route_net_init
+      52  ncsi_cmd_build_header
+      52  mas_split
+      51  ethtool_get_max_rxfh_channel
+      50  snapshot_page
