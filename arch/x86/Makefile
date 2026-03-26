@@ -71,15 +71,15 @@ export REALMODE_CFLAGS
 export BITS
 
 #
-# Prevent GCC from generating any FP code by mistake.
+# Allow GCC to generate SIMD code using SSE/AVX registers.
+# PoC: Enable auto-vectorization for the kernel.
 #
 # This must happen before we try the -mpreferred-stack-boundary, see:
 #
 #    https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53383
 #
-KBUILD_CFLAGS += -mno-sse -mno-mmx -mno-sse2 -mno-3dnow -mno-avx -mno-sse4a
+KBUILD_CFLAGS += -march=native -ftree-vectorize
 KBUILD_RUSTFLAGS += --target=$(objtree)/scripts/target.json
-KBUILD_RUSTFLAGS += -Ctarget-feature=-sse,-sse2,-sse3,-ssse3,-sse4.1,-sse4.2,-avx,-avx2
 
 #
 # CFLAGS for compiling floating point code inside the kernel.
