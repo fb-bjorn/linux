@@ -62,6 +62,18 @@ SYM_CODE_START_NOALIGN(startup_64)
 	leaq	__top_init_kernel_stack(%rip), %rsp
 
 	/*
+	 * SIMD kernel PoC: Enable SSE very early, before any C code runs,
+	 * because the kernel is compiled with -march=native -ftree-vectorize
+	 * and GCC may emit SSE instructions in any function.
+	 */
+	movq	%cr4, %rax
+	orq	$(X86_CR4_OSFXSR | X86_CR4_OSXMMEXCPT), %rax
+	movq	%rax, %cr4
+	movq	%cr0, %rax
+	andq	$(~(X86_CR0_TS | X86_CR0_EM)), %rax
+	movq	%rax, %cr0
+
+	/*
 	 * Set up GSBASE.
 	 * Note that on SMP the boot CPU uses the init data section until
 	 * the per-CPU areas are set up.
@@ -231,6 +243,19 @@ SYM_INNER_LABEL(common_startup_64, SYM_L_LOCAL)
 	 */
 	btsl	$X86_CR4_PGE_BIT, %ecx
 	movq	%rcx, %cr4
+
+	/*
+	 * SIMD kernel PoC: Enable SSE/FXSAVE early so that compiler-generated
+	 * SSE instructions work from the very start of the kernel.
+	 */
+	btsl	$X86_CR4_OSFXSR_BIT, %ecx
+	btsl	$X86_CR4_OSXMMEXCPT_BIT, %ecx
+	movq	%rcx, %cr4
+
+	/* Also clear CR0.TS and CR0.EM so SSE doesn't trap */
+	movq	%cr0, %rcx
+	andl	$(~(X86_CR0_TS | X86_CR0_EM)), %ecx
+	movq	%rcx, %cr0
 
 #ifdef CONFIG_SMP
 	/*
