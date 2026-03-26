@@ -129,6 +129,11 @@ static inline void fpstate_init_soft(struct swregs_state *soft) {}
 DECLARE_PER_CPU(bool, kernel_fpu_allowed);
 DECLARE_PER_CPU(struct fpu *, fpu_fpregs_owner_ctx);
 
+/* Kernel SIMD entry/exit helpers (for -ftree-vectorize PoC) */
+extern void kernel_fpu_save_on_user_entry(void);
+extern void kernel_fpu_save_on_kernel_entry(void);
+extern void kernel_fpu_restore_on_kernel_exit(void);
+
 /* Process cleanup */
 #ifdef CONFIG_X86_64
 extern void fpstate_free(struct fpu *fpu);

@@ -57,6 +57,117 @@ DEFINE_PER_CPU(bool, kernel_fpu_allowed);
  */
 DEFINE_PER_CPU(struct fpu *, fpu_fpregs_owner_ctx);
 
+/*
+ * Per-CPU kernel FPU save areas for interrupt nesting.
+ * When the kernel is compiled with SIMD enabled (-ftree-vectorize),
+ * every interrupt/exception handler may use SSE/AVX registers.
+ * We need to save/restore the kernel's FPU state on interrupt entry/exit
+ * when interrupting kernel code.
+ *
+ * Nesting levels: task -> hardirq -> NMI (3 levels max)
+ * NMI gets its own dedicated slot since it can interrupt anything.
+ */
+#define KERNEL_FPU_NESTING_MAX	3
+
+struct kernel_fpu_state {
+	union fpregs_state	regs;
+} __aligned(64);
+
+static DEFINE_PER_CPU(struct kernel_fpu_state[KERNEL_FPU_NESTING_MAX],
+		      kernel_fpu_states);
+static DEFINE_PER_CPU(int, kernel_fpu_nesting_level);
+
+/*
+ * Save FPU state on entry to the kernel from userspace.
+ * This saves the user's FPU registers to the task's fpstate buffer
+ * and sets TIF_NEED_FPU_LOAD so they'll be restored on return.
+ */
+void noinstr kernel_fpu_save_on_user_entry(void)
+{
+	struct fpu *fpu;
+
+	if (!cpu_feature_enabled(X86_FEATURE_FPU))
+		return;
+
+	if (current->flags & (PF_KTHREAD | PF_USER_WORKER))
+		return;
+
+	if (test_thread_flag(TIF_NEED_FPU_LOAD))
+		return;
+
+	fpu = x86_task_fpu(current);
+	set_thread_flag(TIF_NEED_FPU_LOAD);
+	save_fpregs_to_fpstate(fpu);
+	__cpu_invalidate_fpregs_state();
+
+	if (boot_cpu_has(X86_FEATURE_XMM))
+		ldmxcsr(MXCSR_DEFAULT);
+}
+
+/*
+ * Save FPU state on interrupt/exception entry from kernel mode.
+ * Saves to a per-CPU nesting buffer so nested interrupts work.
+ */
+void noinstr kernel_fpu_save_on_kernel_entry(void)
+{
+	int level;
+	struct kernel_fpu_state *kfps;
+
+	if (!cpu_feature_enabled(X86_FEATURE_FPU))
+		return;
+
+	level = this_cpu_read(kernel_fpu_nesting_level);
+	if (WARN_ON_ONCE(level >= KERNEL_FPU_NESTING_MAX))
+		return;
+
+	kfps = this_cpu_ptr(&kernel_fpu_states[level]);
+	this_cpu_write(kernel_fpu_nesting_level, level + 1);
+
+	if (likely(use_xsave())) {
+		u64 mask = fpu_kernel_cfg.max_features;
+		u32 lmask = mask;
+		u32 hmask = mask >> 32;
+		int err;
+
+		XSTATE_XSAVE(&kfps->regs.xsave, lmask, hmask, err);
+	} else if (likely(use_fxsr())) {
+		fxsave(&kfps->regs.fxsave);
+	}
+
+	if (boot_cpu_has(X86_FEATURE_XMM))
+		ldmxcsr(MXCSR_DEFAULT);
+}
+
+/*
+ * Restore FPU state on exit from interrupt/exception back to kernel mode.
+ */
+void noinstr kernel_fpu_restore_on_kernel_exit(void)
+{
+	int level;
+	struct kernel_fpu_state *kfps;
+
+	if (!cpu_feature_enabled(X86_FEATURE_FPU))
+		return;
+
+	level = this_cpu_read(kernel_fpu_nesting_level);
+	if (WARN_ON_ONCE(level <= 0))
+		return;
+
+	level--;
+	this_cpu_write(kernel_fpu_nesting_level, level);
+	kfps = this_cpu_ptr(&kernel_fpu_states[level]);
+
+	if (likely(use_xsave())) {
+		u64 mask = fpu_kernel_cfg.max_features;
+		u32 lmask = mask;
+		u32 hmask = mask >> 32;
+
+		XSTATE_XRESTORE(&kfps->regs.xsave, lmask, hmask);
+	} else if (likely(use_fxsr())) {
+		fxrstor(&kfps->regs.fxsave);
+	}
+}
+
 #ifdef CONFIG_X86_DEBUG_FPU
 struct fpu *x86_task_fpu(struct task_struct *task)
 {
@@ -471,23 +582,11 @@ EXPORT_SYMBOL_FOR_KVM(fpu_copy_uabi_to_guest_fpstate);
 
 void kernel_fpu_begin_mask(unsigned int kfpu_mask)
 {
-	if (!irqs_disabled())
-		fpregs_lock();
-
-	WARN_ON_FPU(!irq_fpu_usable());
-
-	/* Toggle kernel_fpu_allowed to false: */
-	WARN_ON_FPU(!this_cpu_read(kernel_fpu_allowed));
-	this_cpu_write(kernel_fpu_allowed, false);
-
-	if (!(current->flags & (PF_KTHREAD | PF_USER_WORKER)) &&
-	    !test_thread_flag(TIF_NEED_FPU_LOAD)) {
-		set_thread_flag(TIF_NEED_FPU_LOAD);
-		save_fpregs_to_fpstate(x86_task_fpu(current));
-	}
-	__cpu_invalidate_fpregs_state();
-
-	/* Put sane initial values into the control registers. */
+	/*
+	 * SIMD kernel PoC: FPU is always available because state is
+	 * saved/restored at kernel entry/exit boundaries.
+	 * Just initialize control registers as requested.
+	 */
 	if (likely(kfpu_mask & KFPU_MXCSR) && boot_cpu_has(X86_FEATURE_XMM))
 		ldmxcsr(MXCSR_DEFAULT);
 
@@ -498,12 +597,10 @@ EXPORT_SYMBOL_GPL(kernel_fpu_begin_mask);
 
 void kernel_fpu_end(void)
 {
-	/* Toggle kernel_fpu_allowed back to true: */
-	WARN_ON_FPU(this_cpu_read(kernel_fpu_allowed));
-	this_cpu_write(kernel_fpu_allowed, true);
-
-	if (!irqs_disabled())
-		fpregs_unlock();
+	/*
+	 * SIMD kernel PoC: Nothing to do. FPU state management is
+	 * handled at entry/exit boundaries.
+	 */
 }
 EXPORT_SYMBOL_GPL(kernel_fpu_end);
 
