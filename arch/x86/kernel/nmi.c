@@ -37,6 +37,7 @@
 #include <asm/microcode.h>
 #include <asm/sev.h>
 #include <asm/fred.h>
+#include <asm/fpu/api.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/nmi.h>
@@ -539,6 +540,12 @@ DEFINE_IDTENTRY_RAW(exc_nmi)
 	struct nmi_stats *nsp = this_cpu_ptr(&nmi_stats);
 
 	/*
+	 * SIMD kernel PoC: NMI can interrupt anything, including kernel
+	 * code using SSE/AVX. Save FPU state immediately.
+	 */
+	kernel_fpu_save_on_kernel_entry();
+
+	/*
 	 * Re-enable NMIs right here when running as an SEV-ES guest. This might
 	 * cause nested NMIs, but those can be handled safely.
 	 */
@@ -607,6 +614,9 @@ nmi_restart:
 	}
 	if (this_cpu_dec_return(nmi_state))
 		goto nmi_restart;
+
+	/* SIMD kernel PoC: Restore FPU state after NMI handling */
+	kernel_fpu_restore_on_kernel_exit();
 }
 
 #if IS_ENABLED(CONFIG_KVM_INTEL)

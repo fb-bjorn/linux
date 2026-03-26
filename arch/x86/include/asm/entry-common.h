@@ -42,6 +42,14 @@ static __always_inline void arch_enter_from_user_mode(struct pt_regs *regs)
 		WARN_ON_ONCE(!on_thread_stack());
 		WARN_ON_ONCE(regs != task_pt_regs(current));
 	}
+
+	/*
+	 * SIMD kernel PoC: Save user FPU state on kernel entry.
+	 * Since the kernel is compiled with SSE/AVX enabled, any kernel
+	 * code may clobber vector registers. Save user state now so it
+	 * can be restored on return to userspace.
+	 */
+	kernel_fpu_save_on_user_entry();
 }
 #define arch_enter_from_user_mode arch_enter_from_user_mode
 

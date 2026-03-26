@@ -10,6 +10,7 @@
 #ifndef __ASSEMBLER__
 #include <linux/entry-common.h>
 #include <linux/hardirq.h>
+#include <asm/fpu/api.h>
 
 #include <asm/irq_stack.h>
 
@@ -56,10 +57,15 @@ static __always_inline void __##func(struct pt_regs *regs);		\
 __visible noinstr void func(struct pt_regs *regs)			\
 {									\
 	irqentry_state_t state = irqentry_enter(regs);			\
+	bool __from_kernel = !user_mode(regs);				\
 									\
+	if (__from_kernel)						\
+		kernel_fpu_save_on_kernel_entry();			\
 	instrumentation_begin();					\
 	__##func (regs);						\
 	instrumentation_end();						\
+	if (__from_kernel)						\
+		kernel_fpu_restore_on_kernel_exit();			\
 	irqentry_exit(regs, state);					\
 }									\
 									\
@@ -103,10 +109,15 @@ __visible noinstr void func(struct pt_regs *regs,			\
 			    unsigned long error_code)			\
 {									\
 	irqentry_state_t state = irqentry_enter(regs);			\
+	bool __from_kernel = !user_mode(regs);				\
 									\
+	if (__from_kernel)						\
+		kernel_fpu_save_on_kernel_entry();			\
 	instrumentation_begin();					\
 	__##func (regs, error_code);					\
 	instrumentation_end();						\
+	if (__from_kernel)						\
+		kernel_fpu_restore_on_kernel_exit();			\
 	irqentry_exit(regs, state);					\
 }									\
 									\
@@ -211,11 +222,16 @@ __visible noinstr void func(struct pt_regs *regs,			\
 {									\
 	irqentry_state_t state = irqentry_enter(regs);			\
 	u32 vector = (u32)(u8)error_code;				\
+	bool __from_kernel = !user_mode(regs);				\
 									\
+	if (__from_kernel)						\
+		kernel_fpu_save_on_kernel_entry();			\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
 	run_irq_on_irqstack_cond(__##func, regs, vector);		\
 	instrumentation_end();						\
+	if (__from_kernel)						\
+		kernel_fpu_restore_on_kernel_exit();			\
 	irqentry_exit(regs, state);					\
 }									\
 									\
@@ -256,11 +272,16 @@ static __always_inline void instr_##func(struct pt_regs *regs)		\
 __visible noinstr void func(struct pt_regs *regs)			\
 {									\
 	irqentry_state_t state = irqentry_enter(regs);			\
+	bool __from_kernel = !user_mode(regs);				\
 									\
+	if (__from_kernel)						\
+		kernel_fpu_save_on_kernel_entry();			\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
 	instr_##func (regs);						\
 	instrumentation_end();						\
+	if (__from_kernel)						\
+		kernel_fpu_restore_on_kernel_exit();			\
 	irqentry_exit(regs, state);					\
 }									\
 									\
@@ -295,11 +316,16 @@ static __always_inline void instr_##func(struct pt_regs *regs)		\
 __visible noinstr void func(struct pt_regs *regs)			\
 {									\
 	irqentry_state_t state = irqentry_enter(regs);			\
+	bool __from_kernel = !user_mode(regs);				\
 									\
+	if (__from_kernel)						\
+		kernel_fpu_save_on_kernel_entry();			\
 	kvm_set_cpu_l1tf_flush_l1d();                                   \
 	instrumentation_begin();					\
 	instr_##func (regs);						\
 	instrumentation_end();						\
+	if (__from_kernel)						\
+		kernel_fpu_restore_on_kernel_exit();			\
 	irqentry_exit(regs, state);					\
 }									\
 									\
