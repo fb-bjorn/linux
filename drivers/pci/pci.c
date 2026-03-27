@@ -5596,6 +5596,121 @@ static int pci_bus_reset(struct pci_bus *bus, bool probe)
 	return ret;
 }
 
+static int pci_try_reset_bus(struct pci_bus *bus);
+
+/**
+ * pci_reset_bus_with_disabled_links - Reset a bus after disabling sibling links
+ * @reset_dev: Bridge device whose subordinate bus to hot-reset
+ * @disable_devs: Array of bridge devices whose links to disable before reset
+ * @num_disable: Number of devices in @disable_devs
+ *
+ * For devices that span multiple PCIe links (e.g., MTIA accelerators),
+ * a hot reset on one link may trigger a device-internal reset that
+ * brings down all links. This function first disables the other N-1
+ * links to suppress spurious hotplug events, then issues the hot reset,
+ * then re-enables everything.
+ *
+ * The full sequence is:
+ *   1. Lock, save state, and disable links on @disable_devs (in order)
+ *   2. Hot-reset @reset_dev's subordinate bus via pci_try_reset_bus()
+ *   3. Re-enable links, restore state, unlock @disable_devs (reverse order)
+ *
+ * All bus locks are held for the duration, preventing stale config space
+ * reads while links are down.
+ *
+ * Return: 0 on success, negative errno on failure. On any failure, all
+ * previously disabled links are re-enabled on a best-effort basis.
+ */
+int pci_reset_bus_with_disabled_links(struct pci_dev *reset_dev,
+				      struct pci_dev **disable_devs,
+				      int num_disable)
+{
+	struct pci_bus *reset_bus = reset_dev->subordinate;
+	struct pci_bus *buses[PCI_RESET_MAX_DISABLE_LINKS];
+	int disabled = 0;
+	int i, rc;
+
+	if (!reset_bus)
+		return -ENOTTY;
+
+	if (num_disable < 0 || num_disable > PCI_RESET_MAX_DISABLE_LINKS)
+		return -EINVAL;
+
+	/* Validate all disable targets are bridges with subordinate buses */
+	for (i = 0; i < num_disable; i++) {
+		buses[i] = disable_devs[i]->subordinate;
+		if (!buses[i])
+			return -ENOTTY;
+	}
+
+	/* Verify a reset mechanism exists before disabling any links */
+	rc = pci_probe_reset_bus(reset_bus);
+	if (rc)
+		return rc;
+
+	/*
+	 * Phase 1: For each sibling link, lock the subordinate bus tree,
+	 * suppress hotplug events, save device state, and set the PCIe
+	 * Link Disable bit. Process in the order specified by the caller.
+	 */
+	for (i = 0; i < num_disable; i++) {
+		if (!pci_bus_trylock(buses[i])) {
+			rc = -EAGAIN;
+			goto restore;
+		}
+
+		pci_hp_ignore_link_change(disable_devs[i]);
+		pci_bus_save_and_disable_locked(buses[i]);
+
+		rc = pcie_capability_set_word(disable_devs[i],
+					      PCI_EXP_LNKCTL,
+					      PCI_EXP_LNKCTL_LD);
+		if (rc) {
+			pci_bus_restore_locked(buses[i]);
+			pci_hp_unignore_link_change(disable_devs[i]);
+			pci_bus_unlock(buses[i]);
+			goto restore;
+		}
+
+		disabled++;
+	}
+
+	/*
+	 * Phase 2: Hot-reset the target bus. pci_try_reset_bus() handles
+	 * save/disable/reset/restore/unlock for the target bus internally.
+	 */
+	rc = pci_try_reset_bus(reset_bus);
+
+restore:
+	/* Phase 3: Re-enable disabled links in reverse order (best-effort) */
+	for (i = disabled - 1; i >= 0; i--) {
+		int ret;
+
+		ret = pcie_capability_clear_word(disable_devs[i],
+						PCI_EXP_LNKCTL,
+						PCI_EXP_LNKCTL_LD);
+		if (ret) {
+			pci_warn(disable_devs[i],
+				 "failed to clear Link Disable\n");
+			if (!rc)
+				rc = ret;
+		}
+		ret = pci_bridge_wait_for_secondary_bus(disable_devs[i],
+							"link enable");
+		if (ret) {
+			pci_warn(disable_devs[i],
+				 "link did not train after enable\n");
+			if (!rc)
+				rc = ret;
+		}
+		pci_bus_restore_locked(buses[i]);
+		pci_hp_unignore_link_change(disable_devs[i]);
+		pci_bus_unlock(buses[i]);
+	}
+
+	return rc;
+}
+
 /**
  * pci_try_reset_bus - Try to reset a PCI bus
  * @bus: top level PCI bus to reset

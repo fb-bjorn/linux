@@ -235,6 +235,11 @@ int pci_bridge_secondary_bus_reset(struct pci_dev *dev);
 int pci_bus_error_reset(struct pci_dev *dev);
 int pci_try_reset_bridge(struct pci_dev *bridge);
 
+#define PCI_RESET_MAX_DISABLE_LINKS 8
+int pci_reset_bus_with_disabled_links(struct pci_dev *reset_dev,
+				      struct pci_dev **disable_devs,
+				      int num_disable);
+
 struct pci_cap_saved_data {
 	u16		cap_nr;
 	bool		cap_extended;
