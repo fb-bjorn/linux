@@ -131,6 +131,7 @@ struct elf {
 	struct list_head sections;
 	struct list_head symbols;
 	unsigned long num_relocs;
+	int pfe_offset;
 
 	int symbol_bits;
 	int symbol_name_bits;
@@ -230,6 +231,7 @@ struct reloc *find_reloc_by_dest(const struct elf *elf, struct section *sec, uns
 struct reloc *find_reloc_by_dest_range(const struct elf *elf, struct section *sec,
 				     unsigned long offset, unsigned int len);
 struct symbol *find_func_containing(struct section *sec, unsigned long offset);
+struct symbol *find_data_mapping_sym(struct section *sec, unsigned long offset);
 
 /*
  * Try to see if it's a whole archive (vmlinux.o or module).
