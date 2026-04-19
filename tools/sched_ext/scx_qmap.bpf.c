@@ -127,7 +127,8 @@ struct task_ctx {
 	struct task_ctx __arena	*q_next;	/* queue link, NULL if tail */
 	struct task_ctx __arena	*q_prev;	/* queue link, NULL if head */
 	struct qmap_fifo __arena *fifo;		/* queue we're on, NULL if not queued */
-	s32			pid;
+	u64			tid;
+	s32			pid;	/* for dump only */
 	bool			force_local;	/* Dispatch directly to local_dsq */
 	bool			highpri;
 	u64			core_sched_seq;
@@ -545,7 +546,7 @@ void BPF_STRUCT_OPS(qmap_dispatch, s32 cpu, struct task_struct *prev)
 			if (!taskc)
 				break;
 
-			p = bpf_task_from_pid(taskc->pid);
+			p = scx_bpf_tid_to_task(taskc->tid);
 			if (!p)
 				continue;
 
@@ -595,8 +596,6 @@ void BPF_STRUCT_OPS(qmap_dispatch, s32 cpu, struct task_struct *prev)
 			 */
 			if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 				scx_bpf_kick_cpu(scx_bpf_task_cpu(p), 0);
-
-			bpf_task_release(p);
 
 			batch--;
 			cpuc->dsp_cnt--;
@@ -722,6 +721,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init_task, struct task_struct *p,
 	taskc->q_next = NULL;
 	taskc->q_prev = NULL;
 	taskc->fifo = NULL;
+	taskc->tid = p->scx.tid;
 	taskc->pid = p->pid;
 	taskc->force_local = false;
 	taskc->highpri = false;
@@ -774,7 +774,7 @@ void BPF_STRUCT_OPS(qmap_dump, struct scx_dump_ctx *dctx)
 	/*
 	 * Walk the queue lists without locking - kfunc calls (scx_bpf_dump)
 	 * aren't in the verifier's kfunc_spin_allowed() list so we can't hold
-	 * a lock and dump. Best-effort; racing may print stale pids but the
+	 * a lock and dump. Best-effort; racing may print stale tids but the
 	 * walk is bounded by bpf_repeat() so it always terminates.
 	 */
 	bpf_for(i, 0, 5) {
@@ -783,7 +783,7 @@ void BPF_STRUCT_OPS(qmap_dump, struct scx_dump_ctx *dctx)
 		bpf_repeat(4096) {
 			if (!taskc)
 				break;
-			scx_bpf_dump(" %d", taskc->pid);
+			scx_bpf_dump(" %d:%llu", taskc->pid, taskc->tid);
 			taskc = taskc->q_next;
 		}
 		scx_bpf_dump("\n");
@@ -1157,6 +1157,7 @@ void BPF_STRUCT_OPS(qmap_sub_detach, struct scx_sub_detach_args *args)
 }
 
 SCX_OPS_DEFINE(qmap_ops,
+	       .flags			= SCX_OPS_ENQ_EXITING | SCX_OPS_TID_TO_TASK,
 	       .select_cpu		= (void *)qmap_select_cpu,
 	       .enqueue			= (void *)qmap_enqueue,
 	       .dequeue			= (void *)qmap_dequeue,
