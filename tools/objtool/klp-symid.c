@@ -95,7 +95,7 @@ int klp_create_symid_sections(struct objtool_file *file)
 	if (!sec)
 		return -1;
 
-	symids = elf_add_data(elf, sec, NULL, nr * sizeof(struct klp_symid));
+	symids = elf_add_data(elf, sec, NULL, nr * sizeof(struct klp_symid), true);
 	if (!symids)
 		return -1;
 

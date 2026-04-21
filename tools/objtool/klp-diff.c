@@ -1015,8 +1015,9 @@ static int clone_sym_relocs(struct elfs *e, struct symbol *patched_sym);
 static struct symbol *__clone_symbol(struct elf *elf, struct symbol *patched_sym,
 				     bool data_too)
 {
-	struct section *out_sec = NULL;
 	unsigned long offset = 0, pfx_size = 0;
+	bool align = !patched_sym->unalign;
+	struct section *out_sec = NULL;
 	struct symbol *out_sym;
 
 	if (data_too && !is_undef_sym(patched_sym)) {
@@ -1042,7 +1043,7 @@ static struct symbol *__clone_symbol(struct elf *elf, struct symbol *patched_sym
 		}
 
 		if (!is_sec_sym(patched_sym))
-			offset = ALIGN(sec_size(out_sec), out_sec->sh.sh_addralign);
+			offset = ALIGN(sec_size(out_sec), align ? out_sec->sh.sh_addralign : 1);
 
 		if (patched_sym->len || is_sec_sym(patched_sym)) {
 			void *data = NULL;
@@ -1060,7 +1061,7 @@ static struct symbol *__clone_symbol(struct elf *elf, struct symbol *patched_sym
 			else
 				size = patched_sym->len + pfx_size;
 
-			if (!elf_add_data(elf, out_sec, data, size))
+			if (!elf_add_data(elf, out_sec, data, size, align))
 				return NULL;
 
 			offset += pfx_size;
@@ -1102,6 +1103,37 @@ static const char *sym_bind(struct symbol *sym)
 	}
 }
 
+static struct symbol *clone_symbol(struct elfs *e, struct symbol *patched_sym,
+				   bool data_too);
+
+/*
+ * For arm64 alternatives, the replacement instructions come immediately after
+ * the function.  Clone any such blocks of instructions in place to preserve
+ * their offsets relative to the function in case they have hard-coded PC
+ * relative branches.
+ */
+static int clone_inline_alternatives(struct elfs *e, struct symbol *patched_sym)
+{
+	struct symbol *next;
+
+	if (!__is_defined(ARCH_HAS_INLINE_ALTS) || !is_func_sym(patched_sym))
+		return 0;
+
+	next = patched_sym;
+	sec_for_each_sym_continue(patched_sym->sec, next) {
+		if (next->offset < (patched_sym->offset + patched_sym->len) ||
+		    is_mapping_sym(next))
+			continue;
+		if (!next->fake)
+			break;
+		next->unalign = 1;
+		if (!clone_symbol(e, next, true))
+			return -1;
+	}
+
+	return 0;
+}
+
 /*
  * Copy a symbol to the output object, optionally including its data and
  * relocations.
@@ -1126,7 +1158,13 @@ static struct symbol *clone_symbol(struct elfs *e, struct symbol *patched_sym,
 	if (!__clone_symbol(e->out, patched_sym, data_too))
 		return NULL;
 
-	if (data_too && clone_sym_relocs(e, patched_sym))
+	if (!data_too || is_undef_sym(patched_sym))
+		return patched_sym->clone;
+
+	if (clone_sym_relocs(e, patched_sym))
+		return NULL;
+
+	if (clone_inline_alternatives(e, patched_sym))
 		return NULL;
 
 	return patched_sym->clone;
@@ -1586,7 +1624,7 @@ static int clone_reloc_klp(struct elfs *e, struct reloc *patched_reloc,
 	memset(&klp_reloc, 0, sizeof(klp_reloc));
 
 	klp_reloc.type = reloc_type(patched_reloc);
-	if (!elf_add_data(e->out, klp_relocs, &klp_reloc, sizeof(klp_reloc)))
+	if (!elf_add_data(e->out, klp_relocs, &klp_reloc, sizeof(klp_reloc), true))
 		return -1;
 
 	/* klp_reloc.offset */
@@ -2165,7 +2203,7 @@ static int create_klp_sections(struct elfs *e)
 		return -1;
 
 	/* allocate klp_object_ext */
-	obj_data = elf_add_data(e->out, obj_sec, NULL, obj_size);
+	obj_data = elf_add_data(e->out, obj_sec, NULL, obj_size, true);
 	if (!obj_data)
 		return -1;
 
@@ -2200,7 +2238,7 @@ static int create_klp_sections(struct elfs *e)
 			continue;
 
 		/* allocate klp_func_ext */
-		func_data = elf_add_data(e->out, funcs_sec, NULL, func_size);
+		func_data = elf_add_data(e->out, funcs_sec, NULL, func_size, true);
 		if (!func_data)
 			return -1;
 
@@ -2346,7 +2384,7 @@ static int copy_import_ns(struct elfs *e)
 			}
 		}
 
-		if (!elf_add_data(e->out, out_sec, import_ns, strlen(import_ns) + 1))
+		if (!elf_add_data(e->out, out_sec, import_ns, strlen(import_ns) + 1, true))
 			return -1;
 	}
 
