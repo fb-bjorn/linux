@@ -188,7 +188,15 @@ struct fuse_inode {
 			 * started */
 			struct timespec64 mtime;
 
-			/* iversion of directory when cache was started */
+			/**
+			 * @epoch: epoch of fc when cache was started
+			 */
+			int epoch;
+
+			/**
+			 * @iversion: iversion of directory when cache was
+			 * started
+			 */
 			u64 iversion;
 
 			/* protects above fields */
