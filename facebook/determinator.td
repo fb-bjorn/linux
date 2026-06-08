@@ -5,7 +5,7 @@ load("//bzl:flavors.td.bzl", "ARCH_FLAVORS", "ARCHITECTURES", "BUILD_ONLY_FLAVOR
 
 TD_FLAVORS = {
     "x86_64": ["debug", "hardened", "kdump", "lol2"],
-    "aarch64": ["debug", "kdump", "lol2"],
+    "aarch64": ["debug", "kdump"],
 }
 
 

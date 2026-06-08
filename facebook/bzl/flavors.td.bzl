@@ -69,7 +69,6 @@ ARCH_FLAVORS = {
         "debug",
         "debugnightly",
         "kdump",
-        "lol2",
     ],
 }
 
