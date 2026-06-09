@@ -121,6 +121,7 @@ enum {
 	 * done at new_simple_dir(), called from btrfs_lookup_dentry().
 	 */
 	BTRFS_INODE_ROOT_STUB,
+	BTRFS_INODE_APPEND_WRITE,
 };
 
 /* in memory btrfs inode */

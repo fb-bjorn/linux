@@ -1516,12 +1516,14 @@ advance_key:
 	return ret;
 }
 
-static noinline int search_ioctl(struct btrfs_root *root,
+static noinline int search_ioctl(struct file *file,
 				 struct btrfs_ioctl_search_key *sk,
 				 u64 *buf_size,
 				 char __user *ubuf)
 {
-	struct btrfs_fs_info *info = root->fs_info;
+	struct inode *inode = file_inode(file);
+	struct btrfs_fs_info *info = inode_to_fs_info(inode);
+	struct btrfs_root *root;
 	struct btrfs_key key;
 	BTRFS_PATH_AUTO_FREE(path);
 	int ret;
@@ -1538,10 +1540,15 @@ static noinline int search_ioctl(struct btrfs_root *root,
 		return -ENOMEM;
 
 	if (sk->tree_id == 0) {
-		/* Search the root that we got passed. */
-		root = btrfs_grab_root(root);
+		/* search the root of the inode that was passed */
+		root = btrfs_grab_root(BTRFS_I(inode)->root);
 	} else {
-		/* Look up the root from the arguments. */
+		if (!capable(CAP_SYS_ADMIN) &&
+		    sk->tree_id != BTRFS_ROOT_TREE_OBJECTID &&
+		    sk->tree_id != BTRFS_EXTENT_TREE_OBJECTID &&
+		    sk->tree_id != BTRFS_QUOTA_TREE_OBJECTID)
+			return -EPERM;
+
 		root = btrfs_get_fs_root(info, sk->tree_id, true);
 		if (IS_ERR(root))
 			return PTR_ERR(root);
@@ -1581,15 +1588,16 @@ static noinline int search_ioctl(struct btrfs_root *root,
 	return ret;
 }
 
-static noinline int btrfs_ioctl_tree_search(struct btrfs_root *root,
+static noinline int btrfs_ioctl_tree_search(struct file *file,
 					    void __user *argp)
 {
+	struct inode *inode = file_inode(file);
 	struct btrfs_ioctl_search_args __user *uargs = argp;
 	struct btrfs_ioctl_search_key sk;
 	int ret;
 	u64 buf_size;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!inode_owner_or_capable(file_mnt_idmap(file), inode))
 		return -EPERM;
 
 	if (copy_from_user(&sk, &uargs->key, sizeof(sk)))
@@ -1597,7 +1605,7 @@ static noinline int btrfs_ioctl_tree_search(struct btrfs_root *root,
 
 	buf_size = sizeof(uargs->buf);
 
-	ret = search_ioctl(root, &sk, &buf_size, uargs->buf);
+	ret = search_ioctl(file, &sk, &buf_size, uargs->buf);
 
 	/*
 	 * In the origin implementation an overflow is handled by returning a
@@ -1611,16 +1619,17 @@ static noinline int btrfs_ioctl_tree_search(struct btrfs_root *root,
 	return ret;
 }
 
-static noinline int btrfs_ioctl_tree_search_v2(struct btrfs_root *root,
+static noinline int btrfs_ioctl_tree_search_v2(struct file *file,
 					       void __user *argp)
 {
+	struct inode *inode = file_inode(file);
 	struct btrfs_ioctl_search_args_v2 __user *uarg = argp;
 	struct btrfs_ioctl_search_args_v2 args;
 	int ret;
 	u64 buf_size;
 	const u64 buf_limit = SZ_16M;
 
-	if (!capable(CAP_SYS_ADMIN))
+	if (!inode_owner_or_capable(file_mnt_idmap(file), inode))
 		return -EPERM;
 
 	/* copy search header and buffer size */
@@ -1633,7 +1642,7 @@ static noinline int btrfs_ioctl_tree_search_v2(struct btrfs_root *root,
 	if (buf_size > buf_limit)
 		buf_size = buf_limit;
 
-	ret = search_ioctl(root, &args.key, &buf_size,
+	ret = search_ioctl(file, &args.key, &buf_size,
 			   (char __user *)(&uarg->buf[0]));
 	if (ret == 0 && copy_to_user(&uarg->key, &args.key, sizeof(args.key)))
 		ret = -EFAULT;
@@ -5192,9 +5201,9 @@ long btrfs_ioctl(struct file *file, unsigned int
 	case BTRFS_IOC_DEV_INFO:
 		return btrfs_ioctl_dev_info(fs_info, argp);
 	case BTRFS_IOC_TREE_SEARCH:
-		return btrfs_ioctl_tree_search(root, argp);
+		return btrfs_ioctl_tree_search(file, argp);
 	case BTRFS_IOC_TREE_SEARCH_V2:
-		return btrfs_ioctl_tree_search_v2(root, argp);
+		return btrfs_ioctl_tree_search_v2(file, argp);
 	case BTRFS_IOC_INO_LOOKUP:
 		return btrfs_ioctl_ino_lookup(root, argp);
 	case BTRFS_IOC_INO_PATHS:
