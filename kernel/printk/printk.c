@@ -71,6 +71,25 @@ int console_printk[4] = {
 };
 EXPORT_SYMBOL_GPL(console_printk);
 
+#ifndef CONFIG_PREEMPT_RT
+bool __read_mostly printk_force_legacy_kthread;
+
+static int __init printk_force_legacy_kthread_setup(char *str)
+{
+	bool enable = true;
+
+	if (str && *str && kstrtobool(str, &enable))
+		return 0;
+
+	printk_force_legacy_kthread = enable;
+	if (printk_force_legacy_kthread)
+		pr_info("printk: forcing legacy console kthread\n");
+
+	return 0;
+}
+early_param("printk.force_legacy_kthread", printk_force_legacy_kthread_setup);
+#endif
+
 atomic_t ignore_console_lock_warning __read_mostly = ATOMIC_INIT(0);
 EXPORT_SYMBOL(ignore_console_lock_warning);
 

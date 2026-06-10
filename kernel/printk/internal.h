@@ -30,7 +30,8 @@ int devkmsg_sysctl_set_loglvl(const struct ctl_table *table, int write,
 #ifdef CONFIG_PREEMPT_RT
 # define force_legacy_kthread()	(true)
 #else
-# define force_legacy_kthread()	(false)
+extern bool printk_force_legacy_kthread;
+# define force_legacy_kthread()	(printk_force_legacy_kthread)
 #endif
 
 #ifdef CONFIG_PRINTK

@@ -5488,6 +5488,17 @@ Kernel parameters
 			ratelimit - ratelimit the logging
 			Default: ratelimit
 
+	printk.force_legacy_kthread=
+			[KNL,EARLY] Force legacy consoles to print from the
+			dedicated legacy printer kthread instead of caller
+			context. This can avoid long synchronous flushes
+			through slow legacy consoles when a large printk
+			backlog exists.
+			Only affects non-PREEMPT_RT kernels; PREEMPT_RT
+			always uses the legacy printer kthread.
+			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
+			default: disabled
+
 	printk.time=	Show timing data prefixed to each printk message line
 			Format: <bool>  (1/Y/y=enable, 0/N/n=disable)
 
