@@ -63,12 +63,15 @@ static_assert(BTRFS_MAX_FOLIO_SIZE > PAGE_SIZE);
  *
  * Depending on the filesystem block size, the real maximum blocks per folio
  * may also be limited by the above BTRFS_MAX_FOLIO_SIZE.
+ *
+ * META-ONLY: upstream gates the 512 value (i.e. the 2MiB huge-folio cap on
+ * x86_64/4K) behind CONFIG_BTRFS_EXPERIMENTAL, which also enables a grab-bag of
+ * unrelated experimental features we do not ship in production.  We want huge
+ * folios without the rest, so define it unconditionally to 512.  The only cost
+ * is on-stack bitmap sizing in the writeback path (BITS_TO_LONGS(512) = 64
+ * bytes, ~+112 bytes during the delalloc window), which is acceptable.
  */
-#ifdef CONFIG_BTRFS_EXPERIMENTAL
 #define BTRFS_MAX_BLOCKS_PER_FOLIO		(512)
-#else
-#define BTRFS_MAX_BLOCKS_PER_FOLIO		(BITS_PER_LONG)
-#endif
 
 #define BTRFS_MAX_EXTENT_SIZE SZ_128M
 
