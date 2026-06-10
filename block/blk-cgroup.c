@@ -221,8 +221,17 @@ static void blkg_async_bio_workfn(struct work_struct *work)
 		need_plug = true;
 		blk_start_plug(&plug);
 	}
-	while ((bio = bio_list_pop(&bios)))
+	while ((bio = bio_list_pop(&bios))) {
 		submit_bio(bio);
+		if (need_resched()) {
+			// cond_resched() doesn't actually flush our plug, and
+			// if we have enough bios to need rescheduling, we
+			// should go ahead and send them down
+			if (need_plug)
+				blk_flush_plug(&plug, false);
+			cond_resched();
+		}
+	}
 	if (need_plug)
 		blk_finish_plug(&plug);
 }
