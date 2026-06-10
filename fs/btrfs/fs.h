@@ -50,19 +50,28 @@ struct btrfs_subpage_info;
 struct btrfs_stripe_hash_table;
 struct btrfs_space_info;
 
-/*
- * Minimum data and metadata block size.
- *
- * Normally it's 4K, but for testing subpage block size on 4K page systems, we
- * allow DEBUG builds to accept 2K page size.
- */
-#ifdef CONFIG_BTRFS_DEBUG
-#define BTRFS_MIN_BLOCKSIZE	(SZ_2K)
-#else
+/* Minimum data and metadata block size. */
 #define BTRFS_MIN_BLOCKSIZE	(SZ_4K)
-#endif
-
 #define BTRFS_MAX_BLOCKSIZE	(SZ_64K)
+
+/* The maximum folio size btrfs supports. */
+#define BTRFS_MAX_FOLIO_SIZE	(SZ_2M)
+static_assert(BTRFS_MAX_FOLIO_SIZE > PAGE_SIZE);
+
+/*
+ * The maximum number of blocks a huge folio can support.
+ *
+ * Depending on the filesystem block size, the real maximum blocks per folio
+ * may also be limited by the above BTRFS_MAX_FOLIO_SIZE.
+ *
+ * META-ONLY: upstream gates the 512 value (i.e. the 2MiB huge-folio cap on
+ * x86_64/4K) behind CONFIG_BTRFS_EXPERIMENTAL, which also enables a grab-bag of
+ * unrelated experimental features we do not ship in production.  We want huge
+ * folios without the rest, so define it unconditionally to 512.  The only cost
+ * is on-stack bitmap sizing in the writeback path (BITS_TO_LONGS(512) = 64
+ * bytes, ~+112 bytes during the delalloc window), which is acceptable.
+ */
+#define BTRFS_MAX_BLOCKS_PER_FOLIO		(512)
 
 #define BTRFS_MAX_EXTENT_SIZE SZ_128M
 
@@ -698,13 +707,6 @@ struct btrfs_fs_info {
 	struct btrfs_workqueue *endio_write_workers;
 	struct btrfs_workqueue *endio_freespace_worker;
 	struct btrfs_workqueue *caching_workers;
-
-	/*
-	 * Fixup workers take dirty pages that didn't properly go through the
-	 * cow mechanism and make them safe to write.  It happens for the
-	 * sys_munmap function call path.
-	 */
-	struct btrfs_workqueue *fixup_workers;
 	struct btrfs_workqueue *delayed_workers;
 
 	struct task_struct *transaction_kthread;
@@ -881,6 +883,7 @@ struct btrfs_fs_info {
 	u32 block_min_order;
 	u32 block_max_order;
 	u32 stripesize;
+	u32 writeback_bio_size;
 	u32 csum_size;
 	u32 csums_per_leaf;
 	u32 csum_type;
@@ -1206,14 +1209,6 @@ static inline void btrfs_force_shutdown(struct btrfs_fs_info *fs_info)
 		fserror_report_shutdown(fs_info->sb, GFP_KERNEL);
 	}
 }
-
-/*
- * We use folio flag owner_2 to indicate there is an ordered extent with
- * unfinished IO.
- */
-#define folio_test_ordered(folio)	folio_test_owner_2(folio)
-#define folio_set_ordered(folio)	folio_set_owner_2(folio)
-#define folio_clear_ordered(folio)	folio_clear_owner_2(folio)
 
 #ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
 

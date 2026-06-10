@@ -6053,7 +6053,7 @@ struct btrfs_block_group *btrfs_create_chunk(struct btrfs_trans_handle *trans,
 
 	lockdep_assert_held(&info->chunk_mutex);
 
-	if (!alloc_profile_is_valid(type, 0)) {
+	if (unlikely(!alloc_profile_is_valid(type, 0))) {
 		DEBUG_WARN("invalid alloc profile for type %llu", type);
 		return ERR_PTR(-EINVAL);
 	}
@@ -6064,7 +6064,7 @@ struct btrfs_block_group *btrfs_create_chunk(struct btrfs_trans_handle *trans,
 		return ERR_PTR(-ENOSPC);
 	}
 
-	if (!(type & BTRFS_BLOCK_GROUP_TYPE_MASK)) {
+	if (unlikely(!(type & BTRFS_BLOCK_GROUP_TYPE_MASK))) {
 		btrfs_err(info, "invalid chunk type 0x%llx requested", type);
 		DEBUG_WARN();
 		return ERR_PTR(-EINVAL);
@@ -6234,7 +6234,7 @@ static noinline int init_first_rw_device(struct btrfs_trans_handle *trans)
 
 	alloc_profile = btrfs_metadata_alloc_profile(fs_info);
 	meta_space_info = btrfs_find_space_info(fs_info, alloc_profile);
-	if (!meta_space_info) {
+	if (unlikely(!meta_space_info)) {
 		DEBUG_WARN();
 		return -EINVAL;
 	}
@@ -6244,7 +6244,7 @@ static noinline int init_first_rw_device(struct btrfs_trans_handle *trans)
 
 	alloc_profile = btrfs_system_alloc_profile(fs_info);
 	sys_space_info = btrfs_find_space_info(fs_info, alloc_profile);
-	if (!sys_space_info) {
+	if (unlikely(!sys_space_info)) {
 		DEBUG_WARN();
 		return -EINVAL;
 	}
@@ -8177,6 +8177,37 @@ int btrfs_init_dev_stats(struct btrfs_fs_info *fs_info)
 out:
 	mutex_unlock(&fs_devices->device_list_mutex);
 	return ret;
+}
+
+int btrfs_init_writeback_bio_size(struct btrfs_fs_info *fs_info)
+{
+	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
+	struct btrfs_device *device;
+	u32 writeback_bio_size = fs_info->sectorsize;
+
+	mutex_lock(&fs_devices->device_list_mutex);
+	/*
+	 * Let's take maximum over optimal request sizes for all devices. For
+	 * RAID profiles writeback will submit stripe (64k) sized bios anyway
+	 * so our value doesn't matter and for simple profiles this is a good
+	 * approximation of sensible IO chunking.
+	 */
+	list_for_each_entry(device, &fs_devices->devices, dev_list) {
+		struct request_queue *queue;
+		unsigned int io_opt;
+
+		if (!device->bdev || test_bit(BTRFS_DEV_STATE_MISSING, &device->dev_state))
+			continue;
+		queue = bdev_get_queue(device->bdev);
+		io_opt = queue_io_opt(queue) ? :
+				queue_max_sectors(queue) << SECTOR_SHIFT;
+		writeback_bio_size = max(writeback_bio_size, io_opt);
+	}
+	mutex_unlock(&fs_devices->device_list_mutex);
+
+	fs_info->writeback_bio_size = writeback_bio_size;
+
+	return 0;
 }
 
 static int update_dev_stat_item(struct btrfs_trans_handle *trans,

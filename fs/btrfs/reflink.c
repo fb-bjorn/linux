@@ -94,9 +94,7 @@ static int copy_inline_to_page(struct btrfs_inode *inode,
 	if (ret < 0)
 		goto out_unlock;
 
-	btrfs_clear_extent_bit(&inode->io_tree, file_offset, range_end,
-			       EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG, NULL);
-	ret = btrfs_set_extent_delalloc(inode, file_offset, range_end, 0, NULL);
+	ret = btrfs_reset_extent_delalloc(inode, file_offset, range_end, 0, NULL);
 	if (ret)
 		goto out_unlock;
 
@@ -141,7 +139,6 @@ static int copy_inline_to_page(struct btrfs_inode *inode,
 		folio_zero_range(folio, datal, block_size - datal);
 
 	btrfs_folio_set_uptodate(fs_info, folio, file_offset, block_size);
-	btrfs_folio_clear_checked(fs_info, folio, file_offset, block_size);
 	btrfs_folio_set_dirty(fs_info, folio, file_offset, block_size);
 out_unlock:
 	if (!IS_ERR(folio)) {

@@ -49,14 +49,6 @@ static void btrfs_drop_folio(struct btrfs_fs_info *fs_info, struct folio *folio,
 	u64 block_len = round_up(pos + copied, fs_info->sectorsize) - block_start;
 
 	ASSERT(block_len <= U32_MAX);
-	/*
-	 * Folio checked is some magic around finding folios that have been
-	 * modified without going through btrfs_dirty_folio().  Clear it here.
-	 * There should be no need to mark the pages accessed as
-	 * prepare_one_folio() should have marked them accessed in
-	 * prepare_one_folio() via find_or_create_page()
-	 */
-	btrfs_folio_clamp_clear_checked(fs_info, folio, block_start, block_len);
 	folio_unlock(folio);
 	folio_put(folio);
 }
@@ -65,7 +57,7 @@ static void btrfs_drop_folio(struct btrfs_fs_info *fs_info, struct folio *folio,
  * After copy_folio_from_iter_atomic(), update the following things for delalloc:
  * - Mark newly dirtied folio as DELALLOC in the io tree.
  *   Used to advise which range is to be written back.
- * - Mark modified folio as Uptodate/Dirty and not needing COW fixup
+ * - Mark modified folio as Uptodate/Dirty
  * - Update inode size for past EOF write
  */
 int btrfs_dirty_folio(struct btrfs_inode *inode, struct folio *folio, loff_t pos,
@@ -93,21 +85,12 @@ int btrfs_dirty_folio(struct btrfs_inode *inode, struct folio *folio, loff_t pos
 
 	end_of_last_block = start_pos + num_bytes - 1;
 
-	/*
-	 * The pages may have already been dirty, clear out old accounting so
-	 * we can set things up properly
-	 */
-	btrfs_clear_extent_bit(&inode->io_tree, start_pos, end_of_last_block,
-			       EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING | EXTENT_DEFRAG,
-			       cached);
-
-	ret = btrfs_set_extent_delalloc(inode, start_pos, end_of_last_block,
-					extra_bits, cached);
+	ret = btrfs_reset_extent_delalloc(inode, start_pos, end_of_last_block,
+					  extra_bits, cached);
 	if (ret)
 		return ret;
 
 	btrfs_folio_clamp_set_uptodate(fs_info, folio, start_pos, num_bytes);
-	btrfs_folio_clamp_clear_checked(fs_info, folio, start_pos, num_bytes);
 	btrfs_folio_clamp_set_dirty(fs_info, folio, start_pos, num_bytes);
 
 	/*
@@ -1977,18 +1960,7 @@ again:
 		}
 	}
 
-	/*
-	 * page_mkwrite gets called when the page is firstly dirtied after it's
-	 * faulted in, but write(2) could also dirty a page and set delalloc
-	 * bits, thus in this case for space account reason, we still need to
-	 * clear any delalloc bits within this page range since we have to
-	 * reserve data&meta space before lock_page() (see above comments).
-	 */
-	btrfs_clear_extent_bit(io_tree, page_start, end,
-			       EXTENT_DELALLOC | EXTENT_DO_ACCOUNTING |
-			       EXTENT_DEFRAG, &cached_state);
-
-	ret = btrfs_set_extent_delalloc(inode, page_start, end, 0, &cached_state);
+	ret = btrfs_reset_extent_delalloc(inode, page_start, end, 0, &cached_state);
 	if (ret < 0) {
 		btrfs_unlock_extent(io_tree, page_start, page_end, &cached_state);
 		goto out_unlock;
@@ -2003,7 +1975,6 @@ again:
 	if (zero_start != fsize)
 		folio_zero_range(folio, zero_start, folio_size(folio) - zero_start);
 
-	btrfs_folio_clear_checked(fs_info, folio, page_start, fsize);
 	btrfs_folio_set_dirty(fs_info, folio, page_start, end + 1 - page_start);
 	btrfs_folio_set_uptodate(fs_info, folio, page_start, end + 1 - page_start);
 
