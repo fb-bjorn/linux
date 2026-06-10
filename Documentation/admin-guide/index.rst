@@ -189,4 +189,5 @@ A few hard-to-categorize and generally obsolete documents.
    :maxdepth: 1
 
    ldm
+   per-console-loglevel
    unicode

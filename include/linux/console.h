@@ -20,6 +20,7 @@
 #include <linux/rculist.h>
 #include <linux/rcuwait.h>
 #include <linux/smp.h>
+#include <linux/device.h>
 #include <linux/types.h>
 #include <linux/vesa.h>
 
@@ -353,6 +354,8 @@ struct console {
 	unsigned long		dropped;
 	void			*data;
 	struct hlist_node	node;
+	int			level;
+	struct device		*classdev;
 
 	/* nbcon console specific members */
 

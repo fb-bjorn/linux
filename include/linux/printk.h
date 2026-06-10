@@ -75,6 +75,8 @@ extern int console_printk[];
 
 extern void console_verbose(void);
 
+int clamp_loglevel(int level);
+
 /* strlen("ratelimit") + 1 */
 #define DEVKMSG_STR_MAX_SIZE 10
 extern char devkmsg_log_str[DEVKMSG_STR_MAX_SIZE];
@@ -144,6 +146,7 @@ void early_printk(const char *s, ...) { }
 #endif
 
 struct dev_printk_info;
+struct console;
 
 #ifdef CONFIG_PRINTK
 asmlinkage __printf(4, 0)
@@ -209,6 +212,7 @@ extern bool nbcon_device_try_acquire(struct console *con);
 extern void nbcon_device_release(struct console *con);
 void nbcon_atomic_flush_unsafe(void);
 bool pr_flush(int timeout_ms, bool reset_on_progress);
+bool per_console_loglevel_is_set(const struct console *con);
 #else
 static inline __printf(1, 0)
 int vprintk(const char *s, va_list args)
@@ -327,6 +331,10 @@ static inline bool pr_flush(int timeout_ms, bool reset_on_progress)
 	return true;
 }
 
+static inline bool per_console_loglevel_is_set(const struct console *con)
+{
+	return false;
+}
 #endif
 
 #ifdef CONFIG_SMP
