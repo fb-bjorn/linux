@@ -4878,7 +4878,6 @@ static const struct tegra_pmc_soc tegra410_pmc_soc = {
 	.has_tsense_reset = false,
 	.has_gpu_clamps = false,
 	.needs_mbist_war = false,
-	.has_impl_33v_pwr = false,
 	.maybe_tz_only = false,
 	.num_io_pads = 0,
 	.io_pads = NULL,
