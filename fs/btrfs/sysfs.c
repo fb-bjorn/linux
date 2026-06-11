@@ -1336,6 +1336,60 @@ MODULE_PARM_DESC(read_policy,
 "Global read policy: pid (default), round-robin[:<min_contig_read>], devid[:<devid>]");
 #endif
 
+/*
+ * META-ONLY: per-fs gate for the page-cache folio order used by data inodes,
+ * at /sys/fs/btrfs/<uuid>/folio_mode.  Three modes:
+ *
+ *   off   - no large folios; the per-inode order is pinned to block_min_order.
+ *   large - large folios up to the pre-huge tier (BITS_PER_LONG blocks).
+ *   huge  - huge folios up to BTRFS_MAX_FOLIO_SIZE (2MiB), the full filesystem
+ *           cap enabled by the META-ONLY "unconditionally allow 512 blocks per
+ *           folio" change.
+ *
+ * Defaults to huge for now; the perf/footprint tradeoff of 2MiB folios
+ * (cheapest on arm64, where a 2MiB folio coalesces into a single contpte TLB
+ * entry) can be tuned down to large or off per filesystem via this knob.
+ *
+ * Re-read when an inode is loaded, so changes take effect for newly loaded
+ * inodes; already-cached mappings keep the range they were given.
+ */
+static const char * const btrfs_folio_mode_names[] = {
+	[BTRFS_FOLIO_MODE_OFF]   = "off",
+	[BTRFS_FOLIO_MODE_LARGE] = "large",
+	[BTRFS_FOLIO_MODE_HUGE]  = "huge",
+};
+
+static ssize_t btrfs_folio_mode_show(struct kobject *kobj,
+				     struct kobj_attribute *a, char *buf)
+{
+	struct btrfs_fs_info *fs_info = to_fs_info(kobj);
+
+	if (!fs_info)
+		return -EPERM;
+
+	return sysfs_emit(buf, "%s\n",
+			  btrfs_folio_mode_names[READ_ONCE(fs_info->folio_mode)]);
+}
+
+static ssize_t btrfs_folio_mode_store(struct kobject *kobj,
+				      struct kobj_attribute *a,
+				      const char *buf, size_t len)
+{
+	struct btrfs_fs_info *fs_info = to_fs_info(kobj);
+	int mode;
+
+	if (!fs_info)
+		return -EPERM;
+
+	mode = sysfs_match_string(btrfs_folio_mode_names, buf);
+	if (mode < 0)
+		return -EINVAL;
+
+	WRITE_ONCE(fs_info->folio_mode, mode);
+	return len;
+}
+BTRFS_ATTR_RW(, folio_mode, btrfs_folio_mode_show, btrfs_folio_mode_store);
+
 int btrfs_read_policy_to_enum(const char *str, s64 *value_ret)
 {
 	char param[32];
@@ -1554,6 +1608,7 @@ static const struct attribute *btrfs_attrs[] = {
 	BTRFS_ATTR_PTR(, bg_reclaim_threshold),
 	BTRFS_ATTR_PTR(, commit_stats),
 	BTRFS_ATTR_PTR(, temp_fsid),
+	BTRFS_ATTR_PTR(, folio_mode),
 	NULL,
 };
 

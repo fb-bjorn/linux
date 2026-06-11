@@ -73,6 +73,16 @@ static_assert(BTRFS_MAX_FOLIO_SIZE > PAGE_SIZE);
  */
 #define BTRFS_MAX_BLOCKS_PER_FOLIO		(512)
 
+/*
+ * META-ONLY: per-fs gate for the page-cache folio order of data inodes,
+ * exposed at /sys/fs/btrfs/<uuid>/folio_mode.
+ */
+enum btrfs_folio_mode {
+	BTRFS_FOLIO_MODE_OFF,	/* no large folios: cap at block_min_order */
+	BTRFS_FOLIO_MODE_LARGE,	/* large folios up to BITS_PER_LONG blocks */
+	BTRFS_FOLIO_MODE_HUGE,	/* huge folios up to BTRFS_MAX_FOLIO_SIZE (2MiB) */
+};
+
 #define BTRFS_MAX_EXTENT_SIZE SZ_128M
 
 /*
@@ -882,6 +892,8 @@ struct btrfs_fs_info {
 	u32 sectorsize_bits;
 	u32 block_min_order;
 	u32 block_max_order;
+	/* META-ONLY: page-cache folio policy, /sys/fs/btrfs/<uuid>/folio_mode. */
+	enum btrfs_folio_mode folio_mode;
 	u32 stripesize;
 	u32 writeback_bio_size;
 	u32 csum_size;
