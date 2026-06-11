@@ -3862,6 +3862,51 @@ static int btrfs_add_inode_to_root(struct btrfs_inode *inode, bool prealloc)
 }
 
 /*
+ * Configure the per-inode page cache folio order range.
+ *
+ * The lower bound is always the filesystem block size (a mapping cannot use
+ * folios smaller than one block).  The upper bound is chosen by the META-ONLY
+ * btrfs_folio_mode gate:
+ *
+ *   off   - max == block_min_order: no large folios at all.
+ *   large - max capped at the pre-huge tier (at most BITS_PER_LONG blocks).
+ *   huge  - max == block_max_order: the full filesystem cap (up to 2MiB).
+ *
+ * Evaluated each time an inode is loaded, so changing the mode via
+ * /sys/fs/btrfs/<uuid>/folio_mode takes effect for newly loaded inodes;
+ * already-cached mappings keep the range they were given.
+ */
+void btrfs_set_inode_mapping_order(struct btrfs_inode *inode)
+{
+	struct btrfs_fs_info *fs_info = inode->root->fs_info;
+	u32 min_order = fs_info->block_min_order;
+	u32 max_order;
+
+	/* Metadata inode should not reach here. */
+	ASSERT(is_data_inode(inode));
+
+	switch (READ_ONCE(fs_info->folio_mode)) {
+	case BTRFS_FOLIO_MODE_OFF:
+		max_order = min_order;
+		break;
+	case BTRFS_FOLIO_MODE_LARGE: {
+		u32 large_size = min((u32)BITS_PER_LONG << fs_info->sectorsize_bits,
+				     (u32)BTRFS_MAX_FOLIO_SIZE);
+		u32 large_max = ilog2(round_up(large_size, PAGE_SIZE) >> PAGE_SHIFT);
+
+		max_order = min(fs_info->block_max_order, large_max);
+		break;
+	}
+	case BTRFS_FOLIO_MODE_HUGE:
+	default:
+		max_order = fs_info->block_max_order;
+		break;
+	}
+
+	mapping_set_folio_order_range(inode->vfs_inode.i_mapping, min_order, max_order);
+}
+
+/*
  * Read a locked inode from the btree into the in-memory inode and add it to
  * its root list/tree.
  *
