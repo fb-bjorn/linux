@@ -4071,6 +4071,7 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 	bool curr = cfs_rq->curr == se;
 	bool rel_vprot = false;
 	u64 avruntime = 0;
+	s64 limit;
 
 	if (se->on_rq) {
 		/* commit outstanding execution time */
@@ -4095,6 +4096,22 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 
 	update_load_set(&se->load, weight);
 
+	/*
+	 * rescale_entity() scaled vlag by old_weight/new_weight to preserve
+	 * lag across the reweight (vl' = vl * w/w').  On a large weight
+	 * decrease this can inflate vlag well past the legal lag bound.  Left
+	 * unclamped, the resulting se->vruntime = avruntime - vlag (computed
+	 * just below for an on_rq entity, or via place_entity() on the next
+	 * enqueue for an off_rq one) drifts far from cfs_rq->zero_vruntime, and
+	 * a subsequent __enqueue_entity() then overflows entity_key() * weight
+	 * in __sum_w_vruntime_add().  Re-clamp to the per-entity lag limit for
+	 * the new weight, exactly as entity_lag() does on every fresh lag.
+	 * Note calc_delta_fair(t, se) * se->load.weight <= t << NICE_0_LOAD_SHIFT
+	 * (equality but for the floor in __calc_delta), so this bounds
+	 * key * weight regardless of the entity's weight.
+	 */
+	limit = calc_delta_fair(cfs_rq_max_slice(cfs_rq) + TICK_NSEC, se);
+	se->vlag = clamp(se->vlag, -limit, limit);
 	do {
 		u32 divider = get_pelt_divider(&se->avg);
 		se->avg.load_avg = div_u64(se_weight(se) * se->avg.load_sum, divider);
@@ -4392,8 +4409,15 @@ static inline void update_tg_load_avg(struct cfs_rq *cfs_rq)
 	/*
 	 * For migration heavy workloads, access to tg->load_avg can be
 	 * unbound. Limit the update rate to at most once per ms.
+	 *
+	 * The enclosing PELT update paths always hold rq->lock and have
+	 * called update_rq_clock(rq) within microseconds, so rq->clock_task
+	 * is fresh.  Use it instead of sched_clock_cpu() to avoid an rdtsc
+	 * (plus pipeline serialisation) per call -- this function is invoked
+	 * once per leaf cfs_rq in __update_blocked_fair(), so on hosts with
+	 * many cgroups the rdtsc cost dominates the rate-limit check itself.
 	 */
-	now = sched_clock_cpu(cpu_of(rq_of(cfs_rq)));
+	now = rq_clock_task(rq_of(cfs_rq));
 	if (now - cfs_rq->last_update_tg_load_avg < NSEC_PER_MSEC)
 		return;
 
@@ -4416,7 +4440,8 @@ static inline void clear_tg_load_avg(struct cfs_rq *cfs_rq)
 	if (cfs_rq->tg == &root_task_group)
 		return;
 
-	now = sched_clock_cpu(cpu_of(rq_of(cfs_rq)));
+	/* See update_tg_load_avg() for the rq_clock_task() rationale. */
+	now = rq_clock_task(rq_of(cfs_rq));
 	delta = 0 - cfs_rq->tg_load_avg_contrib;
 	atomic_long_add(delta, &cfs_rq->tg->load_avg);
 	cfs_rq->tg_load_avg_contrib = 0;
