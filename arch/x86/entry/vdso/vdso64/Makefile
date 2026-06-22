@@ -3,6 +3,8 @@
 # 64-bit vDSO images for x86.
 #
 
+PGO_PROFILE := n
+
 # The vDSOs built in this directory
 vdsos-y				:= 64
 vdsos-$(CONFIG_X86_X32_ABI)	+= x32

@@ -206,6 +206,8 @@ SECTIONS
 
 	BUG_TABLE
 
+	PGO_CLANG_DATA
+
 	ORC_UNWIND_TABLE
 
 	/* Init code and data - will be freed after init */
