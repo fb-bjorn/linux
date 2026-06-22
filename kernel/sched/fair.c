@@ -1229,6 +1229,16 @@ int sched_update_scaling(void)
 	return 0;
 }
 
+int sched_proc_update_handler(const struct ctl_table *table, int write,
+		void *buffer, size_t *lenp, loff_t *ppos)
+{
+	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	return sched_update_scaling();
+}
+
 static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se);
 
 /*

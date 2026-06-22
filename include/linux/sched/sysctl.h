@@ -3,6 +3,9 @@
 #define _LINUX_SCHED_SYSCTL_H
 
 #include <linux/types.h>
+#include <linux/cache.h>
+
+struct ctl_table;
 
 #ifdef CONFIG_DETECT_HUNG_TASK
 /* used for hung_task and block/ */
@@ -18,6 +21,14 @@ enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_LINEAR,
 	SCHED_TUNABLESCALING_END,
 };
+
+extern __read_mostly unsigned int sysctl_sched_migration_cost;
+extern __read_mostly unsigned int sysctl_sched_nr_migrate;
+
+extern unsigned int sysctl_sched_tunable_scaling;
+
+int sched_proc_update_handler(const struct ctl_table *table, int write,
+			      void *buffer, size_t *length, loff_t *ppos);
 
 #define NUMA_BALANCING_DISABLED		0x0
 #define NUMA_BALANCING_NORMAL		0x1
