@@ -2084,10 +2084,12 @@ static int cxl_region_attach(struct cxl_region *cxlr,
 	}
 
 	if (cxled->cxld.target_type != cxlr->type) {
-		dev_dbg(&cxlr->dev, "%s:%s type mismatch: %d vs %d\n",
+		dev_err(&cxlr->dev, "%s:%s type mismatch: %d vs %d\n",
 			dev_name(&cxlmd->dev), dev_name(&cxled->cxld.dev),
 			cxled->cxld.target_type, cxlr->type);
-		return -ENXIO;
+		dev_warn(&cxlr->dev, FW_WARN
+			"HACK: Ignoring cxl decoder type mismatch\n");
+		/* return -ENXIO; */
 	}
 
 	if (!cxled->dpa_res) {
