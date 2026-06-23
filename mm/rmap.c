@@ -93,6 +93,19 @@ static inline struct anon_vma *anon_vma_alloc(void)
 
 	anon_vma = kmem_cache_alloc(anon_vma_cachep, GFP_KERNEL);
 	if (anon_vma) {
+		/*
+		 * anon_vma_cachep is SLAB_TYPESAFE_BY_RCU and init_rwsem() runs
+		 * only in the slab constructor, never on recycle.  A freshly
+		 * allocated anon_vma must come back with an unlocked rwsem; a
+		 * write-held count (bit 0 == RWSEM_WRITER_LOCKED) means the
+		 * previous owner freed it while still holding the lock.  A racing
+		 * RCU reader only takes it for read, so this check is
+		 * writer-specific and false-positive free.
+		 *
+		 * WARN_ON_ONCE, not VM_WARN_ON_ONCE: this only reproduces on
+		 * production builds, which run with CONFIG_DEBUG_VM off.
+		 */
+		WARN_ON_ONCE(atomic_long_read(&anon_vma->rwsem.count) & 1);
 		atomic_set(&anon_vma->refcount, 1);
 		anon_vma->num_children = 0;
 		anon_vma->num_active_vmas = 0;
@@ -110,6 +123,15 @@ static inline struct anon_vma *anon_vma_alloc(void)
 static inline void anon_vma_free(struct anon_vma *anon_vma)
 {
 	VM_BUG_ON(atomic_read(&anon_vma->refcount));
+
+	/*
+	 * Freeing the root anon_vma means the whole CoW chain is gone, so no
+	 * task may legitimately hold its rwsem for write here.  A racing RCU
+	 * reader from folio_lock_anon_vma_read() may hold it for read (drained
+	 * below); a write-held root is the leak that wedges later waiters.
+	 */
+	WARN_ON_ONCE(anon_vma == anon_vma->root &&
+		     (atomic_long_read(&anon_vma->root->rwsem.count) & 1));
 
 	/*
 	 * Synchronize against folio_lock_anon_vma_read() such that
