@@ -577,6 +577,78 @@ static ssize_t reset_subordinate_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(reset_subordinate);
 
+static ssize_t reset_subordinate_with_disable_store(struct device *dev,
+						    struct device_attribute *attr,
+						    const char *buf,
+						    size_t count)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+	struct pci_dev *disable_devs[PCI_RESET_MAX_DISABLE_LINKS];
+	unsigned int domain, bus_nr, dev_nr, fn;
+	int num_disable = 0;
+	char *input, *orig_input, *token;
+	int rc;
+
+	if (!pdev->subordinate)
+		return -ENOTTY;
+
+	orig_input = kstrndup(buf, count, GFP_KERNEL);
+	if (!orig_input)
+		return -ENOMEM;
+
+	input = orig_input;
+
+	/* Parse space-separated domain-qualified BDFs (e.g. "0000:17:02.0") */
+	while ((token = strsep(&input, " \t\n")) != NULL) {
+		struct pci_dev *ddev;
+
+		if (*token == '\0')
+			continue;
+
+		if (num_disable >= PCI_RESET_MAX_DISABLE_LINKS) {
+			rc = -EINVAL;
+			goto out_put;
+		}
+
+		if (sscanf(token, "%x:%x:%x.%x",
+			   &domain, &bus_nr, &dev_nr, &fn) != 4) {
+			rc = -EINVAL;
+			goto out_put;
+		}
+
+		ddev = pci_get_domain_bus_and_slot(domain, bus_nr,
+						   PCI_DEVFN(dev_nr, fn));
+		if (!ddev) {
+			rc = -ENODEV;
+			goto out_put;
+		}
+
+		if (!ddev->subordinate) {
+			pci_dev_put(ddev);
+			rc = -ENOTTY;
+			goto out_put;
+		}
+
+		disable_devs[num_disable++] = ddev;
+	}
+
+	if (num_disable == 0) {
+		rc = -EINVAL;
+		goto out_free;
+	}
+
+	rc = pci_reset_bus_with_disabled_links(pdev, disable_devs,
+					       num_disable);
+
+out_put:
+	while (--num_disable >= 0)
+		pci_dev_put(disable_devs[num_disable]);
+out_free:
+	kfree(orig_input);
+	return rc ? rc : count;
+}
+static DEVICE_ATTR_WO(reset_subordinate_with_disable);
+
 static ssize_t reset_subordinate_link_delay_store(struct device *dev,
 						  struct device_attribute *attr,
 					          const char *buf, size_t count)
@@ -687,6 +759,7 @@ static struct attribute *pci_bridge_attrs[] = {
 	&dev_attr_secondary_bus_number.attr,
 	&dev_attr_reset_subordinate.attr,
 	&dev_attr_reset_subordinate_link_delay.attr,
+	&dev_attr_reset_subordinate_with_disable.attr,
 	NULL,
 };
 
