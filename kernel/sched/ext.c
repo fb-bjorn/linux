@@ -6802,7 +6802,7 @@ static int validate_ops(struct scx_sched *sch, const struct sched_ext_ops *ops)
 	}
 
 	if (ops->cpu_acquire || ops->cpu_release)
-		pr_warn("ops->cpu_acquire/release() are deprecated, use sched_switch TP instead\n");
+		pr_warn_ratelimited("ops->cpu_acquire/release() are deprecated, use sched_switch TP instead\n");
 
 	return 0;
 }
@@ -7523,7 +7523,7 @@ static int bpf_scx_btf_struct_access(struct bpf_verifier_log *log,
 		     off + size <= offsetofend(struct task_struct, scx.slice)) ||
 		    (off >= offsetof(struct task_struct, scx.dsq_vtime) &&
 		     off + size <= offsetofend(struct task_struct, scx.dsq_vtime))) {
-			pr_warn("sched_ext: Writing directly to p->scx.slice/dsq_vtime is deprecated, use scx_bpf_task_set_slice/dsq_vtime()");
+			pr_warn_ratelimited("sched_ext: Writing directly to p->scx.slice/dsq_vtime is deprecated, use scx_bpf_task_set_slice/dsq_vtime()");
 			return SCALAR_VALUE;
 		}
 
