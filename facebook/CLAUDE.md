@@ -5,7 +5,6 @@
 Single source of truth for all buildable kernel flavors: `facebook/bzl/flavors.td.bzl`. It defines `ARCH_FLAVORS` (full list of flavors per architecture) and `BUILD_ONLY_FLAVORS`. Loaded by:
 - `TARGETS` (root) — generates buck2 kernel build targets
 - `facebook/config/TARGETS` — generates kernel config targets
-- `facebook/config/defs.bzl` — validates flavors during config generation
 - `facebook/determinator.td` — the target determinator
 
 ## Target Determinator
