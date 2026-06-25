@@ -63,8 +63,8 @@ void btrfs_free_extent_map(struct extent_map *em)
 	if (!em)
 		return;
 	if (refcount_dec_and_test(&em->refs)) {
-		WARN_ON(btrfs_extent_map_in_tree(em));
-		WARN_ON(!list_empty(&em->list));
+		EM_WARN_ON_ONCE(btrfs_extent_map_in_tree(em), em);
+		EM_WARN_ON_ONCE(!list_empty(&em->list), em);
 		kmem_cache_free(extent_map_cache, em);
 	}
 }
@@ -314,6 +314,22 @@ static void dump_extent_map(struct btrfs_fs_info *fs_info, const char *prefix,
 		prefix, em->start, em->len, em->disk_bytenr, em->disk_num_bytes,
 		em->ram_bytes, em->offset, em->flags);
 	ASSERT(0);
+}
+
+/*
+ * Dump the contents of an extent map to the kernel log.  Used by
+ * EM_WARN_ON_ONCE() to print context about the offending map before its
+ * warning and stack trace.
+ */
+void btrfs_dump_extent_map(const struct extent_map *em, const char *prefix)
+{
+	pr_crit(
+"BTRFS: %s: em=%p start=%llu len=%llu disk_bytenr=%llu disk_num_bytes=%llu offset=%llu ram_bytes=%llu generation=%llu flags=0x%x refs=%u in_tree=%d list_empty=%d list=(next=%p prev=%p)\n",
+		prefix, em, em->start, em->len, em->disk_bytenr,
+		em->disk_num_bytes, em->offset, em->ram_bytes, em->generation,
+		em->flags, refcount_read(&em->refs),
+		btrfs_extent_map_in_tree(em), list_empty(&em->list),
+		em->list.next, em->list.prev);
 }
 
 /* Internal sanity checks for btrfs debug builds. */
