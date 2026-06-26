@@ -5682,7 +5682,9 @@ int pci_reset_bus_with_disabled_links(struct pci_dev *reset_dev,
 	rc = pci_try_reset_bus(reset_bus);
 
 restore:
-	/* Phase 3: Re-enable disabled links in reverse order (best-effort) */
+	/* Phase 3.1: Re-enable disabled links in reverse order (best-effort)
+	 * to allow them to train in-parallel
+	 */
 	for (i = disabled - 1; i >= 0; i--) {
 		int ret;
 
@@ -5695,6 +5697,11 @@ restore:
 			if (!rc)
 				rc = ret;
 		}
+	}
+	/* Phase 3.2: Now wait for links to actually go up */
+	for (i = disabled - 1; i >= 0; i--) {
+		int ret;
+
 		ret = pci_bridge_wait_for_secondary_bus(disable_devs[i],
 							"link enable");
 		if (ret) {
