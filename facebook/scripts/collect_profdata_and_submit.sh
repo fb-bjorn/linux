@@ -39,6 +39,25 @@ if [ -z "${base_branch}" ]; then
   exit 1
 fi
 
+# Extract the major kernel version embedded in the base branch name.
+# The branch may carry an arbitrary prefix and/or suffix, e.g.
+# release-v7.1-fbk1 or test-v7.1-scx; we only care about the vMAJOR.MINOR
+# substring. kernel_version is the dotted form with the leading 'v'
+# (e.g. v7.1); kernel_version_compact drops the dot (e.g. v71) and is used
+# for the manifold directory name.
+kernel_version=
+kernel_version_compact=
+version_re='v([0-9]+)\.([0-9]+)'
+if [[ "${base_branch}" =~ ${version_re} ]]; then
+  kernel_version="v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+  kernel_version_compact="v${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+fi
+
+if [ -z "${kernel_version}" -o -z "${kernel_version_compact}" ]; then
+  echo "Error: Base branch ${base_branch} does not contain a vMAJOR.MINOR version"
+  exit 1
+fi
+
 # default: do 'jf submit'
 do_submit=0
 # default: training time 7200 seconds
@@ -69,11 +88,8 @@ fi
 
 if [ "${do_submit}" = "0" ]; then
   manifold_kernel_dir="tmp"
-elif [[ "${base_branch}" == *"v6.9"* ]]; then
-  manifold_kernel_dir="v69"
 else
-  echo "Error: Base branch is not from v6.9"
-  exit 1
+  manifold_kernel_dir="${kernel_version_compact}"
 fi
 
 # NOTE: globalcert should be enabled. Otherwise, accessing to
@@ -107,6 +123,21 @@ twtf_handle=${twtf_handle:-ecd76ac1-91cf-41cf-9dd6-efd462dc70fa}
 smc_tier=$(twtf status -e ${twtf_handle} -o Json | jq -r '.smc_tier')
 echo "smc_tier: ${smc_tier}"
 
+arch="x86_64"
+find_and_set_arch_manifold_kernel_dir() {
+  echo "check architecture ..."
+  for host in $(smcc ls-hosts ${smc_tier}); do
+    local tmp_machine=$(sush2 --skip-reason ${host} 'uname -m' 2> /dev/null)
+    if [[ "${tmp_machine}" == "aarch64" ]]; then
+      arch="aarch64"
+      manifold_kernel_dir="${kernel_version_compact}/aarch64"
+    fi
+    break
+  done
+
+  echo "arch: ${arch}"
+}
+
 # check integrity of the tier, it should be the same clangtrain
 # kernels for the whole tier.
 validate_tier_and_find_clangtrain_kernel() {
@@ -119,7 +150,7 @@ validate_tier_and_find_clangtrain_kernel() {
       exit 1
     fi
     kernel=${tmp_kernel}
-    if [[ ${kernel} != *"clangtrain"* ]]; then
+    if [[ ${arch} == "x86_64" && ${kernel} != *"clangtrain"* ]]; then
       echo "Error: ${tmp_kernel} is not a clangtrain kernel"
       exit 1
     fi
@@ -127,8 +158,8 @@ validate_tier_and_find_clangtrain_kernel() {
 
   # check whether the clangtrain kernel matches manifold kernel dir
   # w.r.t. major branch.
-  if [ ${manifold_kernel_dir} == "v69" ]; then
-    if [[ ${kernel} != *"6.9"* ]]; then
+  if [[ ${manifold_kernel_dir} == *"${kernel_version_compact}"* ]]; then
+    if [[ ${kernel} != *"${kernel_version#v}"* ]]; then
       echo "Error: clangtrain kernel ${kernel} does not match base branch ${base_branch}"
       exit 1
     fi
@@ -164,17 +195,16 @@ get_training_data_and_upload() {
   cd ${tmp_dir}
   for host in $(smcc ls-hosts ${smc_tier}); do
     echo "  Retrieve profile data from ${host}"
-    # the smc tier /root/vmlinux.profraw will be downloaded into some local directory different for different hosts
-    h5h fetch --root --globalcert --quiet -T host:${host} /root/vmlinux.profraw . --bypass-review "i am good" 1> /dev/null
+    # the smc tier /root/vmlinux.profraw will be downloaded into ${tmp_dir}
+    suscp2 root@${host}:/root/vmlinux.profraw vmlinux.profraw.${host} 1> /dev/null
   done
 
   # merge profdata
-  # hardcode llvm15 now as it works for 6.9 kernel. Will change when compiler
-  # is upgraded.
+  # Hardcode llvm21. Will change when compiler is upgraded.
   echo "Merging profile data and calculating sha256sum"
-  local compiler=~/fbsource/fbcode/third-party-buck/platform010/build/llvm-fb/15/bin/llvm-profdata
+  local compiler=~/fbsource/fbcode/third-party-buck/platform010/build/llvm-fb/21/bin/llvm-profdata
   local profdata_file=profdata.${kernel}.${training_time}s.$(whoami).$(date +%F-%H-%M-%S)
-  ${compiler} merge --output=${profdata_file} $(find . -name vmlinux.profraw)
+  ${compiler} merge --output=${profdata_file} $(find . -name 'vmlinux.profraw*')
   sha256=$(sha256sum ${profdata_file} | cut -d " " -f1)
   echo '  profdata_file' ${profdata_file}
   echo '  sha256' ${sha256}
@@ -194,38 +224,52 @@ gen_commit_and_submit() {
   git checkout -b profdata.${kernel}
 
   # modify facebook/bzl/constants.bzl to have newer training data
-  # the below format is for 6.9
   /bin/rm -f ${tmp_dir}/tmp.patch
   old_ifs="${IFS}"
   IFS=''
-  cat facebook/bzl/constants.bzl |
-  while read line; do
-    if [[ ${line} = *CLANG_TRAIN_DATA_URI* ]]; then
-      echo CLANG_TRAIN_DATA_URI=\"https://interncache-all.fbcdn.net/manifold/${manifold_target_file}\" >> ${tmp_dir}/tmp.patch
-    elif [[ ${line} = *CLANG_TRAIN_DATA_SHA256* ]]; then
-      echo CLANG_TRAIN_DATA_SHA256=\"${sha256}\" >> $tmp_dir/tmp.patch
-    elif [[ ${line} = *HARDENED_TRAIN_DATA_URI* ]]; then
-      echo HARDENED_TRAIN_DATA_URI=\"https://interncache-all.fbcdn.net/manifold/${manifold_target_file}\" >> ${tmp_dir}/tmp.patch
-    elif [[ ${line} = *HARDENED_TRAIN_DATA_SHA256* ]]; then
-      echo HARDENED_TRAIN_DATA_SHA256=\"$sha256\" >> ${tmp_dir}/tmp.patch
-    else
-      echo ${line} >> ${tmp_dir}/tmp.patch
-    fi
-  done
+  if [[ ${arch} == "x86_64" ]]; then
+    cat facebook/bzl/constants.bzl |
+    while read line; do
+      if [[ ${line} = *CLANG_TRAIN_DATA_URI* ]]; then
+        echo CLANG_TRAIN_DATA_URI=\"https://interncache-all.fbcdn.net/manifold/${manifold_target_file}\" >> ${tmp_dir}/tmp.patch
+      elif [[ ${line} = *CLANG_TRAIN_DATA_SHA256* ]]; then
+        echo CLANG_TRAIN_DATA_SHA256=\"${sha256}\" >> $tmp_dir/tmp.patch
+      elif [[ ${line} = *HARDENED_TRAIN_DATA_URI* ]]; then
+        echo HARDENED_TRAIN_DATA_URI=\"https://interncache-all.fbcdn.net/manifold/${manifold_target_file}\" >> ${tmp_dir}/tmp.patch
+      elif [[ ${line} = *HARDENED_TRAIN_DATA_SHA256* ]]; then
+        echo HARDENED_TRAIN_DATA_SHA256=\"$sha256\" >> ${tmp_dir}/tmp.patch
+      else
+        echo ${line} >> ${tmp_dir}/tmp.patch
+      fi
+    done
+  else
+    cat facebook/bzl/constants.bzl |
+    while read line; do
+      if [[ ${line} = *AARCH64_TRAIN_DATA_URI* ]]; then
+        echo AARCH64_TRAIN_DATA_URI=\"https://interncache-all.fbcdn.net/manifold/${manifold_target_file}\" >> ${tmp_dir}/tmp.patch
+      elif [[ ${line} = *AARCH64_TRAIN_DATA_SHA256* ]]; then
+        echo AARCH64_TRAIN_DATA_SHA256=\"${sha256}\" >> $tmp_dir/tmp.patch
+      else
+        echo ${line} >> ${tmp_dir}/tmp.patch
+      fi
+    done
+  fi
   IFS=${old_ifs}
 
   /bin/mv ${tmp_dir}/tmp.patch facebook/bzl/constants.bzl
   git add facebook/bzl/constants.bzl
   git commit \
-    -m "[META-ONLY] Update profile data with ${kernel}" \
+    -m "[META-ONLY] Update profile data with ${arch} ${kernel}" \
     -m "Summary: auto generation of profile data based on ${kernel}" \
     -m "command line: twtf_handle=${twtf_handle} $(pwd)/facebook/scripts/collect_profdata_and_submit.sh ${args}" \
     -m "Test Plan: sandcastle test" \
-    -m "Reviewers: songliubraving, riel, leit, chantra, clm, thesweettea, #linux_kernel"
+    -m "Reviewers: songliubraving, riel, leit, #linux_kernel"
   if [ "${do_submit}" = "1" ]; then
     jf submit
   fi
 }
+
+find_and_set_arch_manifold_kernel_dir
 
 validate_tier_and_find_clangtrain_kernel
 
