@@ -8,6 +8,8 @@
 #include <linux/rbtree.h>
 #include <linux/list.h>
 #include <linux/refcount.h>
+#include <linux/bug.h>
+#include <linux/stringify.h>
 #include "fs.h"
 
 struct btrfs_inode;
@@ -175,6 +177,26 @@ int btrfs_split_extent_map(struct btrfs_inode *inode, u64 start, u64 len, u64 pr
 
 struct extent_map *btrfs_alloc_extent_map(void);
 void btrfs_free_extent_map(struct extent_map *em);
+void btrfs_dump_extent_map(const struct extent_map *em, const char *prefix);
+
+/*
+ * Warn once about a condition involving an extent map, dumping the offending
+ * map's contents (geometry, flags, refcount and list/tree membership) before
+ * the warning and stack trace, much like VM_WARN_ON_ONCE_FOLIO() does for
+ * folios.
+ */
+#define EM_WARN_ON_ONCE(cond, em) ({					\
+	static bool __section(".data..once") __warned;			\
+	int __ret_warn_once = !!(cond);					\
+									\
+	if (unlikely(__ret_warn_once && !__warned)) {			\
+		btrfs_dump_extent_map((em),				\
+			"EM_WARN_ON_ONCE(" __stringify(cond) ")");	\
+		__warned = true;					\
+		WARN_ON(1);						\
+	}								\
+	unlikely(__ret_warn_once);					\
+})
 int __init btrfs_extent_map_init(void);
 void __cold btrfs_extent_map_exit(void);
 int btrfs_unpin_extent_cache(struct btrfs_inode *inode, u64 start, u64 len, u64 gen);
