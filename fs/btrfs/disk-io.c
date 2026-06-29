@@ -2773,7 +2773,7 @@ void btrfs_init_fs_info(struct btrfs_fs_info *fs_info)
 	INIT_RADIX_TREE(&fs_info->fs_roots_radix, GFP_ATOMIC);
 
 	/* META-ONLY: default page-cache folio policy (see folio_mode sysfs). */
-	fs_info->folio_mode = BTRFS_FOLIO_MODE_HUGE;
+	fs_info->folio_mode = BTRFS_FOLIO_MODE_OFF;
 
 	/* Use the same flags as mapping->i_pages. */
 	xa_init_flags(&fs_info->buffer_tree, XA_FLAGS_LOCK_IRQ | XA_FLAGS_ACCOUNT);
