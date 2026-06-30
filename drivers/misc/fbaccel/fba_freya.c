@@ -1,0 +1,2213 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (c) Meta Platforms, Inc. and affiliates */
+/*
+ *
+ * Freya Driver
+ *
+ */
+
+#include <asm/byteorder.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/firmware.h>
+#include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/io.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/bitfield.h>
+#include <linux/parser.h>
+#include <linux/pci.h>
+#include <linux/string.h>
+#include <linux/types.h>
+#include <linux/version.h>
+#include <uapi/linux/limits.h>
+#define FREYA_CXRAM_BASE 0x20F00000
+#define FREYA_CXRAM_SIZE 0x100000
+#define ARTEMIS_CXRAM_BASE 0x20C00000
+#define ARTEMIS_CXRAM_SIZE 0x400000
+#define ATHENA_CXRAM_BASE 0xD0400000
+#define ATHENA_CXRAM_SIZE 0x400000
+#define IRIS_CXRAM_BASE 0xa0700000 // CCP0
+//#define IRIS_CXRAM1_BASE 0xa1700000 // CCP1
+#define IRIS_CXRAM_SIZE 0x100000
+
+#include "fba_freya_priv.h"
+#include "fba_device.h"
+
+#define FREYA_DRV_NAME "freya"
+#define ARTEMIS_DRV_NAME "artemis"
+#define ATHENA_DRV_NAME "athena"
+#define IRIS_DRV_NAME "iris"
+
+#define FREYA_USOC_AXICOMM_OFFSET 0
+#define ARTEMIS_USOC_AXICOMM_OFFSET 0x4000
+#define ATHENA_USOC_AXICOMM_OFFSET 0x2000
+#define IRIS_USOC_AXICOMM_OFFSET 0 // TODO: this is TBD
+
+/* Used to give each class of device it's own id space */
+static DEFINE_IDA(freya_ida);
+static DEFINE_IDA(artemis_ida);
+static DEFINE_IDA(athena_ida);
+static DEFINE_IDA(iris_ida);
+static struct list_head freya_devids;
+static struct list_head artemis_devids;
+static struct list_head athena_devids;
+static struct list_head iris_devids;
+
+static bool ddr_bypass;
+static unsigned int m7_hb_period_ms = M7_HEARTBEAT_PERIOD_MS;
+static int ecc_region_size_mb;
+static int p2p_ecc_region_size_mb;
+
+/* Firmware boot parameters as a string. */
+static char *freya_boot_args = "";
+
+module_param(ddr_bypass, bool, 0444);
+MODULE_PARM_DESC(ddr_bypass,
+		 "Bypassing DDR initialization through boot parameter");
+
+module_param(m7_hb_period_ms, int, 0644);
+MODULE_PARM_DESC(
+	m7_hb_period_ms,
+	"SAIL m7 heartbeat polling period in milliseconds (default: 60000). Set to 0 to disable.");
+
+module_param(freya_boot_args, charp, 0444);
+MODULE_PARM_DESC(
+	freya_boot_args,
+	"Firmware boot parameters (in p1=v1[,p2=v2...] format). "
+	"Driver recognizes: ecc_region_size_mb, p2p_ecc_region_size_mb");
+
+static ulong boot1_load_timeout_ms;
+module_param(boot1_load_timeout_ms, ulong, 0644);
+MODULE_PARM_DESC(
+	boot1_load_timeout_ms,
+	"Override default boot1 loading timeout, has no effect when set to zero");
+
+static ulong ccp_load_timeout_ms;
+module_param(ccp_load_timeout_ms, ulong, 0644);
+MODULE_PARM_DESC(
+	ccp_load_timeout_ms,
+	"Override default CCP loading timeout, has no effect when set to zero");
+
+enum freya_boot_mode {
+	FREYA_BOOT_NORMAL,
+	FREYA_BOOT_MBIST,
+	FREYA_BOOT_PROVISION,
+};
+
+struct boot_timeouts {
+	uint32_t rdy_for_img_xfer_ms;
+	uint32_t img_received_ms;
+	uint32_t boot1_load_ms;
+	uint32_t boot1_ready_ms;
+	uint32_t ccp_load_ms;
+	uint32_t wait_for_ccp_boot_retries;
+	uint32_t polling_period_ms;
+};
+
+struct fbia_priv_data {
+	uint64_t cxram_sideband_ofs;
+};
+
+struct freya_priv {
+	const struct fbia_priv_data *data;
+	enum freya_boot_mode boot_mode;
+	const struct boot_timeouts *boot_timeouts;
+	/* Protects against concurrent secure debug unlocks */
+	struct mutex download_mtx;
+
+	/* Used as the payload transfer location and size for Bootflow using CXRAM */
+	uint32_t cxram_upgrade_ofs;
+	uint32_t cxram_upgrade_sz;
+	/* read bootargs offset and maxsize from the CXRAM */
+	uint64_t cxram_bootargs_ofs;
+	uint64_t cxram_bootargs_maxsize;
+};
+
+static uint32_t freya_read_cxram_sb(struct fba_device *fba_dev,
+				    uint32_t sb_offset)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	uint64_t offset = priv->data->cxram_sideband_ofs + sb_offset;
+
+	return fba_read_bar(fba_dev, BAR_CXRAM, offset);
+}
+
+static void freya_write_cxram_sb(struct fba_device *fba_dev, uint32_t val,
+				 uint32_t sb_offset)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	uint64_t offset = priv->data->cxram_sideband_ofs + sb_offset;
+
+	fba_write_bar(fba_dev, val, BAR_CXRAM, offset);
+}
+
+static void freya_m7_set_hb_mon_period(void *obj)
+{
+	struct fba_device *fba_dev = obj;
+
+	if (!fba_dev->pcie_boot_en)
+		return;
+	if (m7_hb_period_ms == 0) {
+		/*
+		 * Go back to default polling period, disable the
+		 * monitor from sending the heartbeat
+		 */
+		fba_dev->m7_health_poller->period_ms = M7_HEARTBEAT_PERIOD_MS;
+		if (fba_dev->m7_health_poller->enabled)
+			fba_dev_err(fba_dev,
+				    "HB now disabled for M7 controller");
+		fba_dev->m7_health_poller->enabled = false;
+	} else {
+		fba_dev->m7_health_poller->period_ms = m7_hb_period_ms;
+		if (!fba_dev->m7_health_poller->enabled)
+			fba_dev_info(
+				fba_dev,
+				"HB now enabled for M7 controller on dev with polling period of %d ms",
+				m7_hb_period_ms);
+		fba_dev->m7_health_poller->enabled = true;
+	}
+}
+
+/*
+ * The overall design document for M7 heartbeat/watchdog:
+ * Driver would poll on M7 health every m7_hb_period_ms
+ *	1- Driver writes to M7_HEARTBEAT_CTRL_ENTRY mailbox to trigger an
+ *		interrupt on M7
+ *	2- M7 Handler of that interrupts checks the health of all the M7
+ *		threads and writes to M7_HEARTBEAT_STATUS_ENTRY mailbox
+ *	3- Driver sleeps for M7_HEARTBEAT_TIMEOUT_MS to check the
+ *		M7_HEARTBEAT_STATUS_ENTRY mailbox
+ *	4- Driver sets m7_health monitoring key based on mailbox value:
+ *		-  0:
+ *				M7 was outright hang and it couldn't update the mailbox
+ *		- M7_HEALTHY:
+ *				M7 was healthy and updated the mailbox with the M7_HEALTHY
+ *				value
+ *		- Thread bit mask:
+ *				Some of the M7 threads were unhealthy
+ */
+static bool freya_m7_hb_poll(void *obj)
+{
+	struct fba_device *fba_dev = obj;
+	uint32_t m7_status;
+
+	if (!fba_dev->pcie_boot_en)
+		return true;
+	/* Reset M7_HEARTBEAT_STATUS_ENTRY mailbox */
+	set_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY, 0);
+	/* Triggering heartbeat interrupt to M7 */
+	set_mailbox(fba_dev, M7_HEARTBEAT_CTRL_ENTRY, M7_WATCHDOG);
+	/* Wait for M7 to signal it's health */
+	msleep(M7_HEARTBEAT_TIMEOUT_MS);
+
+	/* Read M7 status */
+	m7_status = get_mailbox(fba_dev, M7_HEARTBEAT_STATUS_ENTRY);
+	if (m7_status == M7_HEALTHY) {
+		if (fba_dev->m7_health != HEALTHY) {
+			if (fba_dev->m7_health != UNINITIALIZED) {
+				fba_dev_info(
+					fba_dev,
+					"%s: M7 status is healthy and previous state was %d",
+					__func__, fba_dev->m7_health);
+			}
+			fba_dev->m7_health = HEALTHY;
+		}
+	} else if (m7_status == 0) {
+		if (fba_dev->m7_health != UNHEALTHY) {
+			fba_dev->m7_health = UNHEALTHY;
+			atomic_set(&fba_dev->reset_ok, false);
+			fba_dev_err(fba_dev,
+				    "%s: M7 is unresponsive to interrupts",
+				    __func__);
+		}
+	} else {
+		if (fba_dev->m7_health != UNHEALTHY) {
+			fba_dev->m7_health = UNHEALTHY;
+			atomic_set(&fba_dev->reset_ok, false);
+			fba_dev_err(fba_dev,
+				    "%s: M7 timed out, thread bitmask is 0x%x",
+				    __func__, m7_status);
+		}
+	}
+	return true;
+}
+
+static char *freya_m7_health(struct fba_device *fba_dev)
+{
+	switch (fba_dev->m7_health) {
+	case HEALTHY:
+		return "HEALTHY";
+	case UNHEALTHY:
+		return "UNHEALTHY";
+	case UNINITIALIZED:
+		return "UNINITIALIZED";
+	}
+	fba_dev_err(fba_dev, "%s: Invalid M7 state 0x%x", __func__,
+		    fba_dev->m7_health);
+	return "UNEXPECTED";
+}
+
+static bool did_ccp_panic(struct fba_device *fba_dev)
+{
+	uint32_t panic = 0;
+
+	panic = fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CCP_CRASH_STATUS_OFFSET);
+	return panic ? true : false;
+}
+
+static int fbia_get_bootargs_info(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	uint64_t cxram_size = priv->data->cxram_sideband_ofs + SIDEBAND_SIZE;
+
+	priv->cxram_bootargs_ofs =
+		get_mailbox(fba_dev, M7_BOOT_ARGS_OFFSET_MBOX);
+	priv->cxram_bootargs_maxsize =
+		get_mailbox(fba_dev, M7_BOOT_ARGS_SIZE_MBOX);
+
+	/* check for valid values */
+	if ((priv->cxram_bootargs_ofs >= cxram_size) ||
+	    (priv->cxram_bootargs_maxsize >
+	     (cxram_size - priv->cxram_bootargs_ofs))) {
+		fba_dev_err(fba_dev,
+			    "CXRAM args out of range offset 0x%llx size 0x%llx",
+			    priv->cxram_bootargs_ofs,
+			    priv->cxram_bootargs_maxsize);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int store_boot_args(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	void __iomem *args_bufp;
+	size_t boot_arg_len;
+	int ret = 0;
+
+	ret = fbia_get_bootargs_info(fba_dev);
+	if (ret < 0)
+		return ret;
+
+	boot_arg_len = strlen(freya_boot_args);
+	if (boot_arg_len == 0)
+		return 0;
+	WARN_ON(boot_arg_len > priv->cxram_bootargs_maxsize);
+
+	args_bufp = fba_util_get_bar_ptr(fba_dev, BAR_CXRAM,
+					 priv->cxram_bootargs_ofs);
+
+	memset_io(args_bufp, 0, priv->cxram_bootargs_maxsize);
+	memcpy_toio(args_bufp, freya_boot_args,
+		    min_t(size_t, boot_arg_len,
+			  priv->cxram_bootargs_maxsize - 1));
+	fba_dev_info(fba_dev, "Configured boot args:%s", freya_boot_args);
+	return ret;
+}
+
+enum { BOOT_ARGS_ECC_REGION_MB, BOOT_ARGS_P2P_ECC_REGION_MB, BOOT_ARGS_END };
+
+static match_table_t tokens = {
+	{ BOOT_ARGS_ECC_REGION_MB, "ecc_region_size_mb=%d" },
+	{ BOOT_ARGS_P2P_ECC_REGION_MB, "p2p_ecc_region_size_mb=%d" },
+	{ BOOT_ARGS_END, NULL }
+};
+
+static int freya_store_boot_param(struct fba_device *fba_dev)
+{
+	int ret = 0;
+	char *str_pair;
+	char *str_alloc;
+	char *ptr;
+	int tok;
+	substring_t args[MAX_OPT_ARGS];
+
+	ret = store_boot_args(fba_dev);
+	if (ret < 0)
+		return ret;
+
+	/* parse out known parameters out of firmware args string */
+	str_alloc = str_pair = kstrdup(freya_boot_args, GFP_KERNEL);
+	if (str_alloc == NULL) {
+		fba_dev_err(fba_dev, "Can't allocate args-parsing string");
+		goto skip_parsing;
+	}
+	while ((ptr = strsep(&str_pair, ",")) != NULL) {
+		tok = match_token(ptr, tokens, args);
+		switch (tok) {
+		case BOOT_ARGS_ECC_REGION_MB:
+			match_int(args, &ecc_region_size_mb);
+			break;
+		case BOOT_ARGS_P2P_ECC_REGION_MB:
+			match_int(args, &p2p_ecc_region_size_mb);
+			break;
+		default:
+			break;
+		}
+	}
+	kfree(str_alloc);
+
+skip_parsing:
+	/* Ensure ECC regions are a multiple of 16MB */
+	if (ecc_region_size_mb) {
+		fba_dev_info(fba_dev,
+			     "Firmware setting ECC region size to %u MB",
+			     ecc_region_size_mb);
+		if (!IS_ALIGNED(ecc_region_size_mb,
+				DRAM_ECC_REGION_GRANULARITY_MB)) {
+			fba_dev_warn(
+				fba_dev,
+				"Firmware ECC region size not a multiple of 16MB, ignoring");
+			ecc_region_size_mb = 0;
+		}
+	}
+
+	if (p2p_ecc_region_size_mb) {
+		fba_dev_info(fba_dev,
+			     "Firmware setting P2P_ECC region size to %u MB",
+			     p2p_ecc_region_size_mb);
+		if (!IS_ALIGNED(p2p_ecc_region_size_mb,
+				DRAM_ECC_REGION_GRANULARITY_MB)) {
+			fba_dev_warn(
+				fba_dev,
+				"Firmware P2P ECC region size not a multiple of 16MB, ignoring");
+			p2p_ecc_region_size_mb = 0;
+		}
+	}
+	return ret;
+}
+
+static irqreturn_t fbia_coredump_msix_handler(int irq, void *data)
+{
+	struct fba_device *fba_dev = data;
+
+	fba_dev_err(fba_dev, "CCP has crashed. Aborting device operations.");
+	fba_device_abort(fba_dev, "CCP triggered coredump");
+
+	mutex_lock(&fba_dev->coredump_mutex);
+	fba_dev->device_fatal_err_detected = true;
+	if (!fba_dev->coredump_disabled)
+		kobject_uevent(&fba_dev->dev->kobj, KOBJ_CHANGE);
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	return IRQ_HANDLED;
+}
+
+static void fbia_coredump_exit(struct fba_device *fba_dev)
+{
+	if (fba_dev->coredump_init) {
+		fba_free_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, fba_dev);
+		fba_dev->coredump_init = false;
+	}
+}
+
+static int fbia_coredump_init(struct fba_device *fba_dev)
+{
+	int ret;
+
+	ret = fba_request_irq(fba_dev->pdev, COREDUMP_MSIX_VECTOR, NULL,
+			      fbia_coredump_msix_handler, fba_dev,
+			      "%s%d-coredump", fba_dev->cfg->name, fba_dev->id);
+	if (ret) {
+		fba_dev_err(fba_dev, "fba_request_irq failed for tx irq");
+		return ret;
+	}
+	/* Only set the coredump exit function when coredump init is successful */
+	fba_dev->coredump_init = true;
+	return ret;
+}
+
+static int fbia_coredump_get_region_data(struct fba_ctx *ctx, uint64_t size,
+					 void __user *host_buf,
+					 uint64_t device_addr)
+{
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	struct fba_dma *dma;
+	dma_addr_t host_addr;
+	uint64_t opcode =
+		AT_DMA_GET_OP(size | AT_DMA_OPSZ | AT_DMA_FROM_DEVICE);
+	int ret;
+
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	fba_dev_info(fba_dev, "%s: Mapping DMA pages size=%zu.", __func__,
+		     (size_t)size);
+	dma = fba_dma_map(ctx, host_buf, size, DMA_FROM_DEVICE, true);
+	if (IS_ERR(dma)) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	if (dma->map_cnt != 1) {
+		fba_dev_dbg(fba_dev, "DMA pages are in PRP format.");
+		opcode = opcode | AT_DMA_PRP;
+		host_addr = dma->prp_addr;
+	} else {
+		fba_dev_dbg(fba_dev, "DMA pages are in contig format.");
+		host_addr = dma->dma_addr;
+	}
+
+	set_mailbox64(fba_dev, M7_MBOX_DMA_OPCODE_ENTRY, opcode);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_SIZE_ENTRY, size);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_DADDR_ENTRY, device_addr);
+	set_mailbox64(fba_dev, M7_MBOX_DMA_HADDR_ENTRY, host_addr);
+	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
+	set_mailbox(fba_dev, M7_MBOX_DMA_SUBMISSION_ENTRY, DMA_SUBMISSION);
+
+	ret = fba_wait_for_state(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY,
+				 DMA_COMPLETION, WAIT_FOR_M7_DMA_COMPLETION);
+	fba_dev_dbg(fba_dev, "Setting completion mailboxes back to zero.");
+	set_mailbox(fba_dev, M7_MBOX_DMA_COMPLETION_ENTRY, 0);
+
+	if (ret != 0) {
+		/*
+		 * Most likely the MSIX crash handler has already called
+		 * fba_device_abort, but this won't return until it's safe to
+		 * free devices.  If we're already aborting and waiting on
+		 * coredump, that may even timeout before we did here, in which
+		 * case the call should return immediately.
+		 */
+		fba_device_abort(fba_dev, "coredump timeout");
+	}
+
+	fba_dma_free(ctx, dma);
+
+out_unlock:
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	return ret;
+}
+
+static uint32_t fbia_coredump_get_num_regions(struct fba_device *fba_dev)
+{
+	return fba_read_bar(fba_dev, BAR_CXRAM,
+			    CXRAM_CORE_DUMP_NUM_REGIONS_OFFSET);
+}
+
+static int fbia_coredump_get_info(struct fba_device *fba_dev,
+				  struct get_coredump_info_ioctl *coredump_info)
+{
+	int ret = 0;
+	uint32_t magic;
+
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	magic = fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CORE_DUMP_OFFSET);
+	if (magic != MAGIC_NUMBER) {
+		coredump_info->validity = 0;
+		coredump_info->coredump_info_size = 0;
+		coredump_info->num_regions = 0;
+		goto out_unlock;
+	}
+	coredump_info->validity = 1;
+	coredump_info->num_regions = fbia_coredump_get_num_regions(fba_dev);
+	coredump_info->coredump_info_size =
+		sizeof(struct coredump_region) * coredump_info->num_regions;
+
+out_unlock:
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	return ret;
+}
+
+static int fbia_coredump_get_regions(struct fba_device *fba_dev,
+				     void *coredump_mem, uint32_t size)
+{
+	int ret;
+	uint32_t regions_size;
+
+	mutex_lock(&fba_dev->coredump_mutex);
+	if (fba_dev->coredump_disabled) {
+		ret = -ENODEV;
+		goto out_unlock;
+	}
+
+	regions_size = fbia_coredump_get_num_regions(fba_dev) *
+		       sizeof(struct coredump_region);
+	if (size < regions_size) {
+		/* Partial reading of coredump info is not supported */
+		fba_dev_err(
+			fba_dev,
+			"Error in reading coredump region info, not enough memory to read full buffer");
+		ret = -EINVAL;
+		goto out_unlock;
+	}
+
+	memcpy_fromio(coredump_mem,
+		      (void __iomem *)(fba_dev->bars[BAR_CXRAM] +
+				       CXRAM_CORE_DUMP_REGION_INFO_OFFSET),
+		      regions_size);
+	ret = regions_size;
+
+out_unlock:
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	return ret;
+}
+
+static uint32_t fbia_coredump_get_crc_offset(struct fba_device *fba_dev)
+{
+	return CXRAM_CCP_CORE_DUMP_CRC_OFFSET;
+}
+
+static uint32_t fbia_coredump_get_crc(struct fba_device *fba_dev)
+{
+	return fba_read_bar(fba_dev, BAR_CXRAM, CXRAM_CCP_CORE_DUMP_CRC_OFFSET);
+}
+
+static inline void cxram_sideband_set_mask(struct fba_device *fba_dev,
+					   uint32_t mask, uint32_t newval,
+					   uint64_t offset)
+{
+	uint32_t value;
+
+	value = freya_read_cxram_sb(fba_dev, offset);
+	value &= ~mask;
+	value |= newval;
+	freya_write_cxram_sb(fba_dev, value, offset);
+}
+
+static inline void cxram_sideband_setbit(struct fba_device *fba_dev,
+					 uint32_t setbits, uint64_t offset)
+{
+	uint32_t value;
+
+	value = freya_read_cxram_sb(fba_dev, offset);
+	value |= setbits;
+	freya_write_cxram_sb(fba_dev, value, offset);
+}
+
+static inline void cxram_sideband_clearbit(struct fba_device *fba_dev,
+					   uint32_t clearbits, uint64_t offset)
+{
+	uint32_t value;
+
+	value = freya_read_cxram_sb(fba_dev, offset);
+	value &= ~clearbits;
+	freya_write_cxram_sb(fba_dev, value, offset);
+}
+
+static int request_and_xfer_fw(struct fba_device *fba_dev, const char *name,
+			       void __iomem *buf, size_t max_size)
+{
+	struct device *dev = &fba_dev->pdev->dev;
+	const struct firmware *fw;
+	const uint8_t *src;
+	uint8_t __iomem *dst;
+	size_t size;
+	int ret;
+
+	ret = request_firmware(&fw, name, dev);
+	if (ret)
+		return ret;
+
+	if (fw->size > max_size) {
+		release_firmware(fw);
+		return -EFBIG;
+	}
+
+	dst = buf;
+	src = fw->data;
+
+	for (size = fw->size; size > 0; /* none */) {
+		size_t chunk_size = min_t(size_t, size, 64 * 1024);
+
+		memcpy_toio(dst, src, chunk_size);
+		size -= chunk_size;
+		src += chunk_size;
+		dst += chunk_size;
+
+		/*
+		 * Commit chunk to the device. This is an overkill on
+		 * real hardware, but helps VirtualBridge which has
+		 * problems keeping up with big mmio transfers
+		 */
+		(void)freya_read_cxram_sb(fba_dev, SB_FW_UPDATE_OFS);
+	}
+
+	fba_dev_info(fba_dev,
+		     "Image of size=0x%zx is transferred to the device",
+		     fw->size);
+	release_firmware(fw);
+
+	return 0;
+}
+
+static inline int freya_wait_for_status(struct fba_device *fba_dev,
+					uint64_t offset, uint32_t mask,
+					uint32_t value,
+					unsigned long timeout_ms)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	unsigned long timeout = jiffies + msecs_to_jiffies(timeout_ms);
+	uint32_t rd_val = freya_read_cxram_sb(fba_dev, offset);
+	uint32_t i = 1;
+
+	while ((rd_val & mask) != value) {
+		/* Bail early if we're unbinding. */
+		if (READ_ONCE(fba_dev->exiting))
+			return -ETIMEDOUT;
+
+		if (time_after(jiffies, timeout))
+			return -ETIMEDOUT;
+
+		fba_dev_info(fba_dev, "%s: Waiting for value %u try %d.",
+			     __func__, value, i++);
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout(msecs_to_jiffies(
+			priv->boot_timeouts->polling_period_ms));
+		rd_val = freya_read_cxram_sb(fba_dev, offset);
+	}
+
+	return 0;
+}
+
+static void freya_boot_error_signal_print(struct fba_device *fba_dev)
+{
+	uint32_t error_code, asic_error, module_error, error_cnt, temp;
+
+	error_code = freya_read_cxram_sb(fba_dev, SB_ERROR_CODE_OFS);
+	asic_error = freya_read_cxram_sb(fba_dev, SB_ASIC_ERROR_TYPE_OFS);
+	module_error = freya_read_cxram_sb(fba_dev, SB_MODULE_ERROR_TYPE_OFS);
+	error_cnt = freya_read_cxram_sb(fba_dev, SB_INT_MEM_ERR_CNT_OFS);
+
+	if (error_code != 0) {
+		fba_dev_info(fba_dev, "ERROR_CODE: %#lx",
+			     FIELD_GET(ASIC_ERROR_CODE_MASK, error_code));
+		fba_dev_info(fba_dev, "CERT1_ERROR_CODE: %#lx",
+			     FIELD_GET(ASIC_CERT1_ERROR_CODE_MASK, error_code));
+		fba_dev_info(fba_dev, "CERT2_ERROR_CODE: %#lx",
+			     FIELD_GET(ASIC_CERT2_ERROR_CODE_MASK, error_code));
+		fba_dev_info(fba_dev, "CERT3_ERROR_CODE: %#lx",
+			     FIELD_GET(ASIC_CERT3_ERROR_CODE_MASK, error_code));
+	}
+
+	if (FIELD_GET(ASIC_ERROR_TYPE_MASK, asic_error) != 0)
+		fba_dev_info(fba_dev, "ASIC_ERROR_TYPE: %#lx",
+			     FIELD_GET(ASIC_ERROR_TYPE_MASK, asic_error));
+
+	if ((module_error & ~ASIC_TEMP_VALUE_MASK) != 0) {
+		fba_dev_info(fba_dev, "MODULE_ERROR_TYPE: %#lx",
+			     FIELD_GET(MODULE_ERROR_TYPE_MASK, module_error));
+		fba_dev_info(fba_dev, "WARNING_FLAG: %#lx",
+			     FIELD_GET(ASIC_WARNING_FLAG_MASK, module_error));
+		fba_dev_info(fba_dev, "INTERRUPT_FLAG: %#lx",
+			     FIELD_GET(ASIC_INTERRUPT_FLAG_MASK, module_error));
+	}
+
+	if ((error_cnt & ~ASIC_PEC_BYTE_MASK) != 0) {
+		fba_dev_info(fba_dev, "INT_MEM_ERR_CNT: %#lx",
+			     FIELD_GET(ASIC_INT_MEM_ERR_CNT_MASK, error_cnt));
+		fba_dev_info(fba_dev, "EXT_MEM_ERR_CNT: %#lx",
+			     FIELD_GET(ASIC_EXT_MEM_ERR_CNT_MASK, error_cnt));
+		fba_dev_info(fba_dev, "SMBUS_ERROR: %#lx",
+			     FIELD_GET(ASIC_SMBUS_ERROR_MASK, error_cnt));
+	}
+
+	temp = FIELD_GET(ASIC_TEMP_VALUE_MASK, module_error);
+	if (temp > ASIC_MAX_TEMP)
+		fba_dev_info(
+			fba_dev,
+			"MAX_ASIC_TEMP exceeding maximum ASIC temperature: %#x",
+			temp);
+}
+
+static void freya_boot_error_signal_reset(struct fba_device *fba_dev)
+{
+	/*
+	 * This will reset all ERROR_CODE, CERT1_ERROR_CODE, CERT2_ERROR_CODE,
+	 * CERT3_ERROR_CODE
+	 */
+	freya_write_cxram_sb(fba_dev, 0, SB_ERROR_CODE_OFS);
+
+	/*
+	 * This will reset all ASIC_ERROR_TYPE
+	 */
+	freya_write_cxram_sb(fba_dev, 0, SB_ASIC_ERROR_TYPE_OFS);
+
+	/*
+	 * This will reset all MODULE_ERROR_TYPE, WARNING_FLAG,
+	 * INTERRUPT_FLAG, MAX_ASIC_TEMP
+	 */
+	freya_write_cxram_sb(fba_dev, 0, SB_MODULE_ERROR_TYPE_OFS);
+
+	/*
+	 * This will reset all INT_MEM_ERR_CNT, EXT_MEM_ERR_CNT,
+	 * SMBUS_ERROR
+	 */
+	freya_write_cxram_sb(fba_dev, 0, SB_INT_MEM_ERR_CNT_OFS);
+}
+
+static int freya_download_image(struct fba_device *fba_dev,
+				enum image_location image_destination,
+				const char *file_name, uint32_t load_timeout)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	void __iomem *bufp;
+	unsigned long timeout;
+	size_t max_buf;
+	uint32_t val;
+	int ret;
+
+	/*
+	 * Print and reset the persistent error code as M7 would not reset these on
+	 * any type of reset
+	 */
+	freya_boot_error_signal_print(fba_dev);
+	freya_boot_error_signal_reset(fba_dev);
+
+	/* Clearing handshaking bits */
+	cxram_sideband_clearbit(fba_dev, CONTROL_CLEAR_MASK, SB_FW_UPDATE_OFS);
+
+	/* Verify bits were cleared */
+	val = freya_read_cxram_sb(fba_dev, SB_FW_UPDATE_OFS);
+	if ((val & CONTROL_CLEAR_MASK) != 0) {
+		fba_dev_err(fba_dev,
+			    "Failed to clear handshaking bits, device failed?");
+		return -EIO;
+	}
+
+	/*
+	 * Setting up the location of the image source (it can only be SRAM)
+	 * and image final destination
+	 */
+	cxram_sideband_set_mask(fba_dev, FW_IMAGE_SRC_MASK | FW_IMAGE_DST_MASK,
+				FIELD_PREP(FW_IMAGE_SRC_MASK, LOCATION_SRAM) |
+					FIELD_PREP(FW_IMAGE_DST_MASK,
+						   image_destination),
+				SB_FW_IMAGE_TARGET_CMD_OFS);
+
+	/* Setting the initiate download bit from host */
+	cxram_sideband_setbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
+	fba_dev_info(fba_dev, "Initiate download");
+	timeout = priv->boot_timeouts->rdy_for_img_xfer_ms;
+
+	/* Waiting for the device to respond that it is ready for image transfer */
+	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
+				    READY_FOR_FW_IMAGE, READY_FOR_FW_IMAGE,
+				    timeout);
+	if (ret < 0) {
+		/* Timeout while waiting for the device to respond */
+		fba_dev_err(fba_dev, "Ready for FW image timeout");
+		goto err_out;
+	}
+	fba_dev_info(fba_dev, "Device ready for FW image");
+
+	/*
+	 * Transfer the image to context SRAM using BAR 2(a portion right at the
+	 * beginning of this BAR is mapped to CxRAM during boot0 initialization,
+	 * so the offset from CxRAM start address is the same offset of this BAR)
+	 */
+	bufp = (void __iomem *)(fba_dev->bars[BAR_CXRAM] +
+				priv->cxram_upgrade_ofs);
+	max_buf = priv->cxram_upgrade_sz;
+
+	ret = request_and_xfer_fw(fba_dev, file_name, bufp, max_buf);
+	if (ret) {
+		fba_dev_err(fba_dev, "Error %d requesting firmware file: %s",
+			    ret, file_name);
+		goto err_out;
+	}
+
+	/* Signal to the device that the image transfer is done */
+	cxram_sideband_setbit(fba_dev, TRANSFER_DONE, SB_FW_UPDATE_OFS);
+	fba_dev_info(fba_dev, "Device is notified that transfer is done");
+	timeout = priv->boot_timeouts->img_received_ms;
+
+	/* Waiting for the device to acknowledge the transfer */
+	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS,
+				    UPDATE_IN_PROGRESS, UPDATE_IN_PROGRESS,
+				    timeout);
+
+	/* Timeout while waiting for the device to respond */
+	if (ret < 0) {
+		fba_dev_err(fba_dev, "Image received timeout");
+		goto err_out;
+	}
+	fba_dev_info(fba_dev,
+		     "Device is in progress of authenticating the image");
+
+	/* Clearing the transfer done signal */
+	cxram_sideband_clearbit(fba_dev, TRANSFER_DONE, SB_FW_UPDATE_OFS);
+
+	/* Verify the transfer done signal was cleared */
+	val = freya_read_cxram_sb(fba_dev, SB_FW_UPDATE_OFS);
+	if ((val & TRANSFER_DONE) != 0) {
+		fba_dev_err(fba_dev,
+			    "Failed to clear transfer done, device failed?");
+		return -EIO;
+	}
+
+	fba_dev_info(
+		fba_dev,
+		"Transfer done flag is cleared, waiting for update complete");
+
+	/*
+	 * Waiting for the device to complete image verification and transfer to
+	 * the destination location
+	 */
+	ret = freya_wait_for_status(fba_dev, SB_FW_UPDATE_OFS, UPDATE_COMPLETE,
+				    UPDATE_COMPLETE, load_timeout);
+
+	if (ret < 0) {
+		fba_dev_err(
+			fba_dev,
+			"Device failed to either verify the image or transfer it to the destination location.");
+		goto err_out;
+	}
+
+	fba_dev_info(fba_dev,
+		     "Device image authentication and transfer is complete");
+
+	return ret;
+
+err_out:
+	/*
+	 * This is needed when we want to abort the boot flow from host side if host
+	 * didn't receive the required response from the device in a timely manner.
+	 */
+	cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
+	/* Print the debug signals for further investigation */
+	freya_boot_error_signal_print(fba_dev);
+	return ret;
+}
+
+static void freya_check_ddr_init_status(struct fba_device *fba_dev)
+{
+	uint32_t val = freya_read_cxram_sb(fba_dev, SB_BOOT_STATUS2_OFS);
+
+	val = FIELD_GET(DDR_INITIALIZED_MASK, val);
+	fba_dev_err(fba_dev, "Boot1 Ready timeout. DDR Init complete: %d", val);
+}
+
+static int freya_boot(struct fba_device *fba_dev,
+		      enum image_location image_destination,
+		      const char *file_name, uint32_t load_timeout)
+{
+	int ret;
+
+	ret = freya_download_image(fba_dev, image_destination, file_name,
+				   load_timeout);
+	if (ret == 0) {
+		/* Signal the device to boot the new image */
+		cxram_sideband_setbit(fba_dev, BOOT_CMD,
+				      SB_FW_IMAGE_TARGET_CMD_OFS);
+		fba_dev_info(fba_dev, "Boot request sent to the device");
+		/* Clear the request initiating the firmware download */
+		cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD,
+					SB_FW_UPDATE_OFS);
+		cxram_sideband_clearbit(fba_dev, READY_FOR_FW_IMAGE,
+					SB_FW_UPDATE_OFS);
+	}
+
+	return ret;
+}
+
+static int freya_m7_setup_iatu(struct fba_device *fba_dev)
+{
+	int ret;
+
+	set_mailbox64(fba_dev, M7_MBOX_IATU_STS_ADDR_ENTRY,
+		      (uint64_t)fba_dev->status_area.addr);
+	set_mailbox(fba_dev, M7_MBOX_IATU_STS_SIZE_ENTRY,
+		    (uint64_t)fba_dev->status_area.size);
+	set_mailbox(fba_dev, M7_MBOX_IATU_SETUP_ENTRY, 0);
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(
+			fba_dev,
+			"Failed waiting for iATU Config status memory signature.");
+		return ret;
+	}
+	/* Resetting the iATU Config ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
+			  sizeof(uint32_t));
+
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_CIP_RESET_OFS,
+				  IATU_CIP_RESET_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(
+			fba_dev,
+			"Failed waiting for iATU CIP Reset status memory signature.");
+		return ret;
+	}
+	/* Resetting the iATU CIP Reset ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_CIP_RESET_OFS, 0,
+			  sizeof(uint32_t));
+
+	return ret;
+}
+
+static int freya_boot1(struct fba_device *fba_dev)
+{
+	int ret;
+	unsigned long timeout;
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	if ((ecc_region_size_mb != 0) || (p2p_ecc_region_size_mb != 0)) {
+		/* Only enable ECC if the user requested some amount of ECC protected
+		 * DRAM since turning it on automatically reduces capacity by 1/8.
+		 * Boot1 currently is not aware of the CCP boot parameters in CXRAM,
+		 * and relies on these config bits in the sideband struct to enable
+		 * ECC. This redundancy could be eliminated in the future.
+		 */
+		cxram_sideband_setbit(fba_dev, LPDDR_INLINE_ECC_ENABLED_MASK,
+				      SB_LPDDR_ECC_CONFIG_OFS);
+	} else {
+		freya_write_cxram_sb(fba_dev, 0, SB_LPDDR_ECC_CONFIG_OFS);
+	}
+
+	if (boot1_load_timeout_ms > 0)
+		timeout = boot1_load_timeout_ms;
+	else
+		timeout = priv->boot_timeouts->boot1_load_ms;
+
+	/*
+	 * The DDR Initialized bit may not be cleared by the device until after boot1 has
+	 * started booting, which may cause the driver to falsely believe DDR init
+	 * is done before it has even started. So clear the bit here to guarantee
+	 * that can't happen.
+	 */
+	cxram_sideband_clearbit(fba_dev, DDR_INITIALIZED_MASK,
+				SB_BOOT_STATUS2_OFS);
+
+	ret = freya_boot(fba_dev, LOCATION_ITCM, fba_dev->boot1_filename,
+			 timeout);
+
+	if (ret < 0) {
+		fba_dev_err(fba_dev, "Boot1 load has failed");
+		return ret;
+	}
+	fba_dev_info(fba_dev, "Loaded boot1 image, booting image: %s",
+		     fba_dev->boot1_filename);
+
+	if (!ddr_bypass) {
+		timeout = priv->boot_timeouts->boot1_ready_ms;
+
+		ret = freya_wait_for_status(fba_dev, SB_BOOT_STATUS2_OFS,
+					    BOOT1_COMPLETE_MASK,
+					    BOOT1_COMPLETE_MASK, timeout);
+		if (ret) {
+			freya_check_ddr_init_status(fba_dev);
+			return ret;
+		}
+	}
+
+	cxram_sideband_clearbit(fba_dev, BOOT1_COMPLETE_MASK,
+				SB_BOOT_STATUS2_OFS);
+
+	ret = freya_store_boot_param(fba_dev);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * Skip outbound iATU setup and health poller for Athena.
+	 * Boot1 does not support these just yet.
+	 */
+	if (fba_dev->cfg != &athena_cfg && fba_dev->cfg != &iris_cfg) {
+		ret = freya_m7_setup_iatu(fba_dev);
+		if (ret) {
+			fba_dev_err(fba_dev, "Boot1 iATU setup failed");
+			return ret;
+		}
+
+		fba_poller_start(fba_dev->m7_health_poller);
+	}
+
+	if ((fba_dev->pdev->class >> 8) != 0) {
+		/* Reset requires PCI quirk to be in effect. */
+		atomic_set(&fba_dev->reset_ok, true);
+	}
+
+	fba_dev_info(fba_dev, "Boot1 ready for CCP transfer");
+	return ret;
+}
+
+static int freya_load_mbist(struct fba_device *fba_dev)
+{
+	int ret;
+	uint32_t result;
+
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	ret = freya_boot(fba_dev, LOCATION_MBIST, FREYA_DEF_MBIST_FILENAME,
+			 BOOT1_LOAD_TIMEOUT_MS);
+	if (ret < 0) {
+		fba_dev_err(
+			fba_dev,
+			"MBIST load has failed, staying in DRAM UP to retry");
+		return ret;
+	}
+	fba_dev_info(fba_dev, "MBIST load done and MBIST is running");
+
+	ret = freya_wait_for_status(
+		fba_dev, SB_EXEC_STATUS_OFS, EXEC_STATUS_MASK,
+		FIELD_PREP(EXEC_STATUS_MASK, EXEC_STATUS_COMPLETE),
+		MBIST_EXEC_TIMEOUT_MS);
+	if (ret) {
+		fba_dev_err(fba_dev, "MBIST Test timed out");
+		return ret;
+	}
+
+	result = FIELD_GET(EXEC_RESULT_MASK,
+			   freya_read_cxram_sb(fba_dev, SB_EXEC_RESULT_OFS));
+	fba_dev_info(fba_dev, "MBIST Test finished, result : %s",
+		     ((result == EXEC_RESULT_PASS) ?
+			      "PASS" :
+			      ((result == EXEC_RESULT_ABORTED) ? "ABORTED" :
+								 "FAIL")));
+	return ret;
+}
+
+static int freya_load_ccp(struct fba_device *fba_dev)
+{
+	int ret;
+	unsigned long timeout;
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	/*Clear the mailbox before we start loading/booting ccp */
+	set_mailbox(fba_dev, SAIL_RDY, 0);
+
+	if (ccp_load_timeout_ms != 0)
+		timeout = ccp_load_timeout_ms;
+	else
+		timeout = priv->boot_timeouts->ccp_load_ms;
+
+	ret = freya_boot(fba_dev, LOCATION_RISCV, fba_dev->boot2_filename,
+			 timeout);
+	if (ret == 0)
+		fba_dev_info(fba_dev, "Loaded CCP image: %s",
+			     fba_dev->boot2_filename);
+
+	return ret;
+}
+
+static int freya_boot_ccp(struct fba_device *fba_dev)
+{
+	int ret;
+	int retry_limit;
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	/*Assume APP FW is booted if PCIe Boot is not enabled*/
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	retry_limit = priv->boot_timeouts->wait_for_ccp_boot_retries;
+
+	ret = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+				 retry_limit);
+	if (ret < 0)
+		fba_dev_err(fba_dev, "CCP boot failed");
+
+	return ret;
+}
+
+static int freya_secure_dbg_unlock(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	int ret;
+
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	mutex_lock(&priv->download_mtx);
+
+	ret = freya_download_image(fba_dev, LOCATION_MBIST,
+				   FREYA_DEF_SECURE_DBG_FILENAME,
+				   BOOT1_LOAD_TIMEOUT_MS);
+	if (ret < 0) {
+		fba_dev_err(fba_dev, "Secure Debug HBIN download failed.");
+	} else {
+		cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD,
+					SB_FW_UPDATE_OFS);
+		fba_dev_info(fba_dev, "Secure Debug HBIN loaded successfully.");
+	}
+
+	mutex_unlock(&priv->download_mtx);
+	return ret;
+}
+
+static void payload_exec_send_input(struct fba_device *fba_dev,
+				    const struct payload_exec_ioctl *params,
+				    void __iomem *device_packet_buf)
+{
+	struct payload_exec_data data_packet;
+	uint32_t data2;
+	uint32_t parity;
+
+	if (params->use_default_args && params->use_default_func) {
+		cxram_sideband_clearbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
+					SB_TRANSFER_HEADER_MODE_OFS);
+	} else {
+		cxram_sideband_setbit(fba_dev, PAYLOAD_EXEC_FUNC_MODE,
+				      SB_TRANSFER_HEADER_MODE_OFS);
+		data2 = params->func;
+		if (params->use_default_args == 0)
+			data2 |= PAYLOAD_EXEC_CUSTOM_ARGS;
+
+		/* FW XORs first 6 dwords and verifies it matches parity bits from the host */
+		parity = SB_TRANSFER_DATA_PACKET_UID ^
+			 SB_TRANSFER_DATA_PACKET_VERSION ^ data2 ^
+			 params->arg1 ^ params->arg2 ^ params->arg3;
+
+		data_packet = (struct payload_exec_data){
+			cpu_to_le32(SB_TRANSFER_DATA_PACKET_UID),
+			cpu_to_le32(SB_TRANSFER_DATA_PACKET_VERSION),
+			cpu_to_le32(data2),
+			cpu_to_le32(params->arg1),
+			cpu_to_le32(params->arg2),
+			cpu_to_le32(params->arg3),
+			cpu_to_le32(parity),
+			0
+		};
+		memcpy_toio(device_packet_buf, &data_packet,
+			    sizeof(data_packet));
+	}
+}
+
+static int payload_exec_read_result_data(
+	struct fba_device *fba_dev, const struct payload_exec_ioctl *params,
+	void __iomem *device_packet_buf, uint64_t *results_buf,
+	uint64_t *actual_results_size)
+{
+	struct payload_exec_result result_info;
+	uint64_t output_data_size;
+	uint64_t output_data_addr;
+	void __iomem *device_results_buf;
+	int copy_size;
+
+	memcpy_fromio(&result_info, device_packet_buf, sizeof(result_info));
+
+	output_data_size =
+		((uint64_t)le32_to_cpu(result_info.ret_buf_size_high) << 32) |
+		le32_to_cpu(result_info.ret_buf_size_low);
+	output_data_addr =
+		((uint64_t)le32_to_cpu(result_info.ret_buf_addr_high) << 32) |
+		le32_to_cpu(result_info.ret_buf_addr_low);
+	fba_dev_dbg(
+		fba_dev,
+		"Payload HBIN execution complete. Results buffer - Size: 0x%llx Addr: 0x%llx",
+		output_data_size, output_data_addr);
+
+	if ((output_data_size > 0) && (params->results_buf_size > 0)) {
+		/* Ensure we don't overflow the userspace buffer if it's undersized */
+		if (output_data_size < params->results_buf_size)
+			copy_size = output_data_size;
+		else
+			copy_size = params->results_buf_size;
+
+		if ((output_data_addr < FREYA_CXRAM_BASE) ||
+		    (output_data_addr + output_data_size >
+		     FREYA_CXRAM_BASE + FREYA_CXRAM_SIZE)) {
+			fba_dev_err(
+				fba_dev,
+				"Output data buffer not contained in CXRAM");
+			return -EIO;
+		}
+
+		/* Translate device's output data address to host virtual address */
+		device_results_buf = fba_util_get_bar_ptr(
+			fba_dev, BAR_CXRAM,
+			output_data_addr - FREYA_CXRAM_BASE);
+		fba_dev_dbg(
+			fba_dev,
+			"params->results_buf: 0x%p device_buf: 0x%p copy_size: %i",
+			results_buf, device_results_buf, copy_size);
+
+		memcpy_fromio(results_buf, device_results_buf, copy_size);
+	}
+
+	*actual_results_size = output_data_size;
+	return 0;
+}
+
+static int freya_payload_exec(struct fba_device *fba_dev,
+			      const struct payload_exec_ioctl *params,
+			      char *hbin_filename, uint64_t *results_buf,
+			      uint64_t *actual_results_size)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	void __iomem *device_packet_buf;
+	int result;
+	int ret;
+
+	mutex_lock(&priv->download_mtx);
+
+	ret = freya_download_image(fba_dev, LOCATION_MBIST, hbin_filename,
+				   params->exec_timeout);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Executable HBIN load failed.");
+		goto out_unlock;
+	}
+	device_packet_buf = fba_util_get_bar_ptr(
+		fba_dev, BAR_CXRAM, SB_TRANSFER_DATA_PACKET_DATA_OFS);
+	payload_exec_send_input(fba_dev, params, device_packet_buf);
+
+	/* Set the boot flag and clear init_download to signal
+	 * Boot1 to begin executing the payload
+	 */
+	cxram_sideband_setbit(fba_dev, BOOT_CMD, SB_FW_IMAGE_TARGET_CMD_OFS);
+	cxram_sideband_clearbit(fba_dev, INIT_DOWNLOAD, SB_FW_UPDATE_OFS);
+
+	fba_dev_dbg(fba_dev,
+		    "Payload HBIN execution started, waiting for result.");
+
+	ret = freya_wait_for_status(
+		fba_dev, SB_EXEC_STATUS_OFS, EXEC_STATUS_MASK,
+		FIELD_PREP(EXEC_STATUS_MASK, EXEC_STATUS_COMPLETE),
+		params->exec_timeout);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Payload HBIN execution timed out");
+		goto out_unlock;
+	}
+
+	result = FIELD_GET(EXEC_RESULT_MASK,
+			   freya_read_cxram_sb(fba_dev, SB_EXEC_RESULT_OFS));
+	if (result == EXEC_RESULT_PASS) {
+		if (!params->use_default_args && !params->use_default_func) {
+			ret = payload_exec_read_result_data(
+				fba_dev, params, device_packet_buf, results_buf,
+				actual_results_size);
+		}
+		ret = 0;
+	} else {
+		ret = -EBADE;
+		fba_dev_err(fba_dev, "Payload HBIN execution failed");
+	}
+
+out_unlock:
+	mutex_unlock(&priv->download_mtx);
+	return ret;
+}
+
+static int fbia_ioctl_payload_exec(struct fba_device *fba_dev,
+				   void __user *data)
+{
+	struct payload_exec_ioctl params;
+	uint64_t *results_buf = NULL;
+	uint64_t actual_results_size = 0;
+	void __user *user_results_buf;
+	void __user *user_actual_results_size;
+	char __user *user_hbin_filename;
+	char *hbin_filename;
+	int ret;
+
+	if (copy_from_user(&params, data, sizeof(params)))
+		return -EFAULT;
+
+	/* Copy the HBIN filename into the driver. */
+	hbin_filename = kzalloc(NAME_MAX + 1, GFP_KERNEL);
+	if (hbin_filename == NULL)
+		return -ENOMEM;
+
+	if (params.user_hbin_filename_ptr != 0) {
+		user_hbin_filename =
+			u64_to_user_ptr(params.user_hbin_filename_ptr);
+		ret = strncpy_from_user(hbin_filename, user_hbin_filename,
+					NAME_MAX);
+		if (ret < 0) {
+			fba_dev_err(fba_dev, "HBIN filename strncpy failed.");
+			goto out_free_buf;
+		}
+	}
+
+	/* Allocate a results buffer in the kernel, and save the userspace ptr for later */
+	if (params.results_buf_size > 0) {
+		results_buf = kvzalloc(params.results_buf_size, GFP_KERNEL);
+		if (results_buf == NULL) {
+			ret = -ENOMEM;
+			goto out_free_buf;
+		}
+	}
+
+	ret = freya_payload_exec(fba_dev, &params, hbin_filename, results_buf,
+				 &actual_results_size);
+	if (ret != 0)
+		goto out_free_buf;
+
+	if ((params.results_buf_size > 0) && (actual_results_size > 0)) {
+		user_results_buf = u64_to_user_ptr(params.user_results_buf_ptr);
+		ret = copy_to_user(user_results_buf, results_buf,
+				   params.results_buf_size);
+		if (ret != 0) {
+			ret = -EFAULT;
+			goto out_free_buf;
+		}
+	}
+
+	if (params.user_actual_results_size_ptr != 0) {
+		user_actual_results_size =
+			u64_to_user_ptr(params.user_actual_results_size_ptr);
+		ret = copy_to_user(user_actual_results_size,
+				   &actual_results_size,
+				   sizeof(actual_results_size));
+		if (ret != 0)
+			ret = -EFAULT;
+	}
+out_free_buf:
+	kfree(results_buf);
+	kfree(hbin_filename);
+	return ret;
+}
+
+static int freya_provision(struct fba_device *fba_dev)
+{
+	int ret;
+	int result;
+
+	/* Assume CCP FW is loaded if PCIe Boot is not enabled */
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	ret = freya_boot(fba_dev, LOCATION_MBIST,
+			 FREYA_DEF_PROVISIONING_FILENAME,
+			 BOOT1_LOAD_TIMEOUT_MS);
+	if (ret < 0) {
+		fba_dev_err(fba_dev, "Provisioning HBIN load failed.");
+		return ret;
+	}
+	fba_dev_info(fba_dev, "Provisioning HBIN loaded, waiting for result.");
+
+	ret = freya_wait_for_status(
+		fba_dev, SB_EXEC_STATUS_OFS, EXEC_STATUS_MASK,
+		FIELD_PREP(EXEC_STATUS_MASK, EXEC_STATUS_COMPLETE),
+		MBIST_EXEC_TIMEOUT_MS);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Provisioning timed out");
+		return ret;
+	}
+
+	result = freya_read_cxram_sb(fba_dev, SB_EXEC_RESULT_OFS);
+	if (result == EXEC_RESULT_PASS)
+		fba_dev_info(fba_dev, "Provisioning completed successfully");
+	else if (result == EXEC_RESULT_ABORTED)
+		fba_dev_err(fba_dev, "Provisioning aborted");
+	else
+		fba_dev_err(fba_dev, "Provisioning failed");
+
+	return ret;
+}
+
+static bool freya_is_secure_boot(struct fba_device *fba_dev)
+{
+	uint32_t val = freya_read_cxram_sb(fba_dev, SB_BOOT_STATUS2_OFS);
+
+	val = FIELD_GET(LCS_STATE_MASK, val);
+	fba_dev_info(fba_dev, "Freya lcs_state=%d", val);
+
+	return (val == LCS_STATE_SECURE);
+}
+
+static void freya_get_fw_filenames(struct fba_device *fba_dev,
+				   const char **boot1, const char **boot2)
+{
+	*boot1 = FREYA_DEF_BOOT1_FILENAME;
+	*boot2 = FREYA_DEF_BOOT2_FILENAME;
+}
+
+static void artemis_get_fw_filenames(struct fba_device *fba_dev,
+				     const char **boot1, const char **boot2)
+{
+	*boot1 = ARTEMIS_DEF_BOOT1_FILENAME;
+	*boot2 = ARTEMIS_DEF_BOOT2_FILENAME;
+}
+
+static void athena_get_fw_filenames(struct fba_device *fba_dev,
+				    const char **boot1, const char **boot2)
+{
+	*boot1 = ATHENA_DEF_BOOT1_FILENAME;
+	*boot2 = ATHENA_DEF_BOOT2_FILENAME;
+}
+
+static void iris_get_fw_filenames(struct fba_device *fba_dev,
+				  const char **boot1, const char **boot2)
+{
+	*boot1 = IRIS_DEF_BOOT1_FILENAME;
+	*boot2 = IRIS_DEF_BOOT2_FILENAME;
+}
+
+static int freya_load_firmware(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+	enum freya_boot_mode boot_mode;
+	int ret;
+
+	boot_mode = READ_ONCE(priv->boot_mode);
+	ret = freya_boot1(fba_dev);
+	if (ret != 0)
+		return ret;
+
+	if (boot_mode == FREYA_BOOT_MBIST) {
+		(void)freya_load_mbist(fba_dev);
+		return -ENODEV;
+	} else if (boot_mode == FREYA_BOOT_PROVISION) {
+		(void)freya_provision(fba_dev);
+		return -ENODEV;
+	}
+
+	ret = freya_load_ccp(fba_dev);
+	if (ret != 0)
+		return ret;
+	return freya_boot_ccp(fba_dev);
+}
+
+/*
+ * Last host IPC mailbox group (31) is assigned to Freya M7, the first entry's
+ * callback is set to reset CCP and CIP. iATU Status page is used to listen
+ * for when the CCP CIP reset is done. For resets, use minimum retry count
+ */
+static int reset_ccp(struct fba_device *fba_dev)
+{
+	int ret;
+
+	if (!fba_dev->pcie_boot_en)
+		return 0;
+
+	fba_dev_info(fba_dev, "Interrupting M7 to reset CCP and CIP.");
+	set_mailbox(fba_dev, M7_MBOX_CTRL, CCP_CIP_RESET);
+	fba_dev_info(fba_dev, "Waiting for M7 to reset CCP and CIP.");
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_CIP_RESET_OFS,
+				  CCP_CIP_RESET_DONE, MIN_RETRIES);
+	if (ret) {
+		fba_dev_err(fba_dev,
+			    "Failed waiting for iATU CIP Reset Done Status.");
+		return ret;
+	}
+
+	/* Resetting the iATU CIP Reset ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_CIP_RESET_OFS, 0,
+			  sizeof(uint32_t));
+	set_mailbox(fba_dev, M7_MBOX_CTRL, STATUS_RESET);
+	fba_dev_info(fba_dev, "Waiting for M7 to reset MBOX status");
+	ret = fba_wait_for_state_nobail(fba_dev, M7_MBOX_STATUS,
+					STATUS_RESET_DONE, MIN_RETRIES);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed waiting for M7 status reset");
+	}
+	return ret;
+}
+
+static long fba_ioctl_get_coredump_regions(struct fba_device *fba_dev,
+					   void __user *data)
+{
+	struct get_coredump_region_ioctl coredump_region_req;
+	void __user *user;
+	void *coredump_mem;
+	long ret;
+
+	if (copy_from_user(&coredump_region_req, data,
+			   sizeof(struct get_coredump_region_ioctl)))
+		return -EFAULT;
+
+	user = u64_to_user_ptr(coredump_region_req.data_ptr);
+	coredump_mem = kzalloc(coredump_region_req.size, GFP_KERNEL);
+	if (!coredump_mem)
+		return -ENOMEM;
+
+	ret = fbia_coredump_get_regions(fba_dev, coredump_mem,
+					coredump_region_req.size);
+	if (ret < 0)
+		goto out_free;
+
+	coredump_region_req.size = ret;
+	if (copy_to_user(user, coredump_mem, ret)) {
+		ret = -EFAULT;
+		goto out_free;
+	}
+	if (copy_to_user(data, &coredump_region_req,
+			 sizeof(struct get_coredump_region_ioctl))) {
+		ret = -EFAULT;
+		goto out_free;
+	}
+	ret = 0;
+
+out_free:
+	kfree(coredump_mem);
+	return ret;
+}
+
+static long fbia_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
+{
+	struct fba_ctx *ctx = fp->private_data;
+	struct fba_device *fba_dev = fba_ctx_to_fba_device(ctx);
+	void __user *data = (void __user *)arg;
+	long ret;
+
+	switch (cmd) {
+	case FBA_IOCTL_GET_COREDUMP_INFO: {
+		struct get_coredump_info_ioctl coredump_info_req;
+
+		if (copy_from_user(&coredump_info_req, data,
+				   sizeof(struct get_coredump_info_ioctl)))
+			return -EFAULT;
+		ret = fbia_coredump_get_info(fba_dev, &coredump_info_req);
+		if (ret != 0)
+			return ret;
+		if (copy_to_user(data, &coredump_info_req,
+				 sizeof(struct get_coredump_info_ioctl)))
+			return -EFAULT;
+		return 0;
+	}
+	case FBA_IOCTL_GET_COREDUMP_REGIONS:
+		return fba_ioctl_get_coredump_regions(fba_dev, data);
+
+	case FBA_IOCTL_GET_COREDUMP_REGION_DATA: {
+		struct get_coredump_region_data_ioctl get_coredump_region_data;
+		void __user *host_buf;
+
+		if (copy_from_user(&get_coredump_region_data, data,
+				   sizeof(get_coredump_region_data)))
+			return -EFAULT;
+		host_buf =
+			u64_to_user_ptr(get_coredump_region_data.host_buf_ptr);
+		ret = fbia_coredump_get_region_data(
+			ctx, get_coredump_region_data.size, host_buf,
+			get_coredump_region_data.device_addr);
+		if ((get_coredump_region_data.flags &
+		     GET_COREDUMP_DATA_FLAG_COREDUMP_DONE) != 0) {
+			/* Signal fba_device_abort() to stop waiting */
+			fba_device_signal_coredump_done(fba_dev);
+		}
+		return ret;
+	}
+	case FBA_IOCTL_SECURE_DBG_UNLOCK:
+		return freya_secure_dbg_unlock(fba_dev);
+	case FBA_IOCTL_PAYLOAD_EXEC:
+		return fbia_ioctl_payload_exec(fba_dev, data);
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int freya_reset_controllers(struct fba_device *fba_dev)
+{
+	return reset_ccp(fba_dev);
+}
+
+static const char *freya_get_boot_mode(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	switch (priv->boot_mode) {
+	case FREYA_BOOT_MBIST:
+		return "mbist";
+	case FREYA_BOOT_PROVISION:
+		return "provision";
+	default:
+		return "normal";
+	}
+}
+
+static int freya_set_boot_mode(struct fba_device *fba_dev, const char *mode)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	if (strncmp(mode, "normal", 6) == 0) {
+		priv->boot_mode = FREYA_BOOT_NORMAL;
+		return 0;
+	}
+	if (strncmp(mode, "mbist", 5) == 0) {
+		priv->boot_mode = FREYA_BOOT_MBIST;
+		return 0;
+	}
+	if (strncmp(mode, "prov", 4) == 0) {
+		priv->boot_mode = FREYA_BOOT_PROVISION;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int freya_poller_init(struct fba_device *fba_dev)
+{
+	fba_dev->m7_health_poller =
+		kzalloc(sizeof(struct fba_poller), GFP_KERNEL);
+	if (fba_dev->m7_health_poller == NULL)
+		return -ENOMEM;
+
+	fba_poller_init(fba_dev->m7_health_poller, fba_dev, freya_m7_hb_poll,
+			freya_m7_set_hb_mon_period);
+	return 0;
+}
+
+static int freya_init_priv(struct fba_device *fba_dev,
+			   const struct fbia_priv_data *data)
+{
+	struct freya_priv *priv;
+	int ret;
+
+	priv = kzalloc(sizeof(struct freya_priv), GFP_KERNEL);
+	if (priv == NULL)
+		return -ENOMEM;
+
+	priv->data = data;
+	fba_dev->impl_priv = priv;
+
+	ret = freya_poller_init(fba_dev);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "freya_poller_init() failed with %d", ret);
+		kfree(fba_dev->impl_priv);
+		return ret;
+	}
+	mutex_init(&priv->download_mtx);
+
+	return 0;
+}
+
+static const struct boot_timeouts asic_boot_timeouts = {
+	.rdy_for_img_xfer_ms = RDY_FOR_IMG_XFER_TIMEOUT_MS,
+	.img_received_ms = IMAGE_RECEIVED_TIMEOUT_MS,
+	.boot1_load_ms = BOOT1_LOAD_TIMEOUT_MS,
+	.boot1_ready_ms = BOOT1_READY_TIMEOUT_MS,
+	.ccp_load_ms = CCP_LOAD_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = WAIT_FOR_CCP_BOOT_RETRIES,
+	.polling_period_ms = ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts emu_boot_timeouts = {
+	.rdy_for_img_xfer_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = EMU_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = EMU_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts sim_boot_timeouts = {
+	.rdy_for_img_xfer_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = SIM_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = SIM_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct boot_timeouts emu_long_boot_timeouts = {
+	.rdy_for_img_xfer_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.img_received_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.boot1_load_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.boot1_ready_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.ccp_load_ms = EMU_LONG_DEFAULT_TIMEOUT_MS,
+	.wait_for_ccp_boot_retries = EMU_LONG_CCP_BOOT_RETRIES,
+	.polling_period_ms = NON_ASIC_POLLING_PERIOD_MS,
+};
+
+static const struct fbia_priv_data freya_data = {
+	.cxram_sideband_ofs = FREYA_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
+static const struct fbia_priv_data artemis_data = {
+	.cxram_sideband_ofs = ARTEMIS_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
+static const struct fbia_priv_data athena_data = {
+	.cxram_sideband_ofs = ATHENA_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
+static const struct fbia_priv_data iris_data = {
+	.cxram_sideband_ofs = IRIS_CXRAM_SIZE - SIDEBAND_SIZE,
+};
+
+static int freya_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int ret;
+
+	ret = freya_init_priv(fba_dev, &freya_data);
+	if (ret != 0)
+		return ret;
+
+	priv = fba_dev->impl_priv;
+	priv->cxram_upgrade_ofs =
+		SRAM_UPGRADE_OFS(FREYA_CXRAM_BASE, FREYA_CXRAM_SIZE);
+	priv->cxram_upgrade_sz = SRAM_UPGRADE_MEM_SIZE;
+	priv->boot_timeouts = &asic_boot_timeouts;
+	return 0;
+}
+
+static int artemis_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int ret;
+
+	ret = freya_init_priv(fba_dev, &artemis_data);
+	if (ret != 0)
+		return ret;
+
+	priv = fba_dev->impl_priv;
+	priv->cxram_upgrade_ofs =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_START_OFS) -
+		ARTEMIS_CXRAM_BASE;
+	priv->cxram_upgrade_sz =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
+	fba_dev->hw_type = FIELD_GET(
+		HW_TYPE_MASK, (freya_read_cxram_sb(fba_dev, SB_CIP_CFG1_OFS)));
+
+	switch (fba_dev->hw_type) {
+	case HW_TYPE_ASIC:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is ASIC");
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	case HW_TYPE_EMU:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is Emulation");
+		priv->boot_timeouts = &emu_boot_timeouts;
+		break;
+	case HW_TYPE_SIM:
+		fba_dev_info(fba_dev, "Artemis Hardware Type is Simulation");
+		priv->boot_timeouts = &sim_boot_timeouts;
+		break;
+	case HW_TYPE_EMU_LONG:
+		fba_dev_info(fba_dev,
+			     "Artemis Hardware Type is Emulation (Long)");
+		priv->boot_timeouts = &emu_long_boot_timeouts;
+		break;
+	case HW_TYPE_UNK:
+	default:
+		fba_dev_err(
+			fba_dev,
+			"Unknown Hardware Type %d, setting timeouts to ASIC by default",
+			fba_dev->hw_type);
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	}
+	return 0;
+}
+
+static int athena_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int ret;
+	uint32_t hw_raw_type;
+
+	ret = freya_init_priv(fba_dev, &athena_data);
+	if (ret != 0)
+		return ret;
+
+	priv = fba_dev->impl_priv;
+	priv->cxram_upgrade_ofs =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_START_OFS) -
+		ATHENA_CXRAM_BASE;
+	priv->cxram_upgrade_sz =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
+	hw_raw_type = FIELD_GET(
+		HW_TYPE_MASK, (freya_read_cxram_sb(fba_dev, SB_CIP_CFG1_OFS)));
+
+	/* Translate hw_type to enum - no 1:1 mapping for Athena */
+	switch (hw_raw_type) {
+	case 0:
+		fba_dev->hw_type = HW_TYPE_ASIC;
+		break;
+	case 1:
+		fba_dev->hw_type = HW_TYPE_EMU_LONG;
+		break;
+	case 2:
+		fba_dev->hw_type = HW_TYPE_EMU;
+		break;
+	case 4:
+		fba_dev->hw_type = HW_TYPE_SIM;
+		break;
+	default:
+		fba_dev->hw_type = HW_TYPE_UNK;
+		break;
+	}
+
+	switch (fba_dev->hw_type) {
+	case HW_TYPE_ASIC:
+		fba_dev_info(fba_dev, "Athena Hardware Type is ASIC");
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	case HW_TYPE_EMU:
+		fba_dev_info(fba_dev, "Athena Hardware Type is Emulation");
+		priv->boot_timeouts = &emu_boot_timeouts;
+		break;
+	case HW_TYPE_SIM:
+		fba_dev_info(fba_dev, "Athena Hardware Type is Simulation");
+		priv->boot_timeouts = &sim_boot_timeouts;
+		break;
+	case HW_TYPE_EMU_LONG:
+		fba_dev_info(fba_dev,
+			     "Athena Hardware Type is Emulation (Long)");
+		priv->boot_timeouts = &emu_long_boot_timeouts;
+		break;
+	case HW_TYPE_UNK:
+	default:
+		fba_dev_err(
+			fba_dev,
+			"Unknown Hardware Type %d, setting timeouts to ASIC by default",
+			fba_dev->hw_type);
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	}
+	return 0;
+}
+
+static int iris_init(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv;
+	int ret;
+	uint32_t hw_raw_type;
+
+	ret = freya_init_priv(fba_dev, &iris_data);
+	if (ret != 0)
+		return ret;
+
+	priv = fba_dev->impl_priv;
+	/*
+	 * NOTE: The SoC CXRAM address (which at this point, is not actually
+	 * part of the architecture) in Iris is larger than 32-bits, so the
+	 * register just specifies an offset from the CXRAM base address.
+	 */
+	priv->cxram_upgrade_ofs =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_START_OFS);
+	priv->cxram_upgrade_sz =
+		freya_read_cxram_sb(fba_dev, SB_TRANSFER_MEM_MAX_SIZE_OFS);
+	hw_raw_type = FIELD_GET(
+		HW_TYPE_MASK, (freya_read_cxram_sb(fba_dev, SB_CIP_CFG1_OFS)));
+
+	/* Translate hw_type to enum - no 1:1 mapping for Iris */
+	switch (hw_raw_type) {
+	case 0:
+		fba_dev->hw_type = HW_TYPE_ASIC;
+		break;
+	case 1:
+		fba_dev->hw_type = HW_TYPE_EMU_LONG;
+		break;
+	case 2:
+		fba_dev->hw_type = HW_TYPE_EMU;
+		break;
+	case 4:
+		fba_dev->hw_type = HW_TYPE_SIM;
+		break;
+	default:
+		fba_dev->hw_type = HW_TYPE_UNK;
+		break;
+	}
+
+	switch (fba_dev->hw_type) {
+	case HW_TYPE_ASIC:
+		fba_dev_info(fba_dev, "Iris Hardware Type is ASIC");
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	case HW_TYPE_EMU:
+		fba_dev_info(fba_dev, "Iris Hardware Type is Emulation");
+		priv->boot_timeouts = &emu_boot_timeouts;
+		break;
+	case HW_TYPE_SIM:
+		fba_dev_info(fba_dev, "Iris Hardware Type is Simulation");
+		priv->boot_timeouts = &sim_boot_timeouts;
+		break;
+	case HW_TYPE_EMU_LONG:
+		fba_dev_info(fba_dev, "Iris Hardware Type is Emulation (Long)");
+		priv->boot_timeouts = &emu_long_boot_timeouts;
+		break;
+	case HW_TYPE_UNK:
+	default:
+		fba_dev_err(
+			fba_dev,
+			"Unknown Hardware Type %d, setting timeouts to ASIC by default",
+			fba_dev->hw_type);
+		priv->boot_timeouts = &asic_boot_timeouts;
+		break;
+	}
+	return 0;
+}
+
+static void freya_exit(struct fba_device *fba_dev)
+{
+	struct freya_priv *priv = fba_dev->impl_priv;
+
+	mutex_destroy(&priv->download_mtx);
+	kfree(fba_dev->impl_priv);
+}
+
+static const struct fba_impl_ops freya_impl_ops = {
+	.impl_init = freya_init,
+	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = freya_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
+	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
+};
+
+static const struct fba_impl_ops artemis_impl_ops = {
+	.impl_init = artemis_init,
+	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = artemis_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
+	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
+};
+
+const struct fba_cfg freya_cfg = {
+	.name = FREYA_DRV_NAME,
+	.devnode_ida = &freya_ida,
+	.devids = &freya_devids,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = HOST_IPC_GROUP_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
+	.usoc_bar = FREYA_USOC_BAR,
+	.usoc_pfn_ofs = FREYA_USOC_PFN_OFS,
+	.usoc_msi_irq_ds = USOC_DS_MSIX_VECTOR,
+	.usoc_msi_irq_us = USOC_US_MSIX_VECTOR,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
+	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.rd_ptr_mbox = CCP_LOGBUF_RDPTR_MBOX,
+			.use_rd_ptr_mbox = true,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+	},
+	.num_logger_srcs = FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
+	.impl_ops = &freya_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
+	.usoc_axicomm_offset = FREYA_USOC_AXICOMM_OFFSET,
+};
+
+const struct fba_cfg artemis_cfg = {
+	.name = ARTEMIS_DRV_NAME,
+	.devnode_ida = &artemis_ida,
+	.devids = &artemis_devids,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = HOST_IPC_GROUP_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
+	.usoc_bar = ARTEMIS_USOC_BAR,
+	.usoc_pfn_ofs = ARTEMIS_USOC_PFN_OFS,
+	.usoc_msi_irq_ds = USOC_DS_MSIX_VECTOR,
+	.usoc_msi_irq_us = USOC_US_MSIX_VECTOR,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
+	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.rd_ptr_mbox = CCP_LOGBUF_RDPTR_MBOX,
+			.use_rd_ptr_mbox = true,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+	},
+	.num_logger_srcs = FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
+	.impl_ops = &artemis_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
+	.usoc_axicomm_offset = ARTEMIS_USOC_AXICOMM_OFFSET,
+};
+
+static const struct fba_impl_ops athena_impl_ops = {
+	.impl_init = athena_init,
+	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = athena_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
+	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
+};
+
+#define ATHENA_HOST_IPC_GROUP_STRIDE 0x1000
+
+const struct fba_cfg athena_cfg = {
+	.name = ATHENA_DRV_NAME,
+	.devnode_ida = &athena_ida,
+	.devids = &athena_devids,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = ATHENA_HOST_IPC_GROUP_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
+	.usoc_bar = ATHENA_USOC_BAR,
+	.usoc_pfn_ofs = ATHENA_USOC_PFN_OFS,
+	.usoc_msi_irq_ds = USOC_DS_MSIX_VECTOR,
+	.usoc_msi_irq_us = USOC_US_MSIX_VECTOR,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
+	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.rd_ptr_mbox = CCP_LOGBUF_RDPTR_MBOX,
+			.use_rd_ptr_mbox = true,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+	},
+	.num_logger_srcs = FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
+	.impl_ops = &athena_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
+	.usoc_axicomm_offset = ATHENA_USOC_AXICOMM_OFFSET,
+};
+
+static const struct fba_impl_ops iris_impl_ops = {
+	.impl_init = iris_init,
+	.impl_exit = freya_exit,
+	.priv_ioctl = fbia_ioctl,
+
+	.is_secure_boot = freya_is_secure_boot,
+	.get_fw_filenames = iris_get_fw_filenames,
+	.get_boot_mode = freya_get_boot_mode,
+	.set_boot_mode = freya_set_boot_mode,
+	.load_firmware = freya_load_firmware,
+	.reset_controller = freya_reset_controllers,
+
+	.coredump_init = fbia_coredump_init,
+	.coredump_exit = fbia_coredump_exit,
+
+	.did_ccp_panic = did_ccp_panic,
+	.boot_health_check = freya_m7_health,
+	.coredump_get_cxram_crc_offset = fbia_coredump_get_crc_offset,
+	.coredump_get_crc = fbia_coredump_get_crc,
+};
+
+#define IRIS_HOST_IPC_GROUP_STRIDE 0x10000
+
+const struct fba_cfg iris_cfg = {
+	.name = IRIS_DRV_NAME,
+	.devnode_ida = &iris_ida,
+	.devids = &iris_devids,
+	.host_ipc_bar = HOST_IPC_BAR,
+	.host_ipc_entry_stride = HOST_IPC_ENTRY_STRIDE,
+	.host_ipc_group_stride = IRIS_HOST_IPC_GROUP_STRIDE,
+	.host_ipc_offset = HOST_IPC_BAR_OFF,
+	.db_mbox_base = DB_MAILBOX_BASE,
+	.scratch_page_cnt = SAIL_SCRATCH_PAGE_CNT,
+	.usoc_bar = IRIS_USOC_BAR,
+	.usoc_pfn_ofs = IRIS_USOC_PFN_OFS,
+	.usoc_msi_irq_ds = USOC_DS_MSIX_VECTOR,
+	.usoc_msi_irq_us = USOC_US_MSIX_VECTOR,
+	.host_sq_wc_bar = HOST_SQ_BAR,
+	.uart_mbox_base = FREYA_UART_MBOX_OFFSET,
+	.uart_msi_irq_rx = UART_RX_MSIX_VECTOR,
+	.uart_msi_irq_tx = UART_TX_MSIX_VECTOR,
+	.p2p_bar = P2P_BAR,
+	.logger_params = {
+		{
+			.off_mbox = CCP_LOGBUF_OFFSET_MBOX,
+			.size_mbox = CCP_LOGBUF_SIZE_MBOX,
+			.rd_ptr_mbox = CCP_LOGBUF_RDPTR_MBOX,
+			.use_rd_ptr_mbox = true,
+			.msix_int = CCP_LOGGER_MSIX_VECTOR,
+			.name = "ccp",
+		},
+		/*
+		{
+			.off_mbox = M7_LOGBUF_OFFSET_MBOX,
+			.size_mbox = M7_LOGBUF_SIZE_MBOX,
+			.msix_int = M7_LOGGER_MSIX_VECTOR,
+			.name = "m7",
+		},
+		*/
+	},
+	.num_logger_srcs = 1, //FREYA_LOGGER_SRCS,
+	.logger_bar_num = BAR_CXRAM,
+	.impl_ops = &iris_impl_ops,
+	.ctx_limits = {
+		.sub_cnt = CONTEXT_SUB_CAP,
+	},
+	.usoc_axicomm_offset = IRIS_USOC_AXICOMM_OFFSET,
+};

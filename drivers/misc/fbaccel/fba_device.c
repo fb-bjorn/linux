@@ -1,0 +1,1535 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Copyright (c) Meta Platforms, Inc. and affiliates */
+
+#include <linux/version.h>
+#include <linux/module.h>
+#include <linux/aer.h>
+#include <linux/completion.h>
+#include <linux/device.h>
+#include <linux/cdev.h>
+#include <linux/errno.h>
+#include <linux/idr.h>
+#include <linux/interrupt.h>
+#include <linux/pci.h>
+#include <linux/delay.h>
+#include <linux/async.h>
+#include <linux/version.h>
+
+#include "fba_device.h"
+#include "fba_admin.h"
+#include "fba_log.h"
+#include "fba_uart.h"
+#include "fba_usoc.h"
+
+static dev_t fba_devt;
+static struct class *fba_class;
+static struct cdev fba_cdev;
+static DEFINE_MUTEX(fba_devices_mtx);
+static struct fba_device *fba_devices[FBA_MAX_DEVS];
+
+static bool auto_load = true;
+module_param(auto_load, bool, 0664);
+MODULE_PARM_DESC(auto_load, "If true, automatically load firmware on probe");
+
+static bool pcie_boot_en = true;
+module_param(pcie_boot_en, bool, 0664);
+MODULE_PARM_DESC(pcie_boot_en, "Bootflow enablement boot parameter");
+
+/* Module parameter for forcing PRP list usage */
+bool test_force_prp;
+module_param(test_force_prp, bool, 0664);
+MODULE_PARM_DESC(test_force_prp,
+		 "If true, force PRP list even when buffer is contiguous");
+
+static bool disable_logger;
+module_param(disable_logger, bool, 0444);
+MODULE_PARM_DESC(disable_logger,
+		 "If true, disable out-of-band firmware logging");
+
+static int admin_cmd_timeout;
+module_param(admin_cmd_timeout, int, 0444);
+MODULE_PARM_DESC(admin_cmd_timeout,
+		 "Override default admin command timeout; in milliseconds");
+
+static void fba_async_probe(void *data, async_cookie_t cookie);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define PCI_EXP_AER_FLAGS                                                   \
+	(PCI_EXP_DEVCTL_CERE | PCI_EXP_DEVCTL_NFERE | PCI_EXP_DEVCTL_FERE | \
+	 PCI_EXP_DEVCTL_URRE)
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("CXL");
+#else
+MODULE_IMPORT_NS(CXL);
+#endif
+
+static int pci_enable_pcie_error_reporting(struct pci_dev *dev)
+{
+	int rc;
+
+	if (!pcie_aer_is_native(dev))
+		return -EIO;
+
+	rc = pcie_capability_set_word(dev, PCI_EXP_DEVCTL, PCI_EXP_AER_FLAGS);
+	return pcibios_err_to_errno(rc);
+}
+
+static int pci_disable_pcie_error_reporting(struct pci_dev *dev)
+{
+	int rc;
+
+	if (!pcie_aer_is_native(dev))
+		return -EIO;
+
+	rc = pcie_capability_clear_word(dev, PCI_EXP_DEVCTL, PCI_EXP_AER_FLAGS);
+	return pcibios_err_to_errno(rc);
+}
+#endif
+
+static ssize_t boot_file_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (strcmp(attr->attr.name, "boot1_filename") == 0)
+		return sysfs_emit(buf, "%s\n", fba_dev->boot1_filename);
+	else
+		return sysfs_emit(buf, "%s\n", fba_dev->boot2_filename);
+}
+
+static int set_bootfile_name(struct fba_device *fba_dev, char *dst,
+			     const char *src, size_t len)
+{
+	if (len > NAME_MAX || len <= 0) {
+		fba_dev_err(fba_dev, "Bootfile not updated, check length: %zu",
+			    len);
+		return -EINVAL;
+	}
+
+	strscpy(dst, src, NAME_MAX + 1);
+	if (dst[len - 1] == '\n')
+		dst[len - 1] = '\0';
+
+	return len;
+}
+
+static ssize_t boot_file_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+	char *dst;
+	int ret;
+
+	if (strcmp(attr->attr.name, "boot1_filename") == 0)
+		dst = fba_dev->boot1_filename;
+	else
+		dst = fba_dev->boot2_filename;
+
+	ret = set_bootfile_name(fba_dev, dst, buf, count);
+	if (ret > 0)
+		fba_dev_info(fba_dev, "%s updated to %s", attr->attr.name, dst);
+
+	return ret;
+}
+
+static DEVICE_ATTR(boot1_filename, 0644, boot_file_show, boot_file_store);
+static DEVICE_ATTR(boot2_filename, 0644, boot_file_show, boot_file_store);
+
+static ssize_t boot_mode_show(struct device *dev, struct device_attribute *attr,
+			      char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (fba_dev->cfg->impl_ops->get_boot_mode != NULL) {
+		const char *boot_mode =
+			fba_dev->cfg->impl_ops->get_boot_mode(fba_dev);
+		return sysfs_emit(buf, "%s\n", boot_mode);
+	}
+
+	return sysfs_emit(buf, "normal\n");
+}
+
+static ssize_t boot_mode_store(struct device *dev,
+			       struct device_attribute *attr, const char *buf,
+			       size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+	int ret;
+
+	buf = skip_spaces(buf);
+
+	/* Use device private method if we have one */
+	if (fba_dev->cfg->impl_ops->set_boot_mode != NULL) {
+		ret = fba_dev->cfg->impl_ops->set_boot_mode(fba_dev, buf);
+		return (ret == 0) ? count : ret;
+	}
+
+	/* Otherwise accept only "normal" setting */
+	if (strncmp(buf, "normal", 6) == 0)
+		return count;
+	else
+		return -EINVAL;
+}
+
+static DEVICE_ATTR_RW(boot_mode);
+
+/* Triggers firmware load upon write (any value.) */
+static ssize_t load_firmware_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (atomic_cmpxchg(&fba_dev->waiting_for_load, true, false) != true) {
+		/* Not waiting for load */
+		return -EINVAL;
+	}
+
+	async_schedule(fba_async_probe, fba_dev);
+	/* Block until firmware load completes, making scripting simpler. */
+	async_synchronize_full();
+
+	return count;
+}
+
+static DEVICE_ATTR_WO(load_firmware);
+
+static ssize_t secure_boot_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	if (fba_dev->cfg->impl_ops->is_secure_boot != NULL) {
+		if (fba_dev->cfg->impl_ops->is_secure_boot(fba_dev))
+			return sysfs_emit(buf, "secure\n");
+	}
+
+	return sysfs_emit(buf, "nonsecure\n");
+}
+
+static DEVICE_ATTR_RO(secure_boot);
+
+static ssize_t reset_ok_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	struct fba_device *fba_dev = dev_get_drvdata(dev->parent);
+
+	return sysfs_emit(buf, "%d\n", atomic_read(&fba_dev->reset_ok));
+}
+
+static DEVICE_ATTR_RO(reset_ok);
+
+static struct attribute *fba_device_attrs[] = {
+	&dev_attr_boot1_filename.attr,
+	&dev_attr_boot2_filename.attr,
+	&dev_attr_boot_mode.attr,
+	&dev_attr_load_firmware.attr,
+	&dev_attr_reset_ok.attr,
+	&dev_attr_secure_boot.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(fba_device);
+
+struct fba_channel *fba_get_channel(struct fba_device *fba_dev, int i)
+{
+	return &fba_dev->channels[i];
+}
+
+void fba_device_add_ctx(struct fba_device *fba_dev, struct list_head *entry)
+{
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_add_tail(entry, &fba_dev->ctx_list);
+	mutex_unlock(&fba_dev->ctx_mtx);
+}
+
+void fba_device_del_ctx(struct fba_device *fba_dev, struct list_head *entry)
+{
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_del_init(entry);
+	mutex_unlock(&fba_dev->ctx_mtx);
+}
+
+int fba_device_get_ctx_count(struct fba_device *fba_dev)
+{
+	int count;
+
+	mutex_lock(&fba_dev->ctx_mtx);
+	count = list_count(&fba_dev->ctx_list);
+	mutex_unlock(&fba_dev->ctx_mtx);
+
+	return count;
+}
+
+/*
+ * Lookup device by minor id and return refcounted device ptr.
+ * Returns NULL if device no longer available.
+ */
+struct fba_device *fba_device_lookup(unsigned int minor)
+{
+	struct fba_device *fba_dev = NULL;
+
+	if (minor >= ARRAY_SIZE(fba_devices))
+		return NULL;
+
+	mutex_lock(&fba_devices_mtx);
+	if (fba_devices[minor] != NULL)
+		fba_dev = fba_device_get(fba_devices[minor]);
+	mutex_unlock(&fba_devices_mtx);
+
+	return fba_dev;
+}
+
+static void fba_unregister_subdevs(struct fba_device *fba_dev)
+{
+	if (fba_dev->usoc_dev != NULL) {
+		fba_usoc_unregister(fba_dev->usoc_dev);
+		fba_dev->usoc_dev = NULL;
+	}
+
+	if (fba_dev->uart_dev != NULL) {
+		fba_uart_unregister(fba_dev->uart_dev);
+		fba_dev->uart_dev = NULL;
+	}
+
+	if (fba_dev->logger_dev != NULL) {
+		fba_logger_unregister(fba_dev->logger_dev);
+		fba_dev->logger_dev = NULL;
+	}
+}
+
+static void fba_device_unregister(struct fba_device *fba_dev)
+{
+	fba_unregister_subdevs(fba_dev);
+
+	mutex_lock(&fba_devices_mtx);
+	fba_devices[fba_dev->minor] = NULL;
+	device_destroy(fba_class, MKDEV(MAJOR(fba_devt), fba_dev->minor));
+	mutex_unlock(&fba_devices_mtx);
+}
+
+/* Stop new work from being submitted to the device. */
+static void fba_device_stop(struct fba_device *fba_dev)
+{
+	struct list_head *item;
+	int i;
+
+	/* Stop polling requests */
+	fba_mon_device_stop(&fba_dev->mon);
+
+	/* Stop each context and wait for outstanding work to drain */
+	mutex_lock(&fba_dev->ctx_mtx);
+	list_for_each(item, &fba_dev->ctx_list) {
+		fba_ctx_stop(fba_dev_item_to_fba_ctx(item));
+	}
+	mutex_unlock(&fba_dev->ctx_mtx);
+
+	fba_channel_stop_heartbeats(fba_dev);
+	fba_poller_stop(fba_dev->m7_health_poller);
+
+	/*
+	 * At this point there should be no work in channels.  Finish tearing
+	 * down channels.
+	 */
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_shutdown(fba_get_channel(fba_dev, i));
+}
+
+static int fba_device_alloc_queue(struct fba_device *fba_dev,
+				  struct fba_shared *area,
+				  uint32_t host_queue_mask,
+				  enum sail_regs sail_q, size_t q_size,
+				  uint32_t bdes)
+{
+	int ret;
+
+	if (bdes & host_queue_mask) {
+		ret = fba_shared_alloc_coherent(fba_dev, area, q_size);
+		if (ret)
+			return ret;
+
+		set_mailbox64(fba_dev, sail_q, area->addr);
+	} else {
+		uint64_t bir = get_mailbox64(fba_dev, sail_q);
+
+		fba_shared_alloc_iomem(fba_dev, area, BIR_TO_BAR(bir),
+				       BIR_TO_OFFSET(bir), q_size);
+	}
+	return 0;
+}
+
+static int __fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg,
+				uint32_t state, uint32_t num_retries,
+				bool bail_early)
+{
+	uint32_t val;
+	int i;
+	int tries = num_retries;
+
+	if (tries < 1)
+		tries = 1;
+
+	for (i = 0; i < tries; i++) {
+		/* Bail early if we're unbinding. */
+		if (bail_early && READ_ONCE(fba_dev->exiting))
+			return -ETIMEDOUT;
+
+		val = get_mailbox(fba_dev, reg);
+		fba_dev_info(
+			fba_dev,
+			"Scan state [%d]=0x%08x, expected 0x%08x, try %d/%d.",
+			reg, val, state, i, tries);
+		if (val == state)
+			return 0;
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		/*
+		 * TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		 * emulation can be slow.
+		 */
+		schedule_timeout(HZ);
+	}
+	fba_dev_err(fba_dev, "Failed state %d = %x.", reg, val);
+	return -ETIMEDOUT;
+}
+
+int fba_wait_for_state(struct fba_device *fba_dev, uint32_t reg, uint32_t state,
+		       uint32_t num_retries)
+{
+	return __fba_wait_for_state(fba_dev, reg, state, num_retries, true);
+}
+
+int fba_wait_for_state_nobail(struct fba_device *fba_dev, uint32_t reg,
+			      uint32_t state, uint32_t num_retries)
+{
+	return __fba_wait_for_state(fba_dev, reg, state, num_retries, false);
+}
+
+int fba_wait_for_status(struct fba_device *fba_dev, uint64_t offset,
+			uint32_t state, uint32_t num_retries)
+{
+	uint32_t val;
+	int i;
+	int tries = num_retries;
+
+	if (tries < 1)
+		tries = 1;
+
+	for (i = 0; i < tries; i++) {
+		fba_dev_info(fba_dev, "Wait for status ready, try %d.", i);
+		fba_shared_memcpy_from(&fba_dev->status_area, offset, &val,
+				       sizeof(uint32_t));
+		if (val == state)
+			return 0;
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		/*
+		 * TODO: T85229364 T85229365 Reduce this to something more sensible, but
+		 * emulation can be slow.
+		 */
+		schedule_timeout(HZ);
+	}
+	fba_dev_err(fba_dev, "Failed status ready = %x.", val);
+	return -ETIMEDOUT;
+}
+
+static int fba_device_msix_init(struct fba_device *fba_dev)
+{
+	struct pci_dev *pdev = fba_dev->pdev;
+	int ret, msix_cnt;
+
+	msix_cnt = CHANNEL_MSIX_VECTOR_BASE + fba_dev->channel_total;
+	ret = pci_alloc_irq_vectors(pdev, msix_cnt, msix_cnt, PCI_IRQ_MSIX);
+	if (ret < 0 || ret != msix_cnt) {
+		fba_dev_err(fba_dev, "Failed to allocate IRQ vectors.");
+		if (ret >= 0) {
+			ret = -ENOSPC;
+			pci_free_irq_vectors(pdev);
+		}
+		return ret;
+	}
+
+	return 0;
+}
+
+static void fba_device_msix_exit(struct fba_device *fba_dev)
+{
+	pci_free_irq_vectors(fba_dev->pdev);
+}
+
+/* Register UART sub-device */
+static void fba_device_uart_register(struct fba_device *fba_dev)
+{
+	fba_dev->uart_dev = fba_uart_register(
+		fba_dev, fba_dev->dev, fba_dev->minor, fba_dev->cfg->name,
+		fba_dev->id, fba_dev->cfg->uart_mbox_base,
+		fba_dev->cfg->uart_msi_irq_rx, fba_dev->cfg->uart_msi_irq_tx);
+	if (IS_ERR(fba_dev->uart_dev)) {
+		/* Null so we don't try to unregister an ERR_PTR later on */
+		fba_dev->uart_dev = NULL;
+	}
+}
+
+/* Register UltraSoC sub-device */
+static int fba_device_usoc_init(struct fba_device *fba_dev)
+{
+	void __iomem *usoc_regs;
+	int ret = 0;
+
+	// only silicon and emulation platforms have USoC
+	if (fba_dev->hw_type != HW_TYPE_ASIC &&
+	    fba_dev->hw_type != HW_TYPE_EMU) {
+		return ret;
+	}
+
+	if (fba_dev->cfg->usoc_bar >= 0) {
+		usoc_regs = fba_util_get_bar_ptr(
+			fba_dev, fba_dev->cfg->usoc_bar,
+			fba_dev->cfg->usoc_pfn_ofs * PAGE_SIZE);
+		fba_dev->usoc_dev = fba_usoc_register(
+			fba_dev->pdev, fba_dev->dev, fba_dev->minor,
+			fba_dev->cfg->name, fba_dev->cfg->usoc_axicomm_offset,
+			fba_dev->id, usoc_regs,
+			(pci_resource_start(fba_dev->pdev,
+					    fba_dev->cfg->usoc_bar) >>
+			 PAGE_SHIFT) +
+				fba_dev->cfg->usoc_pfn_ofs,
+			fba_dev->cfg->usoc_msi_irq_ds,
+			fba_dev->cfg->usoc_msi_irq_us);
+		if (IS_ERR(fba_dev->usoc_dev)) {
+			ret = PTR_ERR(fba_dev->usoc_dev);
+			fba_dev->usoc_dev = NULL;
+			fba_dev_err(fba_dev, "Failed to register usoc.");
+		}
+	}
+
+	return ret;
+}
+
+static void fba_device_fw_setup_ptrs(struct fba_device *fba_dev)
+{
+	uint32_t hdes = SAIL_HDES_DEFINE(fba_dev->cfg->scratch_page_cnt, 0);
+
+	set_mailbox64(fba_dev, SAIL_SCAL, fba_dev->scratch_area.addr);
+	set_mailbox64(fba_dev, SAIL_STAL, fba_dev->status_area.addr);
+
+	set_mailbox(fba_dev, SAIL_HDES, hdes);
+}
+
+/* Set up channels once firmware is ready */
+static int fba_device_fw_channel_init(struct fba_device *fba_dev)
+{
+	struct fba_queue_info sqinfo, cqinfo;
+	uint32_t bdes = get_mailbox(fba_dev, SAIL_BDES);
+	uint32_t cdes = get_mailbox(fba_dev, SAIL_CDES);
+	uint32_t strm = get_mailbox(fba_dev, SAIL_STRM);
+	uint32_t pkt_size = get_mailbox(fba_dev, SAIL_PKT_SIZE);
+	size_t q_size;
+	int ret, i;
+
+	fba_dev->channel_cnt = SAIL_CDES_CNUM(cdes);
+	if (fba_dev->channel_cnt > MAX_CHANNELS)
+		fba_dev->channel_cnt = MAX_CHANNELS;
+	if (fba_dev->channel_cnt <= SAIL_CHANNEL_EXE) {
+		fba_dev_err(
+			fba_dev,
+			"Device did not advertise enough channels. (advertised=%u, min=%u)",
+			fba_dev->channel_cnt, SAIL_CHANNEL_EXE + 1);
+		return -EINVAL;
+	}
+
+	fba_dev->streaming_channel_cnt = SAIL_STRM_CNUM(strm);
+	fba_dev->channel_total =
+		fba_dev->channel_cnt + fba_dev->streaming_channel_cnt;
+	if (fba_dev->channel_total > MAX_CHANNELS) {
+		fba_dev_warn(
+			fba_dev,
+			"Limiting channels to max supported.  (advertised=%u, MAX_CHANNELS=%u)",
+			fba_dev->channel_total, MAX_CHANNELS);
+		fba_dev->streaming_channel_cnt =
+			MAX_CHANNELS - fba_dev->channel_cnt;
+		fba_dev->channel_total = MAX_CHANNELS;
+	}
+
+	fba_dev_dbg(fba_dev, "using channels = %d, streaming_channels = %d.",
+		    fba_dev->channel_cnt, fba_dev->streaming_channel_cnt);
+
+	fba_dev->channel_entries = SAIL_CDES_PQEC(cdes);
+	fba_dev->streaming_channel_entries = SAIL_STRM_PQEC(strm);
+
+	fba_dev->channel_max_packet_size = SAIL_PKT_SIZE_MAX(pkt_size);
+	fba_dev->streaming_channel_max_packet_size =
+		SAIL_PKT_STREAMING_SIZE_MAX(pkt_size);
+
+	fba_dev->chan_limits.sub_cnt = fba_dev->channel_entries;
+
+	fba_dev->streaming_chan_limits.sub_cnt =
+		fba_dev->streaming_channel_entries;
+
+	/* Allocate enough space for all submission queues. */
+	q_size = SAIL_SQ_BYTES(cdes) +
+		 fba_dev->streaming_channel_cnt *
+			 fba_dev->streaming_channel_entries *
+			 SAIL_CDES_SQES(cdes);
+	ret = fba_device_alloc_queue(fba_dev, &fba_dev->sqs_area, SAIL_BDES_HSQ,
+				     SAIL_SQAL, q_size, bdes);
+	if (ret)
+		return ret;
+
+	/* Allocate enough space for all completion queues. */
+	q_size = SAIL_CQ_BYTES(cdes) +
+		 fba_dev->streaming_channel_cnt *
+			 fba_dev->streaming_channel_entries *
+			 SAIL_CDES_CQES(cdes);
+	ret = fba_device_alloc_queue(fba_dev, &fba_dev->cqs_area, SAIL_BDES_HCQ,
+				     SAIL_CQAL, q_size, bdes);
+	if (ret)
+		goto err_free_sq;
+
+	cqinfo.size = fba_dev->channel_entries * SAIL_CDES_CQES(cdes);
+	sqinfo.size = fba_dev->channel_entries * SAIL_CDES_SQES(cdes);
+
+	cqinfo.area = &fba_dev->cqs_area;
+	sqinfo.area = &fba_dev->sqs_area;
+
+	cqinfo.offset = 0;
+	sqinfo.offset = 0;
+
+	/* Allocate MSIX vectors now that we know the number of channels */
+	ret = fba_device_msix_init(fba_dev);
+	if (ret != 0)
+		goto err_free_cq;
+
+	/* Initialize channels */
+	for (i = 0; i < fba_dev->channel_total; i++) {
+		struct fba_limits *limits;
+		uint64_t max_subs;
+
+		if (i < fba_dev->channel_cnt) {
+			cqinfo.size =
+				fba_dev->channel_entries * SAIL_CDES_CQES(cdes);
+			sqinfo.size =
+				fba_dev->channel_entries * SAIL_CDES_SQES(cdes);
+			limits = &fba_dev->chan_limits;
+			max_subs = fba_dev->channel_max_packet_size;
+		} else {
+			cqinfo.size = fba_dev->streaming_channel_entries *
+				      SAIL_CDES_CQES(cdes);
+			sqinfo.size = fba_dev->streaming_channel_entries *
+				      SAIL_CDES_SQES(cdes);
+			limits = &fba_dev->streaming_chan_limits;
+			max_subs = fba_dev->streaming_channel_max_packet_size;
+		}
+
+		ret = fba_channel_init(fba_dev, i, CHANNEL_MSIX_VECTOR_BASE + i,
+				       &sqinfo, &cqinfo, limits, max_subs);
+		if (ret)
+			goto err_exit_channels;
+
+		sqinfo.offset += sqinfo.size;
+		cqinfo.offset += cqinfo.size;
+	}
+
+	fba_device_fw_setup_ptrs(fba_dev);
+
+	return 0;
+
+err_exit_channels:
+	while (i-- > 0)
+		fba_channel_exit(fba_get_channel(fba_dev, i));
+
+err_free_cq:
+	fba_shared_free(fba_dev, &fba_dev->cqs_area);
+
+err_free_sq:
+	fba_shared_free(fba_dev, &fba_dev->sqs_area);
+
+	return ret;
+}
+
+/* XXX - make this into a module parameter */
+#define COREDUMP_TIMEOUT_MS (30 * 1000)
+
+/* Abort operation of device, called upon detection of fatal error. */
+void fba_device_abort(struct fba_device *fba_dev, const char *reason)
+{
+	int i;
+
+	if (atomic_cmpxchg(&fba_dev->has_failed, false, true) != false) {
+		/*
+		 * We've lost a race with another thread triggering abort.
+		 * But is not safe to return until abort process is complete.
+		 */
+		wait_for_completion(&fba_dev->abort_done);
+		return;
+	}
+
+	fba_dev_err(fba_dev, "aborting device: %s", reason);
+
+	/*
+	 * Coredump via DMA will fail after clearing master.  We need to
+	 * wait here until coredump is done.  Assumes that coredump will
+	 * be initiated automatically by udev rule and will complete
+	 * within proscribed timeout.
+	 */
+	wait_for_completion_timeout(&fba_dev->coredump_done,
+				    msecs_to_jiffies(COREDUMP_TIMEOUT_MS));
+
+	/*
+	 * Disable PCI bus master/DMA and wait for any in-flight PCIe
+	 * transactions to complete.  After these steps, should be safe
+	 * to free any DMA mappings as device can no longer write to them
+	 * (assuming it honors clearing Bus Master Enable correctly.)
+	 */
+	pci_disable_device(fba_dev->pdev);
+	pci_wait_for_pending_transaction(fba_dev->pdev);
+
+	/* Mark channels as stopped and fail any outstanding work */
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_shutdown(fba_get_channel(fba_dev, i));
+
+	/* Wake up anyone waiting for abort to complete */
+	complete_all(&fba_dev->abort_done);
+}
+
+/* Signal coredump has completed, and is safe to fence DMA */
+void fba_device_signal_coredump_done(struct fba_device *fba_dev)
+{
+	complete_all(&fba_dev->coredump_done);
+}
+
+static int fba_device_fw_channel_exit(struct fba_device *fba_dev)
+{
+	int i, ret = 0;
+
+	if (!atomic_read(&fba_dev->has_failed)) {
+		/* disable sail through mailbox registers */
+		set_mailbox(fba_dev, SAIL_CTRL, SAIL_DISABLED);
+		/* Use _nobail so we do actually wait for state change. */
+		ret = fba_wait_for_state_nobail(fba_dev, SAIL_STAT,
+						SAIL_DISABLED,
+						fba_dev->num_retries);
+		if (ret) {
+			fba_device_abort(fba_dev, "disable device failed");
+			fba_dev_err(fba_dev, "Failed to disable device.");
+		}
+	} else {
+		fba_dev_err(fba_dev, "Device failed, skipping disable.");
+	}
+
+	if (fba_dev->cfg->impl_ops->coredump_exit != NULL)
+		fba_dev->cfg->impl_ops->coredump_exit(fba_dev);
+	fba_unregister_subdevs(fba_dev);
+
+	for (i = 0; i < fba_dev->channel_total; i++)
+		fba_channel_exit(fba_get_channel(fba_dev, i));
+
+	fba_device_msix_exit(fba_dev);
+
+	fba_shared_free(fba_dev, &fba_dev->cqs_area);
+	fba_shared_free(fba_dev, &fba_dev->sqs_area);
+
+	return ret;
+}
+
+static uint32_t get_admin_command_timeout(struct fba_device *fba_dev)
+{
+	return get_mailbox(fba_dev, SAIL_ADMIN_CMD_TIMEOUT);
+}
+
+static int fba_device_enable_sail(struct fba_device *fba_dev)
+{
+	int ret;
+
+	/*
+	 * Once we trigger enable of SAIL, we have to avoid touching the device
+	 * until it has finished setting up IATU mappings (due to HW
+	 * limitations.)  The device will perform a write to host memory to let
+	 * us know it is safe to proceed.
+	 */
+	set_mailbox(fba_dev, SAIL_CTRL, SAIL_ENABLED);
+	ret = fba_wait_for_status(fba_dev, IATU_CONFIG_OFS, IATU_CONFIGURED,
+				  fba_dev->num_retries);
+	if (ret) {
+		fba_dev_err(fba_dev,
+			    "Failed waiting for status memory signature.");
+		return ret;
+	}
+	/* Resetting the ACK signal */
+	fba_shared_memset(&fba_dev->status_area, IATU_CONFIG_OFS, 0,
+			  sizeof(uint32_t));
+
+	ret = fba_wait_for_state(fba_dev, SAIL_STAT, SAIL_ENABLED,
+				 fba_dev->num_retries);
+	if (ret)
+		fba_dev_err(fba_dev, "Failed waiting for state %d.", SAIL_STAT);
+
+	return ret;
+}
+
+/* Setup some defaults once we know platform type */
+static void fba_device_fw_setup_platform(struct fba_device *fba_dev)
+{
+	if (fba_dev->platform_type == PLATFORM_SILICON)
+		fba_dev->num_retries = MIN_RETRIES;
+	else
+		fba_dev->num_retries = MAX_RETRIES;
+
+	fba_dev->admin_cmd_timeout_ms = get_admin_command_timeout(fba_dev);
+	if (!fba_dev->admin_cmd_timeout_ms && admin_cmd_timeout == 0) {
+		if (fba_dev->platform_type == PLATFORM_SILICON)
+			fba_dev->admin_cmd_timeout_ms =
+				SAIL_ADMIN_CMD_MIN_TIMEOUT_MS;
+		else
+			fba_dev->admin_cmd_timeout_ms =
+				SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+	}
+}
+
+/* Finish device setup once firmware is ready. */
+static int fba_device_fw_init(struct fba_device *fba_dev)
+{
+	int ret;
+
+	ret = fba_device_fw_channel_init(fba_dev);
+	if (ret)
+		return ret;
+
+	ret = fba_device_enable_sail(fba_dev);
+	if (ret)
+		goto err_channel_exit;
+
+	fba_device_uart_register(fba_dev);
+
+	/* Any error logged within fba_device_usoc_init already, but continue if it fails */
+	(void)fba_device_usoc_init(fba_dev);
+	if (!disable_logger)
+		fba_dev->logger_dev = fba_logger_register(fba_dev);
+
+	if (IS_ERR(fba_dev->logger_dev))
+		fba_dev->logger_dev = NULL;
+
+	/* Setup Resources */
+	ret = fba_resource_init(fba_dev);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed to init resources.");
+		goto err_channel_exit;
+	}
+
+	fba_device_fw_setup_platform(fba_dev);
+
+	ret = fba_admin_time_set(fba_dev, ktime_get_real());
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed to set device time.");
+		goto err_resource_exit;
+	}
+
+	/* coredump and mon init must be after fba_resource_init() */
+	if (fba_dev->cfg->impl_ops->coredump_init)
+		fba_dev->cfg->impl_ops->coredump_init(fba_dev);
+
+	ret = fba_mon_device_init(fba_dev);
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed initialize monitoring.");
+		goto err_resource_exit;
+	}
+
+	fba_dev->fw_init_done = true;
+
+	fba_channel_start_heartbeats(fba_dev);
+
+	return 0;
+
+err_resource_exit:
+	fba_resource_exit(fba_dev);
+err_channel_exit:
+	fba_device_fw_channel_exit(fba_dev);
+
+	return ret;
+}
+
+/* Tear down firmware-related device state */
+static int fba_device_fw_exit(struct fba_device *fba_dev)
+{
+	int ret;
+
+	if (!fba_dev->fw_init_done) {
+		fba_dev_info(fba_dev, "FW not initialized, skipping exit");
+		return 0;
+	}
+
+	/*
+	 * Stop monitoring/polling and wait for any outstanding work to
+	 * complete, so that we can safely tear down channels.
+	 */
+	fba_device_stop(fba_dev);
+
+	fba_mon_device_exit(&fba_dev->mon);
+
+	fba_resource_exit(fba_dev);
+
+	ret = fba_device_fw_channel_exit(fba_dev);
+
+	return ret;
+}
+
+static void fba_device_free(struct kref *kref)
+{
+	struct fba_device *fba_dev = container_of(kref, struct fba_device, ref);
+
+	WARN_ON(fba_device_get_ctx_count(fba_dev) != 0);
+
+	/* Free things that might be referenced by lingering user contexts */
+	mutex_destroy(&fba_dev->ctx_mtx);
+	ida_destroy(&fba_dev->channel_ids);
+	ida_destroy(&fba_dev->ctx_ids);
+	if (fba_dev->msix_wq) {
+		destroy_workqueue(fba_dev->msix_wq);
+	}
+	kfree(fba_dev->name);
+
+	kfree(fba_dev);
+}
+
+struct fba_device *fba_device_get(struct fba_device *fba_dev)
+{
+	kref_get(&fba_dev->ref);
+	WARN_ON(kref_read(&fba_dev->ref) == 1);
+
+	return fba_dev;
+}
+
+void fba_device_put(struct fba_device *fba_dev)
+{
+	kref_put(&fba_dev->ref, fba_device_free);
+}
+
+static void fba_pci_exit(struct fba_device *fba_dev)
+{
+	struct pci_dev *pdev = fba_dev->pdev;
+	int i;
+
+	/* Unmap whichever bars we successfully mapped. */
+	for (i = 0; i < BAR_CNT; i++) {
+		if (fba_dev->bars[i])
+			pci_iounmap(pdev, fba_dev->bars[i]);
+	}
+
+	pci_disable_pcie_error_reporting(pdev);
+	pci_clear_master(pdev);
+	pci_release_regions(pdev);
+
+	if (pci_is_enabled(pdev))
+		pci_disable_device(pdev);
+}
+
+static int fba_pci_init(struct fba_device *fba_dev)
+{
+	struct pci_dev *pdev = fba_dev->pdev;
+	int ret, i;
+
+	ret = pci_enable_device(pdev);
+	if (ret) {
+		fba_dev_err(fba_dev, "Cannot enable PCI device.");
+		return ret;
+	}
+
+	ret = pci_request_regions(pdev, fba_dev->cfg->name);
+	if (ret) {
+		fba_dev_err(fba_dev, "Cannot obtain PCI resources.");
+		goto err_disable_device;
+	}
+
+	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
+
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	if (ret) {
+		fba_dev_err(fba_dev, "Failed to set DMA mask.");
+		goto err_release_regions;
+	}
+
+	dma_set_seg_boundary(&pdev->dev, ULONG_MAX);
+
+	pci_set_master(pdev);
+	pci_set_drvdata(pdev, fba_dev);
+	pci_enable_pcie_error_reporting(pdev);
+
+	/* Disable relaxed ordering on the device. */
+	ret = pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
+					 PCI_EXP_DEVCTL_RELAX_EN);
+	if (ret) {
+		fba_dev_err(
+			fba_dev,
+			"Failed to disable relaxed ordering on PCIe device.");
+		goto err_disable_reporting;
+	}
+
+	for (i = 0; i < BAR_CNT; i++) {
+		if ((pci_resource_flags(pdev, i) & IORESOURCE_MEM) == 0) {
+			/* skip over unused BARs to avoid log noise */
+			continue;
+		}
+
+		if (i == fba_dev->cfg->host_sq_wc_bar)
+			fba_dev->bars[i] = pci_ioremap_wc_bar(pdev, i);
+		else
+			fba_dev->bars[i] = pci_ioremap_bar(pdev, i);
+
+		if (fba_dev->bars[i] == NULL) {
+			fba_dev_err(fba_dev, "Failed to map BAR %d.", i);
+			ret = -ENOSPC;
+			goto err_unmap_bars;
+		}
+	}
+
+	return 0;
+
+err_unmap_bars:
+	while (i-- > 0)
+		pci_iounmap(pdev, fba_dev->bars[i]);
+err_disable_reporting:
+	pci_disable_pcie_error_reporting(pdev);
+	pci_clear_master(pdev);
+err_release_regions:
+	pci_release_regions(pdev);
+err_disable_device:
+	pci_disable_device(pdev);
+
+	return ret;
+}
+
+/* Free shared memory used to communicate with device */
+static void fba_shared_area_exit(struct fba_device *fba_dev)
+{
+	mutex_lock(&fba_dev->area_mutex);
+	fba_shared_free(fba_dev, &fba_dev->status_area);
+	fba_shared_free(fba_dev, &fba_dev->scratch_area);
+	fba_shared_free(fba_dev, &fba_dev->debug_area);
+	mutex_unlock(&fba_dev->area_mutex);
+}
+
+/* Initialize shared memory used to communicate with device */
+static int fba_shared_area_init(struct fba_device *fba_dev)
+{
+	int ret;
+
+	/*
+	 * Add a dma_alloc_coherent() to provide some mapped in DMA space.
+	 * We already do something like that in fba_resource to get back
+	 * info words and resource data.  We could just have a generic
+	 * block allocate here for use by the driver, and add an IOCTL to
+	 * read/write into it from user space.
+	 */
+
+	/* Debug Area pages. */
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->debug_area,
+					SAIL_DEBUG_SIZE);
+	if (ret)
+		return ret;
+
+	fba_shared_memset(&fba_dev->debug_area, 0, 0, SAIL_DEBUG_SIZE);
+
+	/* Temp Area pages. */
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->scratch_area,
+					SAIL_SCRATCH_SIZE);
+	if (ret)
+		goto err_free_debug;
+
+	fba_shared_memset(&fba_dev->scratch_area, 0, 0, SAIL_SCRATCH_SIZE);
+
+	/* Allocate Host Status pages. */
+	ret = fba_shared_alloc_coherent(fba_dev, &fba_dev->status_area,
+					SAIL_STATUS_SIZE);
+	if (ret)
+		goto err_free_scratch;
+
+	fba_shared_memset(&fba_dev->status_area, 0, 0, SAIL_STATUS_SIZE);
+
+	return ret;
+
+err_free_scratch:
+	fba_shared_free(fba_dev, &fba_dev->scratch_area);
+err_free_debug:
+	fba_shared_free(fba_dev, &fba_dev->debug_area);
+
+	return ret;
+}
+
+/* Detect secure boot and initialize firmware filenames */
+static void fba_init_fw_filenames(struct fba_device *fba_dev)
+{
+	const char *boot1, *boot2;
+
+	fba_dev->cfg->impl_ops->get_fw_filenames(fba_dev, &boot1, &boot2);
+	strscpy(fba_dev->boot1_filename, boot1,
+		sizeof(fba_dev->boot1_filename));
+	strscpy(fba_dev->boot2_filename, boot2,
+		sizeof(fba_dev->boot2_filename));
+
+	fba_dev_info(fba_dev, "boot1_filename set to %s\n",
+		     fba_dev->boot1_filename);
+	fba_dev_info(fba_dev, "boot2_filename set to %s\n",
+		     fba_dev->boot2_filename);
+}
+
+/* Load firmware asynchronously (and in parallel) */
+static void fba_async_probe(void *data, async_cookie_t cookie)
+{
+	struct fba_device *fba_dev = data;
+	int ret;
+
+	if (!fba_dev->pcie_boot_en) {
+		ret = fba_wait_for_state(fba_dev, SAIL_RDY, SAIL_RDY_MAGIC,
+					 fba_dev->num_retries);
+		if (ret != 0)
+			return;
+	} else {
+		ret = fba_dev->cfg->impl_ops->load_firmware(fba_dev);
+		if (ret != 0) {
+			/*
+			 * Mark as failed so attempts to use the device return EIO
+			 * instead of EBUSY.
+			 */
+			fba_device_abort(fba_dev, "firmware load failed");
+			return;
+		}
+	}
+
+	ret = fba_device_fw_init(fba_dev);
+	if (ret != 0) {
+		fba_dev_err(fba_dev, "Failed to enable device.");
+		return;
+	}
+	fba_dev_info(fba_dev, "Done setting up device, ready for use.");
+
+	atomic_set(&fba_dev->allow_open, true);
+}
+
+static int fba_device_init(struct fba_device *fba_dev)
+{
+	int ret;
+	struct list_head *elem;
+	struct fba_id_map *id_map;
+
+	kref_init(&fba_dev->ref);
+	spin_lock_init(&fba_dev->resources_lock);
+	mutex_init(&fba_dev->ctx_mtx);
+	mutex_init(&fba_dev->coredump_mutex);
+	mutex_init(&fba_dev->area_mutex);
+	init_completion(&fba_dev->abort_done);
+	init_completion(&fba_dev->coredump_done);
+
+	ida_init(&fba_dev->ctx_ids);
+	ida_init(&fba_dev->channel_ids);
+
+	init_waitqueue_head(&fba_dev->read_q);
+	init_waitqueue_head(&fba_dev->write_q);
+	INIT_LIST_HEAD(&fba_dev->ctx_list);
+
+	id_map = NULL;
+	list_for_each(elem, fba_dev->cfg->devids) {
+		id_map = list_entry(elem, struct fba_id_map, head);
+		if (id_map->bus_num == fba_dev->pdev->bus->number) {
+			dev_info(&fba_dev->pdev->dev,
+				 "Matched bus 0x%x to allocated ID %d",
+				 id_map->bus_num, id_map->dev_id);
+			fba_dev->id = id_map->dev_id;
+			break;
+		}
+	}
+
+	if (id_map == NULL || id_map->bus_num != fba_dev->pdev->bus->number) {
+		fba_dev->id = ida_alloc(fba_dev->cfg->devnode_ida, GFP_KERNEL);
+		if (fba_dev->id < 0 || fba_dev->id >= FBA_MAX_DEVS) {
+			dev_err(&fba_dev->pdev->dev,
+				"Can't allocate ID for bus 0x%x\n",
+				id_map->bus_num);
+			ret = fba_dev->id;
+			goto err_put_device;
+		}
+
+		id_map = kzalloc(sizeof(struct fba_id_map), GFP_KERNEL);
+		INIT_LIST_HEAD(&id_map->head);
+		id_map->dev_id = fba_dev->id;
+		id_map->bus_num = fba_dev->pdev->bus->number;
+		list_add(&id_map->head, fba_dev->cfg->devids);
+
+		dev_info(&fba_dev->pdev->dev, "Allocated bus 0x%x dev ID %d",
+			 id_map->bus_num, id_map->dev_id);
+	}
+
+	// minor is kept the same as device ID
+	// minor is used to create usoc / uart device names
+	// device id is used to create device name
+	fba_dev->minor = fba_dev->id + fba_dev->pdev->devfn;
+	ret = -ENOSPC;
+	mutex_lock(&fba_devices_mtx);
+	if (fba_devices[fba_dev->minor] == NULL) {
+		fba_devices[fba_dev->minor] = fba_dev;
+		ret = 0;
+	}
+	mutex_unlock(&fba_devices_mtx);
+	if (ret) {
+		dev_err(&fba_dev->pdev->dev,
+			"Device minor %d already allocated in fba_device\n",
+			fba_dev->minor);
+		goto err_put_device;
+	}
+
+	fba_dev->name = fba_dev->pdev->devfn == 0 ?
+				kasprintf(GFP_KERNEL, "%s%d",
+					  fba_dev->cfg->name, fba_dev->id) :
+				kasprintf(GFP_KERNEL, "%s%d.%d",
+					  fba_dev->cfg->name, fba_dev->id,
+					  fba_dev->pdev->devfn);
+
+	if (!fba_dev->name) {
+		ret = -ENOMEM;
+		goto err_free_id;
+	}
+
+	fba_dev->msix_wq = alloc_workqueue(fba_dev->name, 0, 0);
+	if (!fba_dev->msix_wq) {
+		fba_dev_err(fba_dev, "Failed to create workqueue thread.");
+		ret = -ENOMEM;
+		goto err_free_id;
+	}
+
+	ret = fba_pci_init(fba_dev);
+	if (ret)
+		goto err_free_wq;
+
+	ret = fba_shared_area_init(fba_dev);
+	if (ret)
+		goto err_pci_exit;
+
+	/* Driver is now available for IOCTL communication. */
+	fba_dev_info(fba_dev, "Done connecting BARs.");
+
+	ret = fba_mon_init(fba_dev);
+	if (ret != 0)
+		goto err_shared_area_exit;
+
+	if (fba_dev->cfg->impl_ops->impl_init != NULL) {
+		ret = fba_dev->cfg->impl_ops->impl_init(fba_dev);
+		if (ret != 0)
+			goto err_mon_exit;
+	}
+
+	fba_init_fw_filenames(fba_dev);
+
+	if (auto_load)
+		async_schedule(fba_async_probe, fba_dev);
+	else
+		atomic_set(&fba_dev->waiting_for_load, true);
+
+	fba_dev->dev = device_create(fba_class, &fba_dev->pdev->dev,
+				     MKDEV(MAJOR(fba_devt), fba_dev->minor),
+				     NULL, "%s", fba_dev->name);
+
+	return 0;
+
+err_mon_exit:
+	fba_mon_exit(&fba_dev->mon);
+err_shared_area_exit:
+	fba_shared_area_exit(fba_dev);
+err_pci_exit:
+	fba_pci_exit(fba_dev);
+err_free_wq:
+	destroy_workqueue(fba_dev->msix_wq);
+err_free_id:
+err_put_device:
+	fba_device_put(fba_dev);
+
+	return ret;
+}
+
+static int fba_device_exit(struct fba_device *fba_dev)
+{
+	int ret;
+
+	WRITE_ONCE(fba_dev->exiting, true);
+
+	/*
+	 * Grab coredump mutex to ensure no coredump DMA is ongoing, and set
+	 * coredump_disabled flag to disable any new coredump DMA.
+	 */
+	mutex_lock(&fba_dev->coredump_mutex);
+	fba_dev->coredump_disabled = true;
+	mutex_unlock(&fba_dev->coredump_mutex);
+
+	fba_device_unregister(fba_dev);
+
+	ret = fba_device_fw_exit(fba_dev);
+	if (ret != 0) {
+		fba_dev_err(fba_dev,
+			    "Error in deactivating the device. Continue");
+	}
+
+	if (!atomic_read(&fba_dev->has_failed)) {
+		if (fba_dev->cfg->impl_ops->reset_controller)
+			(void)fba_dev->cfg->impl_ops->reset_controller(fba_dev);
+	}
+
+	fba_poller_stop(fba_dev->m7_health_poller);
+	kfree(fba_dev->m7_health_poller);
+
+	fba_mon_exit(&fba_dev->mon);
+
+	if (fba_dev->cfg->impl_ops->impl_exit != NULL)
+		fba_dev->cfg->impl_ops->impl_exit(fba_dev);
+
+	fba_shared_area_exit(fba_dev);
+	fba_pci_exit(fba_dev);
+
+	fba_device_put(fba_dev);
+
+	return 0;
+}
+
+struct fba_channel *fba_allocate_streaming_channel(struct fba_device *fba_dev)
+{
+	int chan_id;
+	struct fba_channel *chan = NULL;
+
+	chan_id = ida_alloc_range(&fba_dev->channel_ids, fba_dev->channel_cnt,
+				  fba_dev->channel_cnt +
+					  fba_dev->streaming_channel_cnt - 1,
+				  GFP_KERNEL);
+	if (chan_id >= 0)
+		chan = fba_get_channel(fba_dev, chan_id);
+
+	return chan;
+}
+
+void fba_free_streaming_channel(struct fba_channel *chan)
+{
+	ida_free(&chan->fba_dev->channel_ids, chan->chan_id);
+}
+
+#define PCI_VENDOR_ID_FACEBOOK 0x1d9b
+#define PCI_DEVICE_ID_FACEBOOK_FREYA 0x0200
+#define PCI_DEVICE_ID_FACEBOOK_ARTEMIS 0x0201
+#define PCI_DEVICE_ID_FACEBOOK_ATHENA 0x0202
+#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0205
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0206
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0207
+//#define PCI_DEVICE_ID_FACEBOOK_IRIS 0x0208
+
+#define PCI_VENDOR_ID_BROADCOM 0x14e4
+#define PCI_DEVICE_ID_BROADCOM_VIPER 0x5e88
+
+static int fbaccel_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+{
+	struct fba_device *fba_dev;
+
+	/*
+	 * Silently ignore anything, but  PF0 on Athena, PF0 and PF1 on Iris
+	 */
+	if (pdev->vendor == PCI_VENDOR_ID_FACEBOOK &&
+	    ((pdev->device == PCI_DEVICE_ID_FACEBOOK_ATHENA &&
+	      PCI_FUNC(pdev->devfn) != 0) ||
+	     (pdev->device == PCI_DEVICE_ID_FACEBOOK_IRIS &&
+	      PCI_FUNC(pdev->devfn) > 1))) {
+		dev_info(&pdev->dev, "Ignore devfn=%d\n", pdev->devfn);
+		return -ENODEV;
+	}
+
+	dev_info(&pdev->dev, "Probe slot=%s bus=%s bus_num=0x%x\n",
+		 pdev->slot ? pci_slot_name(pdev->slot) : "n/a",
+		 pdev->bus->name, pdev->bus->number);
+
+	// hack for Iris - do not support devices in amodel on any bus other than 1
+	// since grid #2 will only be supported on PF1 and secondary PCIE links
+	// should not be used for control
+	if (pdev->device == PCI_DEVICE_ID_FACEBOOK_IRIS &&
+	    pdev->bus->number != 1) {
+		dev_info(&pdev->dev, "Unsupported bus_num=0x%x\n",
+			 pdev->bus->number);
+		return -ENODEV;
+	}
+
+	fba_dev = kzalloc(sizeof(*fba_dev), GFP_KERNEL);
+	if (fba_dev == NULL)
+		return -ENOMEM;
+
+	fba_dev->pdev = pdev;
+	fba_dev->cfg = (const struct fba_cfg *)ent->driver_data;
+
+	fba_dev->pcie_boot_en = pcie_boot_en;
+
+	fba_dev->num_retries = MAX_RETRIES;
+	fba_dev->admin_cmd_timeout_ms = admin_cmd_timeout ?
+						admin_cmd_timeout :
+						SAIL_ADMIN_CMD_MAX_TIMEOUT_MS;
+
+	return fba_device_init(fba_dev);
+}
+
+static void fbaccel_remove(struct pci_dev *pdev)
+{
+	struct fba_device *fba_dev;
+
+	dev_info(&pdev->dev, "Remove device at %s", pdev->bus->name);
+
+	/* Wait for any FW load in progress to complete */
+	async_synchronize_full();
+
+	fba_dev = pci_get_drvdata(pdev);
+	fba_device_exit(fba_dev);
+}
+
+static const struct pci_device_id fbaccel_ids[] = {
+	{ PCI_DEVICE_DATA(BROADCOM, VIPER, &tenjin_cfg) },
+	{}
+};
+
+MODULE_DEVICE_TABLE(pci, fbaccel_ids);
+
+static struct pci_driver fbaccel_driver = {
+	.name = KBUILD_MODNAME,
+	.id_table = fbaccel_ids,
+	.probe = fbaccel_probe,
+	.remove = fbaccel_remove,
+};
+
+static int __init fba_subdevice_driver_init(void)
+{
+	int ret;
+
+	ret = fba_uart_driver_init();
+	if (ret != 0)
+		return ret;
+
+	ret = fba_usoc_driver_init();
+	if (ret != 0)
+		goto err_uart_exit;
+
+	ret = fba_logger_driver_init();
+	if (ret != 0)
+		goto err_usoc_exit;
+
+	return ret;
+
+err_usoc_exit:
+	fba_usoc_driver_exit();
+err_uart_exit:
+	fba_uart_driver_exit();
+	return ret;
+}
+
+static void fba_subdevice_driver_exit(void)
+{
+	fba_usoc_driver_exit();
+	fba_uart_driver_exit();
+	fba_logger_driver_exit();
+}
+
+static int __init fbaccel_driver_init(void)
+{
+	int ret;
+
+	INIT_LIST_HEAD(freya_cfg.devids);
+	INIT_LIST_HEAD(artemis_cfg.devids);
+	INIT_LIST_HEAD(athena_cfg.devids);
+	INIT_LIST_HEAD(iris_cfg.devids);
+	INIT_LIST_HEAD(tenjin_cfg.devids);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+	fba_class = class_create(THIS_MODULE, KBUILD_MODNAME);
+#else
+	fba_class = class_create(KBUILD_MODNAME);
+#endif
+	if (IS_ERR(fba_class))
+		return PTR_ERR(fba_class);
+	fba_class->dev_groups = fba_device_groups;
+
+	ret = alloc_chrdev_region(&fba_devt, 0, FBA_MAX_DEVS, KBUILD_MODNAME);
+	if (ret < 0)
+		goto err_class_destroy;
+
+	cdev_init(&fba_cdev, &fba_fops);
+	ret = cdev_add(&fba_cdev, fba_devt, FBA_MAX_DEVS);
+	if (ret < 0)
+		goto err_free_chrdev;
+
+	ret = fba_subdevice_driver_init();
+	if (ret < 0)
+		goto err_del_cdev;
+
+	return ret;
+
+err_del_cdev:
+	cdev_del(&fba_cdev);
+err_free_chrdev:
+	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
+err_class_destroy:
+	class_destroy(fba_class);
+	return ret;
+}
+
+static void __exit fbaccel_driver_exit(void)
+{
+	struct list_head *elem;
+	struct fba_id_map *id_map;
+	struct list_head *maps[] = { freya_cfg.devids, artemis_cfg.devids,
+				     athena_cfg.devids, iris_cfg.devids,
+				     tenjin_cfg.devids };
+	struct ida *idas[] = {
+		freya_cfg.devnode_ida,	artemis_cfg.devnode_ida,
+		athena_cfg.devnode_ida, iris_cfg.devnode_ida,
+		tenjin_cfg.devnode_ida,
+	};
+	int i;
+	struct list_head *tmp;
+
+	// free device IDs that are allocated and maintained throughout
+	// the lifetime of the driver
+	for (i = 0; i < ARRAY_SIZE(maps); i++) {
+		list_for_each_safe(elem, tmp, maps[i]) {
+			id_map = list_entry(elem, struct fba_id_map, head);
+			ida_free(idas[i], id_map->dev_id);
+			list_del(elem);
+			kfree(id_map);
+		}
+	}
+
+	fba_subdevice_driver_exit();
+	cdev_del(&fba_cdev);
+	unregister_chrdev_region(fba_devt, FBA_MAX_DEVS);
+	class_destroy(fba_class);
+}
+
+static int __init fbaccel_init(void)
+{
+	int ret;
+
+	ret = fbaccel_driver_init();
+	if (ret != 0)
+		return ret;
+
+	ret = pci_register_driver(&fbaccel_driver);
+
+	/* Block until firmware load completes, making scripting simpler. */
+	async_synchronize_full();
+
+	return ret;
+}
+
+static void __exit fbaccel_exit(void)
+{
+	pci_unregister_driver(&fbaccel_driver);
+	fbaccel_driver_exit();
+}
+
+module_init(fbaccel_init);
+module_exit(fbaccel_exit);
+
+MODULE_DESCRIPTION("Meta Accelerator Host Driver");
+MODULE_AUTHOR("Meta Platforms, Inc.");
+MODULE_LICENSE("GPL v2");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
+MODULE_VERSION(FBACCEL_VERSION);
