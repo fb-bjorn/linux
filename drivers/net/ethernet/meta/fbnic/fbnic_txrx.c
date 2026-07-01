@@ -1566,6 +1566,7 @@ fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 		.queue_idx = rxq_idx,
 	};
 	struct page_pool *pp;
+	int err;
 
 	/* Page pool cannot exceed a size of 32768. This doesn't limit the
 	 * pages on the ring but the number we can have cached waiting on
@@ -1589,8 +1590,10 @@ fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 		pp_params.dma_dir = DMA_FROM_DEVICE;
 
 		pp = page_pool_create(&pp_params);
-		if (IS_ERR(pp))
+		if (IS_ERR(pp)) {
+			err = PTR_ERR(pp);
 			goto err_destroy_sub0;
+		}
 	} else {
 		page_pool_get(pp);
 	}
@@ -1599,8 +1602,9 @@ fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 	return 0;
 
 err_destroy_sub0:
-	page_pool_destroy(pp);
-	return PTR_ERR(pp);
+	page_pool_destroy(qt->sub0.page_pool);
+	qt->sub0.page_pool = NULL;
+	return err;
 }
 
 static void fbnic_ring_init(struct fbnic_ring *ring, u32 __iomem *doorbell,
