@@ -1,0 +1,14 @@
+config FBACCEL
+	tristate "Meta Accelerator Host Driver"
+	depends on PCI
+	select DMA_SHARED_BUFFER
+	select FW_LOADER
+	select GENERIC_ALLOCATOR
+	select SERIAL_CORE
+	help
+	  This option enables a driver for Meta's accelerator silicon devices.
+
+	  This driver supports a set of silicon devices that (mostly) share a
+	  common firmware interface.  This currently includes video transcoding
+	  and machine learning accelerators, but may be leveraged for additional
+	  accelerators in the future.
