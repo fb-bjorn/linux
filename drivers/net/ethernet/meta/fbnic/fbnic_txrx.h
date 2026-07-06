@@ -49,6 +49,11 @@ struct fbnic_net;
 #define FBNIC_RX_USECS_DEFAULT		30
 #define FBNIC_RX_FRAMES_DEFAULT		0
 
+static inline u32 fbnic_ring_size_pow2(u32 size)
+{
+	return size ? roundup_pow_of_two(size) : 0;
+}
+
 #define FBNIC_RX_TROOM \
 	SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define FBNIC_RX_HROOM_PAD		128
