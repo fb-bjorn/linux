@@ -951,9 +951,18 @@ void ethtool_ringparam_get_cfg(struct net_device *dev,
 	param->cmd = ETHTOOL_GRINGPARAM;
 	dev->ethtool_ops->get_ringparam(dev, param, kparam, extack);
 
-	/* Driver gives us current state, we want to return current config */
+	/* Driver reports applied HDS state, return accepted configuration. */
 	kparam->tcp_data_split = dev->cfg->hds_config;
 	kparam->hds_thresh = dev->cfg->hds_thresh;
+}
+
+void ethtool_ringparam_set_cfg(struct netdev_config *cfg,
+			       const struct ethtool_ringparam *param)
+{
+	cfg->rings.rx_pending = param->rx_pending;
+	cfg->rings.rx_mini_pending = param->rx_mini_pending;
+	cfg->rings.rx_jumbo_pending = param->rx_jumbo_pending;
+	cfg->rings.tx_pending = param->tx_pending;
 }
 
 static void ethtool_init_tsinfo(struct kernel_ethtool_ts_info *info)
