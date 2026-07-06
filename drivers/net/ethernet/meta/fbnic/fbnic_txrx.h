@@ -59,12 +59,18 @@ struct fbnic_net;
 	((u32)(((u64)FIELD_MAX(FBNIC_QM_RCQ_CTL0_COAL_WAIT) * NSEC_PER_SEC) / \
 	       FBNIC_CLOCK_FREQ))
 
+static inline u32 fbnic_ring_size_pow2(u32 size)
+{
+	return size ? roundup_pow_of_two(size) : 0;
+}
+
 #define FBNIC_RX_TROOM \
 	SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define FBNIC_RX_HROOM_PAD		128
 #define FBNIC_RX_HROOM \
 	(ALIGN(FBNIC_RX_TROOM + FBNIC_RX_HROOM_PAD, 128) - FBNIC_RX_TROOM)
 #define FBNIC_RX_PAD			0
+#define FBNIC_RX_PAYLD_ALIGN		128
 #define FBNIC_RX_PAYLD_OFFSET		0
 #define FBNIC_RX_PAYLD_PG_CL		0
 

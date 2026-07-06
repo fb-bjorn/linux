@@ -325,11 +325,6 @@ fbnic_get_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring,
 	kernel_ring->hds_thresh = fbn->hds_thresh;
 }
 
-static u32 fbnic_ring_size_pow2(u32 size)
-{
-	return size ? roundup_pow_of_two(size) : 0;
-}
-
 static void fbnic_set_rings(struct fbnic_net *fbn,
 			    struct ethtool_ringparam *ring,
 			    struct kernel_ethtool_ringparam *kernel_ring)
