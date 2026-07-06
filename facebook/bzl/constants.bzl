@@ -4,7 +4,7 @@ BUILD_IMAGE_X86_64_SHA256="53348fa4c06084cda3dc2274ed1a167effd09bbd060179ac93df8
 BUILD_IMAGE_AARCH64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/update-libbpf1.6.c9.llvm21.aarch64"
 BUILD_IMAGE_AARCH64_SHA256="091fd520adcd47fba8cd161ce2598ed84abe775e9a216e29e3c0ff8e52cf9dbe"
 
-KPATCH_BUILD_RPM_URI="http://yum/yum/centos/9/backports/x86_64/RPMS/kpatch-build-0.9.11-0.4.hs.el9.x86_64.rpm"
+KPATCH_BUILD_RPM_URI="https://yum/yum/centos/9/backports/x86_64/RPMS/kpatch-build-0.9.11-0.4.hs.el9.x86_64.rpm"
 KPATCH_BUILD_RPM_SHA256="054acc1dc50ff3c0943339642b52d0cb10c7c060ff459cd913d1fde94dc6acff"
 
 CLANG_TRAIN_DATA_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/clang_train_data/v71/profdata.7.1.0-0_fbk0_clangtrain_rc8_0_gb58234f1b727.7200s.yhs.2026-07-08-11-34-58"
