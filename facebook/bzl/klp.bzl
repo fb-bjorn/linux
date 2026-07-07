@@ -87,6 +87,8 @@ def klp():
         name="patches",
         cmd="""mkdir -p $OUT
             HOME=/dev/null git format-patch -k `cat $(location :from_tag)`..`cat $(location :to_tag)` -o $OUT/
+            # Drop hunkless patches (e.g. empty placeholder commits like "kdump: new empty commit"); kpatch-build rejects them as unapplicable.
+            for p in $OUT/*.patch; do grep -q '^diff --git' $p || rm -f $p; done
             export hotfix=`cat $(location :hotfix)`
             cat `HOME=/dev/null git rev-parse --show-toplevel`/facebook/9999-Dummy-patch-to-bump-hotfix-version.patch.template | envsubst > $OUT/9999-Dummy-patch-to-bump-hotfix-version.patch
         """,
