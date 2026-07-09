@@ -319,6 +319,15 @@ static inline void clocksource_disable_inline_read(void) { }
 static inline void clocksource_enable_inline_read(void) { }
 #endif
 
+static inline u64 tk_clock_read_non_monotonic(const struct tk_read_base *tkr)
+{
+	struct clocksource *clock = READ_ONCE(tkr->clock);
+
+	if (clock->read_non_monotonic)
+		return clock->read_non_monotonic(clock);
+	return clock->read(clock);
+}
+
 /**
  * tk_setup_internals - Set up internals to use clocksource clock.
  *
@@ -447,6 +456,11 @@ static __always_inline u64 timekeeping_cycles_to_ns(const struct tk_read_base *t
 static __always_inline u64 timekeeping_get_ns(const struct tk_read_base *tkr)
 {
 	return timekeeping_cycles_to_ns(tkr, tk_clock_read(tkr));
+}
+
+static __always_inline u64 timekeeping_get_ns_non_monotonic(const struct tk_read_base *tkr)
+{
+	return timekeeping_cycles_to_ns(tkr, tk_clock_read_non_monotonic(tkr));
 }
 
 /**
@@ -951,6 +965,26 @@ void ktime_get_real_ts64(struct timespec64 *ts)
 	timespec64_add_ns(ts, nsecs);
 }
 EXPORT_SYMBOL(ktime_get_real_ts64);
+
+ktime_t ktime_get_non_monotonic(void)
+{
+	struct timekeeper *tk = &tk_core.timekeeper;
+	unsigned int seq;
+	ktime_t base;
+	u64 nsecs;
+
+	WARN_ON(timekeeping_suspended);
+
+	do {
+		seq = read_seqcount_begin(&tk_core.seq);
+		base = tk->tkr_mono.base;
+		nsecs = timekeeping_get_ns_non_monotonic(&tk->tkr_mono);
+
+	} while (read_seqcount_retry(&tk_core.seq, seq));
+
+	return ktime_add_ns(base, nsecs);
+}
+EXPORT_SYMBOL_GPL(ktime_get_non_monotonic);
 
 ktime_t ktime_get(void)
 {

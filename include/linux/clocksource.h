@@ -97,6 +97,7 @@ struct module;
  */
 struct clocksource {
 	u64			(*read)(struct clocksource *cs);
+	u64			(*read_non_monotonic)(struct clocksource *cs);
 	u64			mask;
 	u32			mult;
 	u32			shift;

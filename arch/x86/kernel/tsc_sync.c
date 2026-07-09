@@ -205,7 +205,7 @@ bool tsc_store_and_check_tsc_adjust(bool bootcpu)
 	 * where TSC_ADJUST is expected to be different. When called on the
 	 * boot CPU topology_core_cpumask() might not be available yet.
 	 */
-	mask = topology_core_cpumask(cpu);
+	mask = topology_die_cpumask(cpu);
 	refcpu = mask ? cpumask_any_but(mask, cpu) : nr_cpu_ids;
 
 	if (refcpu >= nr_cpu_ids) {
@@ -231,6 +231,9 @@ bool tsc_store_and_check_tsc_adjust(bool bootcpu)
 	if (bootval != ref->adjusted) {
 		cur->adjusted = ref->adjusted;
 		wrmsrq(MSR_IA32_TSC_ADJUST, ref->adjusted);
+	} else if (cur->adjusted != bootval) {
+		/* if we kexeced with an adjustment set, keep it */
+		cur->adjusted = bootval;
 	}
 	/*
 	 * We have the TSCs forced to be in sync on this package. Skip sync
