@@ -8,6 +8,7 @@
 #include <linux/module.h>	/* for MODULE_NAME_LEN via KSYM_SYMBOL_LEN */
 #include <linux/ftrace.h>
 #include <linux/perf_event.h>
+#include <linux/uaccess.h>
 #include <linux/xarray.h>
 #include <asm/syscall.h>
 
@@ -660,32 +661,70 @@ struct syscall_args {
 	int		uargs;
 };
 
+/*
+ * The callback return value is consumed by trace_user_fault_read() as a
+ * whole-buffer status: 0 means the per-CPU scratch buffer can be used,
+ * non-zero means retry with page faults enabled or fail the read.
+ *
+ * Syscall tracing also needs per-argument status, because one bad user
+ * pointer should omit only that appended argument, not the syscall event
+ * itself. Store that per-argument result in args->read[].
+ *
+ * When called by the pagefault-disabled fast path, a fault may just mean the
+ * user page needs to be faulted in, so report it to trace_user_fault_read().
+ * When called by the pagefault-enabled slow path, record the per-argument
+ * failure in args->read[] and return 0 so the syscall event can still be emitted.
+ */
 static int syscall_copy_user(char *buf, const char __user *ptr,
 			     size_t size, void *data)
 {
 	struct syscall_args *args = data;
+	bool inatomic = pagefault_disabled();
+	bool faulted = false;
 	int ret;
 
 	for (int i = 0; i < args->uargs; i++, buf += SYSCALL_FAULT_ARG_SZ) {
 		ptr = (char __user *)args->ptr_array[i];
 		ret = strncpy_from_user(buf, ptr, size);
 		args->read[i] = ret;
+		if (inatomic && ret < 0)
+			faulted = true;
 	}
-	return 0;
+
+	return faulted ? -EFAULT : 0;
 }
 
+/*
+ * Copy explicitly sized user arguments into the per-CPU scratch buffer.
+ * The callback return value is whole-buffer status for trace_user_fault_read():
+ * return non-zero from the pagefault-disabled fast path so it can retry with
+ * faults enabled. Per-argument status is stored in args->read[].
+ *
+ * The __copy_from_user*() helpers return bytes not copied. Store @size for a
+ * fully copied argument and -1 for a copy fault. When the pagefault-enabled
+ * slow path still faults, return 0 so the syscall event can be emitted and
+ * only that appended user argument is omitted.
+ */
 static int syscall_copy_user_array(char *buf, const char __user *ptr,
 				   size_t size, void *data)
 {
 	struct syscall_args *args = data;
+	bool inatomic = pagefault_disabled();
+	bool faulted = false;
 	int ret;
 
 	for (int i = 0; i < args->uargs; i++, buf += SYSCALL_FAULT_ARG_SZ) {
 		ptr = (char __user *)args->ptr_array[i];
-		ret = __copy_from_user(buf, ptr, size);
+		if (inatomic)
+			ret = __copy_from_user_inatomic(buf, ptr, size);
+		else
+			ret = __copy_from_user(buf, ptr, size);
 		args->read[i] = ret ? -1 : size;
+		if (inatomic && ret)
+			faulted = true;
 	}
-	return 0;
+
+	return faulted ? -EFAULT : 0;
 }
 
 static char *sys_fault_user(unsigned int buf_size,

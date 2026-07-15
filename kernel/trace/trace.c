@@ -6176,8 +6176,10 @@ int trace_user_fault_put(struct trace_user_buf_info *tinfo)
  *   size: The @size of the ptr to read
  *   data: The @data parameter
  *
- * It is expected that @copy_func will return 0 on success and non zero
- * if there was a fault.
+ * @copy_func may be called with page faults disabled first. It is
+ * expected that @copy_func will return 0 on success and non zero if the
+ * copy needs to be retried with page faults enabled or if there was a
+ * fault.
  *
  * Returns a pointer to the buffer with the content read from @ptr.
  *   Preemption must remain disabled while the caller accesses the
@@ -6203,6 +6205,22 @@ char *trace_user_fault_read(struct trace_user_buf_info *tinfo,
 	 */
 	if (size > tinfo->size)
 		return NULL;
+
+	/*
+	 * Fastpath: try the copy with page faults disabled. Preemption is
+	 * already disabled by the caller, so no other task can run on this
+	 * CPU to corrupt the per-CPU buffer, and the seqcount-style retry
+	 * loop below is unnecessary. This succeeds whenever the user pages
+	 * are already present.
+	 */
+	pagefault_disable();
+	if (copy_func)
+		ret = copy_func(buffer, ptr, size, data);
+	else
+		ret = __copy_from_user_inatomic(buffer, ptr, size);
+	pagefault_enable();
+	if (!ret)
+		return buffer;
 
 	/*
 	 * This acts similar to a seqcount. The per CPU context switches are
