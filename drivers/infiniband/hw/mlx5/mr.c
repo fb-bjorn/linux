@@ -747,7 +747,8 @@ static struct ib_mr *create_real_mr(struct ib_pd *pd, struct ib_umem *umem,
 		struct mlx5_ib_dmah *mdmah = to_mdmah(dmah);
 
 		ph = dmah->ph;
-		if (dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS))
+		if (dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS) ||
+		    dmah->valid_fields & BIT(IB_DMAH_DIRECT_ST_VAL_EXISTS))
 			st_index = mdmah->st_index;
 	}
 
@@ -939,7 +940,8 @@ reg_user_mr_dmabuf(struct ib_pd *pd, struct device *dma_device,
 		struct mlx5_ib_dmah *mdmah = to_mdmah(dmah);
 
 		ph = dmah->ph;
-		if (dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS))
+		if (dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS) ||
+		    dmah->valid_fields & BIT(IB_DMAH_DIRECT_ST_VAL_EXISTS))
 			st_index = mdmah->st_index;
 	}
 

@@ -63,7 +63,33 @@ static int UVERBS_HANDLER(UVERBS_METHOD_DMAH_ALLOC)(
 	if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_ALLOC_DMAH_TPH_MEM_TYPE)) {
 		dmah->mem_type = uverbs_attr_get_enum_id(attrs,
 					UVERBS_ATTR_ALLOC_DMAH_TPH_MEM_TYPE);
+		if (dmah->mem_type == TPH_MEM_TYPE_P2P &&
+				(dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS))) {
+			ret = -EINVAL;
+			goto err;
+		}
 		dmah->valid_fields |= BIT(IB_DMAH_MEM_TYPE_EXISTS);
+	}
+
+	if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_ALLOC_DMAH_DIRECT_ST_VAL)) {
+		ret = uverbs_copy_from(&dmah->direct_st_val, attrs,
+				       UVERBS_ATTR_ALLOC_DMAH_DIRECT_ST_VAL);
+		if (ret)
+			goto err;
+
+		if (dmah->valid_fields & BIT(IB_DMAH_CPU_ID_EXISTS)) {
+			ret = -EINVAL;
+			goto err;
+		}
+		if (!(dmah->valid_fields & BIT(IB_DMAH_MEM_TYPE_EXISTS))) {
+			ret = -EINVAL;
+			goto err;
+		}
+		if (dmah->mem_type != TPH_MEM_TYPE_P2P) {
+			ret = -EINVAL;
+			goto err;
+		}
+		dmah->valid_fields |= BIT(IB_DMAH_DIRECT_ST_VAL_EXISTS);
 	}
 
 	if (uverbs_attr_is_valid(attrs, UVERBS_ATTR_ALLOC_DMAH_PH)) {
@@ -112,6 +138,10 @@ static const struct uverbs_attr_spec uverbs_dmah_mem_type[] = {
 		.type = UVERBS_ATTR_TYPE_PTR_IN,
 		UVERBS_ATTR_NO_DATA(),
 	},
+	[TPH_MEM_TYPE_P2P] = {
+		.type = UVERBS_ATTR_TYPE_PTR_IN,
+		UVERBS_ATTR_NO_DATA(),
+	},
 };
 
 DECLARE_UVERBS_NAMED_METHOD(
@@ -128,6 +158,9 @@ DECLARE_UVERBS_NAMED_METHOD(
 			    UA_OPTIONAL),
 	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_ALLOC_DMAH_PH,
 			   UVERBS_ATTR_TYPE(u8),
+			   UA_OPTIONAL),
+	UVERBS_ATTR_PTR_IN(UVERBS_ATTR_ALLOC_DMAH_DIRECT_ST_VAL,
+			   UVERBS_ATTR_TYPE(u16),
 			   UA_OPTIONAL));
 
 DECLARE_UVERBS_NAMED_METHOD_DESTROY(

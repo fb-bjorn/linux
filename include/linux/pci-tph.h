@@ -17,7 +17,8 @@
  */
 enum tph_mem_type {
 	TPH_MEM_TYPE_VM,	/* volatile memory */
-	TPH_MEM_TYPE_PM		/* persistent memory */
+	TPH_MEM_TYPE_PM,	/* persistent memory */
+	TPH_MEM_TYPE_P2P	/* peer-to-peer accessible memory */
 };
 
 #ifdef CONFIG_PCIE_TPH
