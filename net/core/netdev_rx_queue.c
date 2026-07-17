@@ -95,6 +95,23 @@ bool netif_rxq_has_mp(struct net_device *dev, unsigned int rxq_idx)
 	return false;
 }
 
+bool netif_has_xdp_unsupported_mp(struct net_device *dev)
+{
+	const struct memory_provider_ops *ops;
+	int i;
+
+	netdev_assert_locked_ops_compat(dev);
+
+	for (i = dev->real_num_rx_queues - 1; i >= 0; i--) {
+		ops = dev->_rx[i].mp_params.mp_ops;
+		if (ops && !ops->supports_xdp)
+			return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL(netif_has_xdp_unsupported_mp);
+
 static int netdev_rx_queue_reconfig(struct net_device *dev,
 				    unsigned int rxq_idx,
 				    struct netdev_queue_config *qcfg_old,

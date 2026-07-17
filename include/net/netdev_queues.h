@@ -193,6 +193,7 @@ void netdev_queue_config(struct net_device *dev, int rxq,
 			 struct netdev_queue_config *qcfg);
 
 bool netif_rxq_has_unreadable_mp(struct net_device *dev, unsigned int rxq_idx);
+bool netif_has_xdp_unsupported_mp(struct net_device *dev);
 
 /**
  * DOC: Lockless queue stopping / waking helpers.
