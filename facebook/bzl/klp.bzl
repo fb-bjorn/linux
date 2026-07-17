@@ -357,6 +357,18 @@ def klp():
                 fi
                 exit $rc
             fi
+
+            # kpatch-build returned success, but that alone does not guarantee a loadable
+            # module. Confirm a real ELF .ko was produced before we inspect and package it,
+            # so a silent or partial failure cannot ship a non-module .ko. The jump_table
+            # check just below runs readelf on the .ko and would otherwise treat a missing
+            # or non-ELF file as having no jump table and package it anyway.
+            if ! ls /rw/output/*.ko >/dev/null 2>&1 || ! readelf -h /rw/output/*.ko >/dev/null 2>&1; then
+                cp /root/.kpatch/build.log /rw/output/ 2>/dev/null || true
+                echo "ERROR: kpatch-build reported success but produced no valid ELF .ko module." >&2
+                exit 1
+            fi
+
             if readelf -S -W /rw/output/*.ko | grep -q '.klp.rela.vmlinux.__jump_table'; then
                 echo "ERROR: .klp.rela.vmlinux.__jump_table found in KLP module." | tee -a /root/.kpatch/build.log
                 echo "Patched functions reference static keys via static_branch_*()." | tee -a /root/.kpatch/build.log
