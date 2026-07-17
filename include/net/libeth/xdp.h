@@ -1187,6 +1187,8 @@ libeth_xdp_init_buff(struct libeth_xdp_buff *dst,
 		libeth_xdp_load_stash(dst, src);
 
 	dst->base.rxq = rxq;
+	if (likely(!src->data))
+		dst->base.netmem = 0;
 }
 
 /**
@@ -1705,7 +1707,7 @@ void name(struct libeth_xdp_tx_bulk *bq)				      \
  * Often times, pointer to the RQ is needed when reading/filling metadata from
  * HW descriptors. The helper can be used to quickly jump from an XDP buffer
  * to the queue corresponding to its &xdp_rxq_info without introducing
- * additional fields (&libeth_xdp_buff is precisely 1 cacheline long on x64).
+ * additional fields.
  */
 #define libeth_xdp_buff_to_rq(xdp, type, member)			      \
 	container_of_const((xdp)->base.rxq, type, member)

@@ -94,8 +94,21 @@ bool netif_rxq_has_mp(struct net_device *dev, unsigned int rxq_idx)
 		return __netif_get_rx_queue(dev, rxq_idx)->mp_params.mp_priv;
 	return false;
 }
+EXPORT_SYMBOL(netif_rxq_has_mp);
 
-bool netif_has_xdp_unsupported_mp(struct net_device *dev)
+bool netif_rxq_mp_match(struct net_device *dev, unsigned int rxq_idx,
+			const void *mp_priv)
+{
+	if (!mp_priv || rxq_idx >= dev->real_num_rx_queues)
+		return false;
+
+	return mp_priv ==
+	       __netif_get_rx_queue(dev, rxq_idx)->mp_params.mp_priv;
+}
+EXPORT_SYMBOL(netif_rxq_mp_match);
+
+bool netif_mp_unsupported(struct net_device *dev,
+			  enum memory_provider_cap capability)
 {
 	const struct memory_provider_ops *ops;
 	int i;
@@ -104,13 +117,13 @@ bool netif_has_xdp_unsupported_mp(struct net_device *dev)
 
 	for (i = dev->real_num_rx_queues - 1; i >= 0; i--) {
 		ops = dev->_rx[i].mp_params.mp_ops;
-		if (ops && !ops->supports_xdp)
+		if (ops && !(ops->capabilities & capability))
 			return true;
 	}
 
 	return false;
 }
-EXPORT_SYMBOL(netif_has_xdp_unsupported_mp);
+EXPORT_SYMBOL(netif_mp_unsupported);
 
 static int netdev_rx_queue_reconfig(struct net_device *dev,
 				    unsigned int rxq_idx,
@@ -201,9 +214,10 @@ int netdev_rx_queue_restart(struct net_device *dev, unsigned int rxq_idx)
 }
 EXPORT_SYMBOL_NS_GPL(netdev_rx_queue_restart, "NETDEV_INTERNAL");
 
-static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
-			       const struct pp_memory_provider_params *p,
-			       struct netlink_ext_ack *extack)
+static int
+__netif_mp_open_rxq_reconfig(struct net_device *dev, unsigned int rxq_idx,
+			     const struct pp_memory_provider_params *p,
+			     struct netlink_ext_ack *extack)
 {
 	const struct netdev_queue_mgmt_ops *qops = dev->queue_mgmt_ops;
 	struct netdev_queue_config qcfg[2];
@@ -213,18 +227,6 @@ static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	if (!qops)
 		return -EOPNOTSUPP;
 
-	if (dev->cfg->hds_config != ETHTOOL_TCP_DATA_SPLIT_ENABLED) {
-		NL_SET_ERR_MSG(extack, "tcp-data-split is disabled");
-		return -EINVAL;
-	}
-	if (dev->cfg->hds_thresh) {
-		NL_SET_ERR_MSG(extack, "hds-thresh is not zero");
-		return -EINVAL;
-	}
-	if (dev_xdp_prog_count(dev)) {
-		NL_SET_ERR_MSG(extack, "unable to custom memory provider to device with XDP program attached");
-		return -EEXIST;
-	}
 	if (p->rx_page_size && !(qops->supported_params & QCFG_RX_PAGE_SIZE)) {
 		NL_SET_ERR_MSG(extack, "device does not support: rx_page_size");
 		return -EOPNOTSUPP;
@@ -235,13 +237,6 @@ static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 		NL_SET_ERR_MSG(extack, "designated queue already memory provider bound");
 		return -EEXIST;
 	}
-#ifdef CONFIG_XDP_SOCKETS
-	if (rxq->pool) {
-		NL_SET_ERR_MSG(extack, "designated queue already in use by AF_XDP");
-		return -EBUSY;
-	}
-#endif
-
 	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
 	rxq->mp_params = *p;
 	ret = netdev_queue_config_validate(dev, rxq_idx, &qcfg[1], extack);
@@ -258,6 +253,71 @@ err_clear_mp:
 	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
 	return ret;
 }
+
+static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
+			       const struct pp_memory_provider_params *p,
+			       struct netlink_ext_ack *extack)
+{
+	struct netdev_rx_queue *rxq;
+
+	if (dev->cfg->hds_config != ETHTOOL_TCP_DATA_SPLIT_ENABLED) {
+		NL_SET_ERR_MSG(extack, "tcp-data-split is disabled");
+		return -EINVAL;
+	}
+	if (dev->cfg->hds_thresh) {
+		NL_SET_ERR_MSG(extack, "hds-thresh is not zero");
+		return -EINVAL;
+	}
+	if (dev_xdp_prog_count(dev)) {
+		NL_SET_ERR_MSG(extack,
+			       "device has an XDP program attached");
+		return -EEXIST;
+	}
+
+	rxq = __netif_get_rx_queue(dev, rxq_idx);
+#ifdef CONFIG_XDP_SOCKETS
+	if (rxq->pool) {
+		NL_SET_ERR_MSG(extack,
+			       "designated queue already in use by AF_XDP");
+		return -EBUSY;
+	}
+#endif
+
+	return __netif_mp_open_rxq_reconfig(dev, rxq_idx, p, extack);
+}
+
+#ifdef CONFIG_XDP_SOCKETS
+int netif_mp_open_rxq_xsk(struct net_device *dev, unsigned int rxq_idx,
+			  const struct pp_memory_provider_params *p,
+			  struct netlink_ext_ack *extack)
+{
+	struct netdev_rx_queue *rxq;
+
+	if (rxq_idx >= dev->real_num_rx_queues) {
+		NL_SET_ERR_MSG(extack, "rx queue index out of range");
+		return -ERANGE;
+	}
+	rxq_idx = array_index_nospec(rxq_idx, dev->real_num_rx_queues);
+	if (netif_rxq_is_leased(dev, rxq_idx)) {
+		NL_SET_ERR_MSG(extack,
+			       "XSK memory providers do not support queue leases");
+		return -EOPNOTSUPP;
+	}
+	rxq = __netif_get_rx_queue(dev, rxq_idx);
+	/* AF_XDP registers its pool before driver setup. */
+	if (rxq->pool != p->mp_priv) {
+		NL_SET_ERR_MSG(extack,
+			       "designated queue has no matching XSK pool");
+		return -EINVAL;
+	}
+
+	if (!netdev_need_ops_lock(dev))
+		return -EOPNOTSUPP;
+
+	return __netif_mp_open_rxq_reconfig(dev, rxq_idx, p, extack);
+}
+EXPORT_SYMBOL_GPL(netif_mp_open_rxq_xsk);
+#endif
 
 int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 		      const struct pp_memory_provider_params *p,
@@ -292,8 +352,8 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	return ret;
 }
 
-static void __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
-				 const struct pp_memory_provider_params *old_p)
+static int __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
+				const struct pp_memory_provider_params *old_p)
 {
 	struct netdev_queue_config qcfg[2];
 	struct netdev_rx_queue *rxq;
@@ -306,35 +366,42 @@ static void __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
 	 */
 	if (dev->reg_state > NETREG_REGISTERED &&
 	    !rxq->mp_params.mp_ops)
-		return;
+		return 0;
 
 	if (WARN_ON_ONCE(rxq->mp_params.mp_ops != old_p->mp_ops ||
 			 rxq->mp_params.mp_priv != old_p->mp_priv))
-		return;
+		return -EINVAL;
 
 	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
 	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
 	netdev_queue_config(dev, rxq_idx, &qcfg[1]);
 
 	err = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1]);
-	WARN_ON(err && err != -ENETDOWN);
+	if (err)
+		rxq->mp_params = *old_p;
+
+	return err;
 }
 
-void netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
-			const struct pp_memory_provider_params *old_p)
+int netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
+		       const struct pp_memory_provider_params *old_p)
 {
+	int ret;
+
 	if (WARN_ON_ONCE(rxq_idx >= dev->real_num_rx_queues))
-		return;
+		return -ERANGE;
 	if (!netif_rxq_is_leased(dev, rxq_idx))
 		return __netif_mp_close_rxq(dev, rxq_idx, old_p);
 
 	if (!__netif_get_rx_queue_lease(&dev, &rxq_idx, NETIF_VIRT_TO_PHYS)) {
 		WARN_ON_ONCE(1);
-		return;
+		return -EINVAL;
 	}
 	netdev_lock(dev);
-	__netif_mp_close_rxq(dev, rxq_idx, old_p);
+	ret = __netif_mp_close_rxq(dev, rxq_idx, old_p);
 	netdev_unlock(dev);
+
+	return ret;
 }
 
 void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
@@ -361,6 +428,6 @@ void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq,
 	if (!p.mp_ops)
 		return;
 
-	__netif_mp_close_rxq(phys_rxq->dev, rxq_idx, &p);
+	WARN_ON_ONCE(__netif_mp_close_rxq(phys_rxq->dev, rxq_idx, &p));
 	__netif_mp_uninstall_rxq(virt_rxq, &p);
 }

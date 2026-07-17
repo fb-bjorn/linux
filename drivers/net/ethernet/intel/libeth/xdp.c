@@ -196,6 +196,7 @@ void libeth_xdp_load_stash(struct libeth_xdp_buff *dst,
 
 	dst->base.frame_sz = src->frame_sz;
 	dst->base.flags = src->flags;
+	dst->base.netmem = src->netmem;
 }
 EXPORT_SYMBOL_GPL(libeth_xdp_load_stash);
 
@@ -218,6 +219,7 @@ void libeth_xdp_save_stash(struct libeth_xdp_buff_stash *dst,
 
 	dst->frame_sz = src->base.frame_sz;
 	dst->flags = src->base.flags;
+	dst->netmem = src->base.netmem;
 
 	WARN_ON_ONCE(dst->flags != src->base.flags);
 }

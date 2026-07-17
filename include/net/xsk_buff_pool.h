@@ -8,9 +8,11 @@
 #include <linux/types.h>
 #include <linux/dma-mapping.h>
 #include <linux/bpf.h>
+#include <net/netmem.h>
 #include <net/xdp.h>
 
 struct xsk_buff_pool;
+struct xsk_pp;
 struct xdp_rxq_info;
 struct xsk_cb_desc;
 struct xsk_queue;
@@ -19,8 +21,16 @@ struct xdp_umem;
 struct xdp_sock;
 struct device;
 struct page;
+struct page_pool;
 
 #define XSK_PRIV_MAX 24
+
+struct xsk_pp_info {
+	struct net_iov_area area;
+	struct xsk_buff_pool *pool;
+	void *addrs;
+	u32 chunk_shift;
+};
 
 struct xdp_buff_xsk {
 	struct xdp_buff xdp;
@@ -52,7 +62,9 @@ struct xsk_buff_pool {
 	spinlock_t xsk_tx_list_lock;
 	refcount_t users;
 	struct xdp_umem *umem;
-	struct work_struct work;
+	struct xsk_pp *pp;
+	struct page_pool *page_pool;
+	struct delayed_work work;
 	/* Protects generic receive in shared and non-shared umem mode. */
 	spinlock_t rx_lock;
 	struct list_head free_list;
@@ -116,12 +128,34 @@ int xp_alloc_tx_descs(struct xsk_buff_pool *pool, struct xdp_sock *xs,
 void xp_destroy(struct xsk_buff_pool *pool);
 void xp_get_pool(struct xsk_buff_pool *pool);
 bool xp_put_pool(struct xsk_buff_pool *pool);
-void xp_clear_dev(struct xsk_buff_pool *pool);
+int xp_clear_dev(struct xsk_buff_pool *pool);
 void xp_add_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs);
 void xp_del_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs);
 
 /* AF_XDP, and XDP core. */
 void xp_free(struct xdp_buff_xsk *xskb);
+
+static inline bool xp_netmem_is_xsk(netmem_ref netmem)
+{
+	return netmem_is_net_iov(netmem) &&
+	       netmem_to_net_iov(netmem)->type == NET_IOV_XSK;
+}
+
+static inline struct xsk_pp_info *xp_netmem_to_pp(netmem_ref netmem)
+{
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+
+	return container_of(net_iov_owner(niov), struct xsk_pp_info, area);
+}
+
+static inline void *xp_netmem_get_frame(netmem_ref netmem)
+{
+	struct xsk_pp_info *provider = xp_netmem_to_pp(netmem);
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+
+	return provider->addrs +
+	       ((u64)net_iov_idx(niov) << provider->chunk_shift);
+}
 
 static inline void xp_init_xskb_addr(struct xdp_buff_xsk *xskb, struct xsk_buff_pool *pool,
 				     u64 addr)

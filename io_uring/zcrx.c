@@ -632,6 +632,7 @@ static void io_close_queue(struct io_zcrx_ifq *ifq)
 		.mp_ops = &io_uring_pp_zc_ops,
 		.mp_priv = ifq,
 	};
+	int rxq;
 
 	scoped_guard(mutex, &ifq->pp_lock) {
 		netdev = ifq->netdev;
@@ -641,8 +642,9 @@ static void io_close_queue(struct io_zcrx_ifq *ifq)
 
 	if (netdev) {
 		netdev_lock(netdev);
-		if (ifq->if_rxq != -1)
-			netif_mp_close_rxq(netdev, ifq->if_rxq, &p);
+		rxq = ifq->if_rxq;
+		if (rxq != -1)
+			WARN_ON_ONCE(netif_mp_close_rxq(netdev, rxq, &p));
 
 		scoped_guard(mutex, &ifq->pp_lock)
 			io_zcrx_unmap_areas(ifq);

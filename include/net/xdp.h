@@ -104,6 +104,7 @@ struct xdp_buff {
 		u64 frame_sz_flags_init;
 #endif
 	};
+	netmem_ref netmem;
 };
 
 static __always_inline bool xdp_buff_has_frags(const struct xdp_buff *xdp)
@@ -157,6 +158,7 @@ xdp_init_buff(struct xdp_buff *xdp, u32 frame_sz, struct xdp_rxq_info *rxq)
 	xdp->frame_sz = frame_sz;
 	xdp->flags = 0;
 #endif
+	xdp->netmem = 0;
 }
 
 static __always_inline void
@@ -169,6 +171,21 @@ xdp_prepare_buff(struct xdp_buff *xdp, unsigned char *hard_start,
 	xdp->data = data;
 	xdp->data_end = data + data_len;
 	xdp->data_meta = meta_valid ? data : data + 1;
+}
+
+static __always_inline void
+xdp_buff_set_netmem(struct xdp_buff *xdp, netmem_ref netmem)
+{
+	xdp->netmem = netmem;
+}
+
+static __always_inline netmem_ref
+xdp_buff_get_netmem(const struct xdp_buff *xdp)
+{
+	if (xdp->netmem)
+		return xdp->netmem;
+
+	return virt_to_netmem(xdp->data);
 }
 
 /* Reserve memory area at end-of data area.
@@ -394,6 +411,7 @@ void xdp_convert_frame_to_buff(const struct xdp_frame *frame,
 	xdp->data_meta = frame->data - frame->metasize;
 	xdp->frame_sz = frame->frame_sz;
 	xdp->flags = frame->flags;
+	xdp->netmem = 0;
 }
 
 static inline
@@ -431,7 +449,7 @@ struct xdp_frame *xdp_convert_buff_to_frame(struct xdp_buff *xdp)
 {
 	struct xdp_frame *xdp_frame;
 
-	if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL)
+	if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL || xdp->netmem)
 		return xdp_convert_zc_to_xdp_frame(xdp);
 
 	/* Store info in top of packet */

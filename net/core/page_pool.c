@@ -1339,17 +1339,35 @@ bool net_mp_niov_set_dma_addr(struct net_iov *niov, dma_addr_t addr)
 	return page_pool_set_dma_addr_netmem(net_iov_to_netmem(niov), addr);
 }
 
-/* Associate a niov with a page pool. Should follow with a matching
- * net_mp_niov_clear_page_pool()
+/* Associate a niov with a page pool. The association may be retained after
+ * net_mp_niov_release_page_pool() for reuse by the same pool.
  */
 void net_mp_niov_set_page_pool(struct page_pool *pool, struct net_iov *niov)
 {
 	netmem_ref netmem = net_iov_to_netmem(niov);
 
-	page_pool_set_pp_info(pool, netmem);
+	if (netmem_get_pp(netmem) != pool)
+		page_pool_set_pp_info(pool, netmem);
 
 	pool->pages_state_hold_cnt++;
 	trace_page_pool_state_hold(pool, netmem, pool->pages_state_hold_cnt);
+}
+
+/* Release page_pool ownership but retain the association for reuse. */
+void net_mp_niov_release_page_pool(struct net_iov *niov)
+{
+	struct page_pool *pool;
+	netmem_ref netmem;
+	int count;
+
+	netmem = net_iov_to_netmem(niov);
+	pool = netmem_get_pp(netmem);
+
+	if (WARN_ON_ONCE(!pool))
+		return;
+
+	count = atomic_inc_return_relaxed(&pool->pages_state_release_cnt);
+	trace_page_pool_state_release(pool, netmem, count);
 }
 
 /* Disassociate a niov from a page pool. Should only be used in the

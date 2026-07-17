@@ -110,10 +110,10 @@ struct libeth_xdpsq_timer {
  * @len: frame linear space length, xdp_buff.data_end - xdp_buff.data
  * @frame_sz: truesize occupied by the frame, xdp_buff.frame_sz
  * @flags: xdp_buff.flags
+ * @netmem: backing network memory, xdp_buff.netmem
  *
- * &xdp_buff is 56 bytes long on x64, &libeth_xdp_buff is 64 bytes. This
- * structure carries only necessary fields to save/restore a partially built
- * frame on the queue structure to finish it during the next NAPI poll.
+ * This structure carries only necessary fields to save/restore a partially
+ * built frame on the queue structure to finish it during the next NAPI poll.
  */
 struct libeth_xdp_buff_stash {
 	void				*data;
@@ -122,6 +122,7 @@ struct libeth_xdp_buff_stash {
 
 	u32				frame_sz:24;
 	u32				flags:8;
+	netmem_ref			netmem;
 } __aligned_largest;
 
 #endif /* __LIBETH_TYPES_H */

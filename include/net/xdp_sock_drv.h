@@ -6,8 +6,11 @@
 #ifndef _LINUX_XDP_SOCK_DRV_H
 #define _LINUX_XDP_SOCK_DRV_H
 
+#include <net/page_pool/memory_provider.h>
 #include <net/xdp_sock.h>
 #include <net/xsk_buff_pool.h>
+
+struct netlink_ext_ack;
 
 #define XDP_UMEM_MIN_CHUNK_SHIFT 11
 #define XDP_UMEM_MIN_CHUNK_SIZE (1 << XDP_UMEM_MIN_CHUNK_SHIFT)
@@ -28,6 +31,8 @@ void xsk_tx_completed(struct xsk_buff_pool *pool, u32 nb_entries);
 bool xsk_tx_peek_desc(struct xsk_buff_pool *pool, struct xdp_desc *desc);
 u32 xsk_tx_peek_release_desc_batch(struct xsk_buff_pool *pool, u32 max);
 void xsk_tx_release(struct xsk_buff_pool *pool);
+int xsk_pool_setup_page_pool(struct net_device *dev, struct xsk_buff_pool *pool,
+			     u16 queue_id, struct netlink_ext_ack *extack);
 struct xsk_buff_pool *xsk_get_pool_from_qid(struct net_device *dev,
 					    u16 queue_id);
 void xsk_set_rx_need_wakeup(struct xsk_buff_pool *pool);
@@ -236,6 +241,21 @@ static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *pool, u64 addr)
 	return xp_raw_get_data(pool, addr);
 }
 
+static inline bool xsk_buff_is_netmem(netmem_ref netmem)
+{
+	return xp_netmem_is_xsk(netmem);
+}
+
+static inline void *xsk_buff_netmem_get_frame(netmem_ref netmem)
+{
+	return xp_netmem_get_frame(netmem);
+}
+
+static inline void xsk_buff_netmem_release(netmem_ref netmem)
+{
+	net_mp_niov_release_page_pool(netmem_to_net_iov(netmem));
+}
+
 /**
  * xsk_buff_raw_get_ctx - get &xdp_desc context
  * @pool: XSk buff pool desc address belongs to
@@ -368,6 +388,14 @@ static inline u32 xsk_tx_peek_release_desc_batch(struct xsk_buff_pool *pool, u32
 
 static inline void xsk_tx_release(struct xsk_buff_pool *pool)
 {
+}
+
+static inline int xsk_pool_setup_page_pool(struct net_device *dev,
+					   struct xsk_buff_pool *pool,
+					   u16 queue_id,
+					   struct netlink_ext_ack *extack)
+{
+	return -EOPNOTSUPP;
 }
 
 static inline struct xsk_buff_pool *
@@ -510,6 +538,20 @@ static inline dma_addr_t xsk_buff_raw_get_dma(struct xsk_buff_pool *pool,
 static inline void *xsk_buff_raw_get_data(struct xsk_buff_pool *pool, u64 addr)
 {
 	return NULL;
+}
+
+static inline bool xsk_buff_is_netmem(netmem_ref netmem)
+{
+	return false;
+}
+
+static inline void *xsk_buff_netmem_get_frame(netmem_ref netmem)
+{
+	return NULL;
+}
+
+static inline void xsk_buff_netmem_release(netmem_ref netmem)
+{
 }
 
 static inline struct xdp_desc_ctx

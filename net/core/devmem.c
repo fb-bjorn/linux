@@ -125,6 +125,7 @@ void net_devmem_free_dmabuf(struct net_iov *niov)
 
 void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 {
+	struct net_device *dev = binding->dev;
 	struct netdev_rx_queue *rxq;
 	unsigned long xa_idx;
 	unsigned int rxq_idx;
@@ -147,7 +148,7 @@ void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 
 		rxq_idx = get_netdev_rx_queue_index(rxq);
 
-		netif_mp_close_rxq(binding->dev, rxq_idx, &mp_params);
+		WARN_ON_ONCE(netif_mp_close_rxq(dev, rxq_idx, &mp_params));
 	}
 
 	percpu_ref_kill(&binding->ref);
@@ -181,7 +182,7 @@ int net_devmem_bind_dmabuf_to_queue(struct net_device *dev, u32 rxq_idx,
 	return 0;
 
 err_close_rxq:
-	netif_mp_close_rxq(dev, rxq_idx, &mp_params);
+	WARN_ON_ONCE(netif_mp_close_rxq(dev, rxq_idx, &mp_params));
 	return err;
 }
 

@@ -257,6 +257,22 @@ err:
 	return err;
 }
 
+static int xsk_rcv_pp_zc(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
+{
+	netmem_ref netmem = xdp_buff_get_netmem(xdp);
+	int err;
+
+	err = xskq_prod_reserve_desc(xs->rx,
+				     xdp->data - xs->pool->addrs, len, 0);
+	if (err) {
+		xs->rx_queue_full++;
+		return err;
+	}
+
+	xsk_buff_netmem_release(netmem);
+	return 0;
+}
+
 static void *xsk_copy_xdp_start(struct xdp_buff *from)
 {
 	if (unlikely(xdp_data_meta_unsupported(from)))
@@ -486,6 +502,12 @@ static int xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 	if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL) {
 		len = xdp->data_end - xdp->data;
 		return xsk_rcv_zc(xs, xdp, len);
+	}
+	if (xdp->rxq->mem.type == MEM_TYPE_PAGE_POOL &&
+	    xs->pool->page_pool &&
+	    xdp->rxq->mem.id == xs->pool->page_pool->xdp_mem_id) {
+		len = xdp->data_end - xdp->data;
+		return xsk_rcv_pp_zc(xs, xdp, len);
 	}
 
 	err = __xsk_rcv(xs, xdp, len);
@@ -2140,7 +2162,7 @@ static int xsk_notifier(struct notifier_block *this,
 				xsk_unbind_dev(xs);
 
 				/* Clear device references. */
-				xp_clear_dev(xs->pool);
+				WARN_ON_ONCE(xp_clear_dev(xs->pool));
 			}
 			mutex_unlock(&xs->mutex);
 		}

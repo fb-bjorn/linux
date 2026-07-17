@@ -3,6 +3,7 @@
 #define _LINUX_NET_QUEUES_H
 
 #include <linux/netdevice.h>
+#include <net/page_pool/memory_provider.h>
 
 /**
  * struct netdev_config - queue-related configuration for a netdev
@@ -192,8 +193,12 @@ struct netdev_queue_mgmt_ops {
 void netdev_queue_config(struct net_device *dev, int rxq,
 			 struct netdev_queue_config *qcfg);
 
+bool netif_rxq_has_mp(struct net_device *dev, unsigned int rxq_idx);
+bool netif_rxq_mp_match(struct net_device *dev, unsigned int rxq_idx,
+			const void *mp_priv);
 bool netif_rxq_has_unreadable_mp(struct net_device *dev, unsigned int rxq_idx);
-bool netif_has_xdp_unsupported_mp(struct net_device *dev);
+bool netif_mp_unsupported(struct net_device *dev,
+			  enum memory_provider_cap capability);
 
 /**
  * DOC: Lockless queue stopping / waking helpers.
