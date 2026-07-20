@@ -91,6 +91,18 @@ static int idpf_dev_init(struct idpf_adapter *adapter,
 }
 
 /**
+ * idpf_decfg_device - deconfigure device and device specific resources
+ * @adapter: driver specific private structure
+ */
+static void idpf_decfg_device(struct idpf_adapter *adapter)
+{
+	struct pci_dev *pdev = adapter->pdev;
+
+	if (pcie_ptm_enabled(pdev))
+		pci_disable_ptm(pdev);
+}
+
+/**
  * idpf_remove - Device removal routine
  * @pdev: PCI device information struct
  */
@@ -159,6 +171,7 @@ destroy_wqs:
 	mutex_destroy(&adapter->queue_lock);
 	mutex_destroy(&adapter->vc_buf_lock);
 
+	idpf_decfg_device(adapter);
 	pci_set_drvdata(pdev, NULL);
 	kfree(adapter);
 }
