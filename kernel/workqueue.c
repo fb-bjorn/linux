@@ -1258,18 +1258,26 @@ static void kick_bh_pool(struct worker_pool *pool)
 }
 
 /**
- * kick_pool - wake up an idle worker if necessary
+ * kick_pool_pick - select an idle worker to kick, deferring the wakeup
  * @pool: pool to kick
+ * @wakep: out-param, set to the task to wake after pool->lock is dropped
  *
- * @pool may have pending work items. Wake up worker if necessary. Returns
- * whether a worker was woken up.
+ * Like kick_pool() but, for a regular (non-BH) pool, returns the picked
+ * worker's task via @wakep instead of waking it, so the caller can issue the
+ * wakeup after dropping pool->lock (the wakeup takes rq->lock). Worker
+ * selection, wake_cpu setup and the BH kick still happen under the lock.
+ * Returns whether a worker was selected or kicked.
+ *
+ * Must be called with @pool->lock held.
  */
-static bool kick_pool(struct worker_pool *pool)
+static bool kick_pool_pick(struct worker_pool *pool, struct task_struct **wakep)
 {
 	struct worker *worker = first_idle_worker(pool);
 	struct task_struct *p;
 
 	lockdep_assert_held(&pool->lock);
+
+	*wakep = NULL;
 
 	if (!need_more_worker(pool) || !worker)
 		return false;
@@ -1310,8 +1318,25 @@ static bool kick_pool(struct worker_pool *pool)
 		}
 	}
 #endif
-	wake_up_process(p);
+	*wakep = p;
 	return true;
+}
+
+/**
+ * kick_pool - wake up an idle worker if necessary
+ * @pool: pool to kick
+ *
+ * @pool may have pending work items. Wake up worker if necessary. Returns
+ * whether a worker was woken up.
+ */
+static bool kick_pool(struct worker_pool *pool)
+{
+	struct task_struct *p;
+	bool kicked = kick_pool_pick(pool, &p);
+
+	if (p)
+		wake_up_process(p);
+	return kicked;
 }
 
 #ifdef CONFIG_WQ_CPU_INTENSIVE_REPORT
@@ -2277,6 +2302,7 @@ static void __queue_work(int cpu, struct workqueue_struct *wq,
 {
 	struct pool_workqueue *pwq;
 	struct worker_pool *last_pool, *pool;
+	struct task_struct *wake_task = NULL;
 	unsigned int work_flags;
 	unsigned int req_cpu = cpu;
 
@@ -2391,7 +2417,7 @@ retry:
 
 		trace_workqueue_activate_work(work);
 		insert_work(pwq, work, &pool->worklist, work_flags);
-		kick_pool(pool);
+		kick_pool_pick(pool, &wake_task);
 	} else {
 		work_flags |= WORK_STRUCT_INACTIVE;
 		insert_work(pwq, work, &pwq->inactive_works, work_flags);
@@ -2399,6 +2425,8 @@ retry:
 
 out:
 	raw_spin_unlock(&pool->lock);
+	if (wake_task)
+		wake_up_process(wake_task);
 	rcu_read_unlock();
 }
 
@@ -3215,6 +3243,7 @@ __acquires(&pool->lock)
 {
 	struct pool_workqueue *pwq = get_work_pwq(work);
 	struct worker_pool *pool = worker->pool;
+	struct task_struct *wake_task = NULL;
 	unsigned long work_data;
 	int lockdep_start_depth, rcu_start_depth;
 	bool bh_draining = pool->flags & POOL_BH_DRAINING;
@@ -3268,8 +3297,11 @@ __acquires(&pool->lock)
 	 * since nr_running would always be >= 1 at this point. This is used to
 	 * chain execution of the pending work items for WORKER_NOT_RUNNING
 	 * workers such as the UNBOUND and CPU_INTENSIVE ones.
+	 *
+	 * Select the worker under pool->lock; the wakeup is deferred until
+	 * after the lock is dropped, guarded by the rcu_read_lock() below.
 	 */
-	kick_pool(pool);
+	kick_pool_pick(pool, &wake_task);
 
 	/*
 	 * Record the last pool and clear PENDING which should be the last
@@ -3280,7 +3312,12 @@ __acquires(&pool->lock)
 	set_work_pool_and_clear_pending(work, pool->id, pool_offq_flags(pool));
 
 	pwq->stats[PWQ_STAT_STARTED]++;
+
+	rcu_read_lock();
 	raw_spin_unlock_irq(&pool->lock);
+	if (wake_task)
+		wake_up_process(wake_task);
+	rcu_read_unlock();
 
 	rcu_start_depth = rcu_preempt_depth();
 	lockdep_start_depth = lockdep_depth(current);
@@ -7681,20 +7718,46 @@ module_param_named(panic_on_stall_time, wq_panic_on_stall_time, uint, 0644);
 MODULE_PARM_DESC(panic_on_stall_time, "Panic if stall exceeds this many seconds (0=disabled)");
 
 /*
- * Show workers that might prevent the processing of pending work items.
- * A busy worker that is not running on the CPU (e.g. sleeping in
- * wait_event_idle() with PF_WQ_WORKER cleared) can stall the pool just as
- * effectively as a CPU-bound one, so dump every in-flight worker.
+ * Report that a pool has no worker in running state, which is a sign that the
+ * pool may be stuck. Print pool info. Must be called with pool->lock held and
+ * inside a printk_deferred_enter/exit region.
+ */
+static void show_pool_no_running_worker(struct worker_pool *pool)
+{
+	lockdep_assert_held(&pool->lock);
+
+	printk_deferred_enter();
+	pr_info("pool %d: no worker in running state, cpu=%d is %s (nr_workers=%d nr_idle=%d)\n",
+		pool->id, pool->cpu,
+		idle_cpu(pool->cpu) ? "idle" : "busy",
+		pool->nr_workers, pool->nr_idle);
+	pr_info("The pool might have trouble waking an idle worker.\n");
+	printk_deferred_exit();
+}
+
+/*
+ * Show running workers that might prevent the processing of pending work items.
+ * If no running worker is found, the pool may be stuck waiting for an idle
+ * worker to be woken, so report the pool state.
  */
 static void show_cpu_pool_busy_workers(struct worker_pool *pool)
 {
+	bool found_running = false;
 	struct worker *worker;
 	unsigned long irq_flags;
-	int bkt;
+	int cpu, bkt;
 
 	raw_spin_lock_irqsave(&pool->lock, irq_flags);
 
+	/* Snapshot cpu inside the lock to safely use it after unlock. */
+	cpu = pool->cpu;
+
 	hash_for_each(pool->busy_hash, bkt, worker, hentry) {
+		/* Skip workers that are not actively running on the CPU. */
+		if (!task_is_running(worker->task))
+			continue;
+
+		found_running = true;
 		/*
 		 * Defer printing to avoid deadlocks in console
 		 * drivers that queue work while holding locks
@@ -7708,7 +7771,23 @@ static void show_cpu_pool_busy_workers(struct worker_pool *pool)
 		printk_deferred_exit();
 	}
 
+	/*
+	 * If no running worker was found, the pool is likely stuck. Print pool
+	 * state.
+	 */
+	if (!found_running)
+		show_pool_no_running_worker(pool);
+
 	raw_spin_unlock_irqrestore(&pool->lock, irq_flags);
+
+	/*
+	 * Trigger a backtrace on the stalled CPU to capture what it is
+	 * currently executing. Skip an offline CPU, whose NMI is never acked
+	 * and would make the backtrace busy-wait until it times out. Done
+	 * after releasing the lock to avoid issues with NMI delivery.
+	 */
+	if (!found_running && cpu_online(cpu))
+		trigger_single_cpu_backtrace(cpu);
 }
 
 static void show_cpu_pools_busy_workers(void)
