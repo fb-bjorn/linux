@@ -35,6 +35,23 @@ def klp():
     if arch != ARCH_X86_64 and arch != ARCH_AARCH64:
       fail("Only {} and {} is supported for klp. You have {}".format(ARCH_X86_64, ARCH_AARCH64, arch))
 
+    # Artifact-driven baseline (used by the in-build KLP canary): build a KLP
+    # against a specific kernel commit + its already-built RPMs instead of a
+    # published release tag. When these are unset, the classic tag + `kerctl
+    # download` path below is used unchanged.
+    #   baseline_everstore: @everstore:<handle> of the built kernel bundle; when
+    #                       set, baseline kernel RPMs come from it instead of
+    #                       `kerctl download <version>` (which needs a published
+    #                       kernel).
+    #   baseline_version:   short kernel version string for RPM/module naming;
+    #                       when set, replaces the from_tag-derived version.
+    #   hotfix_name:        hotfix label for naming; when set, replaces the
+    #                       `-hotfix<num>` extracted from to_tag (a raw commit
+    #                       has none).
+    baseline_everstore = native.read_config("klp", "baseline_everstore", None)
+    baseline_version = native.read_config("klp", "baseline_version", None)
+    hotfix_name = native.read_config("klp", "hotfix", None)
+
     # Generate targets for the commit being patched to. The commit *must* have a
     # tag that is suffixed with -hotfix<num>, regardless of whether the patch_to
     # option is specified by the user when invoking BUCK.
@@ -58,10 +75,14 @@ def klp():
     )
 
     # Extract the hotfix<num> portion of the tag. This will be stripped when
-    # generating the target for the from_tag.
+    # generating the target for the from_tag. When patching against a raw commit
+    # (no `-hotfix<num>` tag), the caller passes `klp.hotfix` explicitly.
+    hotfix_cmd = "cat $(location :to_tag) | sed -e 's|.*\\(hotfix[0-9]*\\).*|\\1|g' > $OUT"
+    if hotfix_name:
+      hotfix_cmd = "echo {} > $OUT".format(hotfix_name)
     native.genrule(
         name="hotfix",
-        cmd="cat $(location :to_tag) | sed -e 's|.*\\(hotfix[0-9]*\\).*|\\1|g' > $OUT" + notempty_cmd,
+        cmd=hotfix_cmd + notempty_cmd,
         out="hotfix",
         cacheable=False,
         labels = ["linux_kernel"],
@@ -99,17 +120,36 @@ def klp():
 
     # for download, we need to take in consideration the architecture.
     kerctl_download = "kerctl download --arch {} ".format(arch)
-    # download published rpms for baseline
+
+    # Baseline kernel RPMs: either copied out of a passed everstore bundle
+    # (artifact mode) or `kerctl download`ed by version (classic path).
+    if baseline_everstore:
+        # Extract the already-built kernel bundle once; the devel/bin genrules
+        # each pick their RPM out of it.
+        native.genrule(
+            name = "baseline-kernel-bundle",
+            cmd = "mkdir -p $OUT && cp `kerctl -v everstore --extract '{handle}'`/*.rpm $OUT/".format(handle = baseline_everstore),
+            out = "baseline-kernel-bundle",
+            cacheable = False,
+            labels = ["linux_kernel"],
+        )
+        devel_cmd = "mkdir -p $OUT && cp $(location :baseline-kernel-bundle)/kernel-devel-*.rpm $OUT/kernel-devel.rpm"
+        bin_cmd = "mkdir -p $OUT && cp $(location :baseline-kernel-bundle)/kernel-[0-9]*.rpm $OUT/kernel-bin.rpm"
+    else:
+        devel_cmd = "mkdir -p $OUT && " + kerctl_download + "--devel --out-dir $OUT `cat $(location :baseline-rpm-version)` && mv $OUT/*.rpm $OUT/kernel-devel.rpm"
+        bin_cmd = "mkdir -p $OUT && " + kerctl_download + "--kernel --out-dir $OUT `cat $(location :baseline-rpm-version)` && mv $OUT/*.rpm $OUT/kernel-bin.rpm"
+
+    # download published rpms for baseline (or copy from the everstore bundle)
     native.genrule(
         name="kernel-devel-klp",
-        cmd="mkdir -p $OUT && " + kerctl_download + "--devel --out-dir $OUT `cat $(location :baseline-rpm-version)` && mv $OUT/*.rpm $OUT/kernel-devel.rpm",
+        cmd=devel_cmd,
         out="kernel-devel-klp",
         cacheable=False,
         labels = ["linux_kernel"],
     )
     native.genrule(
         name="kernel-bin-klp",
-        cmd="mkdir -p $OUT && " + kerctl_download + "--kernel --out-dir $OUT `cat $(location :baseline-rpm-version)` && mv $OUT/*.rpm $OUT/kernel-bin.rpm",
+        cmd=bin_cmd,
         out="kernel-bin-klp",
         cacheable=False,
         labels = ["linux_kernel"],
@@ -131,10 +171,15 @@ def klp():
     ]
 
     #checkout baseline
+    # Clone then `checkout` (instead of `clone -b`) so from_tag/to_tag may be a
+    # raw commit SHA, not just a branch/tag ref. A local clone copies the full
+    # object store, so a commit that isn't on any branch (e.g. the synthesized
+    # dummy-KLP commit) is still checkout-able by SHA.
     native.genrule(
         name = "baseline-sources",
         cmd = """sudo rm -rf $OUT; mkdir -p $OUT
-            HOME=/dev/null git clone -b `cat $(location :from_tag)` `HOME=/dev/null git rev-parse --show-toplevel` $OUT
+            HOME=/dev/null git clone -n `HOME=/dev/null git rev-parse --show-toplevel` $OUT
+            HOME=/dev/null git -C $OUT checkout `cat $(location :from_tag)`
             pushd $OUT
             make mrproper
             popd
@@ -148,7 +193,8 @@ def klp():
     native.genrule(
         name = "target-sources",
         cmd = """sudo rm -rf $OUT; mkdir -p $OUT
-            HOME=/dev/null git clone -b `cat $(location :to_tag)` `HOME=/dev/null git rev-parse --show-toplevel` $OUT
+            HOME=/dev/null git clone -n `HOME=/dev/null git rev-parse --show-toplevel` $OUT
+            HOME=/dev/null git -C $OUT checkout `cat $(location :to_tag)`
             pushd $OUT
             make mrproper
             popd
@@ -165,9 +211,12 @@ def klp():
     flavor_ver = "_%s" % flavor if flavor else ""
     label_ver = "_%s" % label if label else ""
 
-    native.genrule(
-        name = "baseline-rpm-version",
-        cmd = """
+    # In artifact mode the caller passes the version directly (the base is a raw
+    # commit, so the from_tag fbk/rc parse below doesn't apply).
+    if baseline_version:
+        baseline_rpm_version_cmd = "echo '{}' > $OUT".format(baseline_version)
+    else:
+        baseline_rpm_version_cmd = """
             pushd $(location :baseline-sources)
             majorver=`make -s kernelversion EXTRAVERSION=`
             popd
@@ -177,7 +226,10 @@ def klp():
             flavor="%s"
             label="%s"
             echo "${majorver}-${rpm_n}_${fbkv}${flavor}${rc}${label}" > $OUT
-        """ % (flavor_ver, label_ver),
+        """ % (flavor_ver, label_ver)
+    native.genrule(
+        name = "baseline-rpm-version",
+        cmd = baseline_rpm_version_cmd,
         out = "baseline-rpm-version",
         labels = ["linux_kernel"],
     )
