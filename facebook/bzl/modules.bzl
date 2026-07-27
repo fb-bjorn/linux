@@ -4,6 +4,19 @@ load(":modules_list.bzl", MODULES="modules")
 # This file is concatenated with the modules coming from configerator
 # before being used
 
+def _is_remote_srpm_url(url):
+    if not url:
+        return False
+    return url.startswith("http") or url.startswith("manifold://")
+
+def _srpm_fetch_cmd(url):
+    # manifold://<bucket>/<path> is fetched with the manifold CLI; everything else
+    # (http/https) with curl. $OUT is the genrule output path.
+    if url.startswith("manifold://"):
+        return "manifold get {} $OUT".format(url[len("manifold://"):])
+    return "curl {} -o $OUT".format(url)
+
+
 def standalone_module():
     kernel_version = native.read_config("kernel", "version")
     arch = native.read_config("kernel", "arch", "x86_64")
@@ -13,7 +26,7 @@ def standalone_module():
     is_locally_defined_module = (native.read_config("kernel", "locally_defined_module", "false")
         .lower() in ["true", "1", "yes", "y", "on", "enable", "enabled"]) and name and module_srpm
     local_module_url = ""
-    if module_srpm and module_srpm.startswith("http"):
+    if _is_remote_srpm_url(module_srpm):
         local_module_url = module_srpm
         module_srpm = None
 
@@ -77,13 +90,13 @@ def standalone_module():
 
 
 def module(name, arch, module, kernel_devel, uname=None, dependencies=None, local_srpm=None):
-    if not module.url.startswith("http") and not local_srpm:
+    if not _is_remote_srpm_url(module.url) and not local_srpm:
         local_srpm = module.url
 
     if not local_srpm:
         native.genrule(
             name="{}.src.rpm".format(name),
-            cmd="curl {} -o $OUT".format(module.url),
+            cmd=_srpm_fetch_cmd(module.url),
             out="{}.src.rpm".format(name),
             labels=[
                 "linux_kernel",
