@@ -68,6 +68,7 @@ ARCH_FLAVORS = {
         "cvmhost",
         "debug",
         "debugnightly",
+        "dpu",
         "kdump",
     ],
 }
