@@ -4365,6 +4365,33 @@ void __cold close_ctree(struct btrfs_fs_info *fs_info)
 	btrfs_cleanup_defrag_inodes(fs_info);
 
 	/*
+	 * Before the unmount, we sync down all the writeback which can
+	 * generate fixup work. We are about to run delalloc for autodefrag so
+	 * piggy back on that by also flushing the fixup work which can also
+	 * generate delalloc we would like to get run.
+	 *
+	 * After this, it is still possible that some thread doing writeback is
+	 * in btrfs_queue_writepage_fixup() and might finish queueing some final
+	 * work, racing the btrfs_fs_closing() check there.
+	 */
+	flush_workqueue(fs_info->fixup_workers);
+
+	/*
+	 * After we entered close_ctree() autodefrag could be running and before
+	 * we parked the cleaner kthread, it dirtied folios of some inode.
+	 * We don't want to leave any delalloc here, it may be flushed any time
+	 * after this point and result in ordered extents that create delayed
+	 * iputs after flushed the ordered extent queues further below, run
+	 * delayed iputs and set BTRFS_FS_STATE_NO_DELAYED_IPUT. If we are
+	 * mounted with flushoncommit, then btrfs_commit_super() called below
+	 * will flush delalloc and wait for ordered extents but we end up
+	 * getting delayed iputs than are never run. So flush delalloc and wait
+	 * for ordered extents.
+	 */
+	btrfs_start_delalloc_roots(fs_info, LONG_MAX, false);
+	btrfs_wait_ordered_roots(fs_info, U64_MAX, NULL);
+
+	/*
 	 * Handle the error fs first, as it will flush and wait for all ordered
 	 * extents.  This will generate delayed iputs, thus we want to handle
 	 * it first.
@@ -4440,6 +4467,15 @@ void __cold close_ctree(struct btrfs_fs_info *fs_info)
 	cancel_work_sync(&fs_info->async_data_reclaim_work);
 	cancel_work_sync(&fs_info->preempt_reclaim_work);
 	cancel_work_sync(&fs_info->em_shrinker_work);
+
+	/*
+	 * Reclaim workers can run writeback which can queue fixup.
+	 * After the above cancel_work_sync() calls, any such queueing attempts are
+	 * guaranteed to see btrfs_fs_closing(), so at this point we can genuinely fully
+	 * flush the fixup workqueue. This relies on the belief that *now* no thread can
+	 * still be sitting in btrfs_queue_writepage_fixup().
+	 */
+	flush_workqueue(fs_info->fixup_workers);
 
 	/*
 	 * Run delayed iputs again because an async reclaim worker may have
