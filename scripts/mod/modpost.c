@@ -765,6 +765,7 @@ static const char *const section_white_list[] =
 	".gnu.lto*",
 	".discard.*",
 	".llvm.call-graph-profile",	/* call graph */
+	".klp.symid",			/* objtool --klp-symids */
 	NULL
 };
 
