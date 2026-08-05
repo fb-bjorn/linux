@@ -729,7 +729,8 @@ static struct btrfs_root *create_reloc_root(struct btrfs_trans_handle *trans,
 
 	reloc_root = btrfs_read_tree_root(fs_info->tree_root, &root_key);
 	if (IS_ERR(reloc_root)) {
-		btrfs_abort_transaction(trans, PTR_ERR(reloc_root));
+		ret = PTR_ERR(reloc_root);
+		btrfs_abort_transaction(trans, ret);
 		return ERR_CAST(reloc_root);
 	}
 	set_bit(BTRFS_ROOT_SHAREABLE, &reloc_root->state);
