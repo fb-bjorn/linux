@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# Regenerate (or --check) the materialized per-flavor kernel .config files under
+# facebook/config/materialized/.
+#
+# Each materialized config is the FINAL config the kernel build consumes. It is
+# produced with the build container's toolchain so it matches what the kernel is
+# actually built with: merge the common/arch/flavor fragments, then
+# `make LLVM=1 alldefconfig` inside the build container (see
+# facebook/bzl/config.bzl). Do NOT hand-edit the materialized files: edit the
+# fragments in facebook/config/*.config, run this script, and commit both.
+#
+# Usage:
+#   facebook/scripts/materializeconfigs           # regenerate + write into the tree
+#   facebook/scripts/materializeconfigs --check    # fail if any committed file is stale
+set -uo pipefail
+
+check=0
+[ "${1:-}" = "--check" ] && check=1
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+outdir="facebook/config/materialized"
+
+if ! built="$(buck2 build $(facebook/build/buck-config) \
+        //facebook/config:generate-all --show-output)"; then
+  echo "ERROR: buck2 build of //facebook/config:generate-all failed" >&2
+  exit 1
+fi
+
+src="$(printf '%s\n' "${built}" | awk '/:generate-all /{print $NF}' | tail -1)"
+if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+  echo "ERROR: could not locate the generate-all output (got: '${src:-}')" >&2
+  exit 1
+fi
+
+if [ "${check}" = 1 ]; then
+  if diff -ru "${outdir}" "${src}"; then
+    exit 0
+  fi
+  echo
+  echo "ERROR: materialized configs are out of date. Regenerate with:"
+  echo "    facebook/scripts/materializeconfigs"
+  echo "and commit the updated ${outdir}/*.config files."
+  exit 1
+fi
+
+mkdir -p "${outdir}"
+cp "${src}"/*.config "${outdir}/"
+echo "wrote $(ls "${src}"/*.config | wc -l) configs to ${outdir}/"
