@@ -26,6 +26,8 @@ make mrproper
     out = "kernel",
     labels = ["uses_local_filesystem_abspaths", "uses_make", "linux_kernel"],
     within_view = None,
+    # Materializing configs also mount the source tree
+    visibility = ["//facebook/config/..."],
 )
 
 [
