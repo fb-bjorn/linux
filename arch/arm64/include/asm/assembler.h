@@ -404,13 +404,13 @@ alternative_else_nop_endif
 	add	\start, \start, \linesz
 	cmp	\start, \end
 	b.lo	.Ldcache_op\@
-alternative_if ARM64_WORKAROUND_4311569
 	.ifnc	\op, cvau
+alternative_if ARM64_WORKAROUND_4311569
 	mov	\start, \tmp
 	mov	\tmp, xzr
 	cbnz	\start, .Ldcache_op\@
-	.endif
 alternative_else_nop_endif
+	.endif
 
 	_cond_uaccess_extable .Ldcache_op\@, \fixup
 	.endm
