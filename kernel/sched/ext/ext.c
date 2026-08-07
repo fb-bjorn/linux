@@ -2922,7 +2922,7 @@ retry:
 
 	BUG_ON(!(p->scx.flags & SCX_TASK_QUEUED));
 
-	dsq = find_dsq_for_dispatch(sch, this_rq(), dsq_id, task_cpu(p));
+	dsq = find_dsq_for_dispatch(sch, rq, dsq_id, task_cpu(p));
 
 	if (dsq->id == SCX_DSQ_LOCAL)
 		dispatch_to_local_dsq(sch, rq, dsq, p, slice, vtime, enq_flags);
@@ -8901,9 +8901,8 @@ static bool scx_dsq_move(struct bpf_iter_scx_dsq_kern *kit,
 {
 	struct scx_dispatch_q *src_dsq = kit->dsq, *dst_dsq;
 	struct scx_sched *sch;
-	struct rq *this_rq, *src_rq, *locked_rq;
+	struct rq *p_rq, *src_rq, *locked_rq;
 	bool dispatched = false;
-	bool in_balance;
 	unsigned long flags;
 
 	/*
@@ -8937,24 +8936,28 @@ static bool scx_dsq_move(struct bpf_iter_scx_dsq_kern *kit,
 	}
 
 	/*
-	 * Can be called from either ops.dispatch() locking this_rq() or any
-	 * context where no rq lock is held. If latter, lock @p's task_rq which
-	 * we'll likely need anyway.
+	 * Can be called from either ops.dispatch() holding the dispatched rq's
+	 * lock or any context where no rq lock is held. If latter, lock @p's
+	 * task_rq which we'll likely need anyway.
 	 */
 	src_rq = task_rq(p);
 
 	local_irq_save(flags);
-	this_rq = this_rq();
-	in_balance = this_rq->scx.flags & SCX_RQ_IN_BALANCE;
 
-	if (in_balance) {
-		if (this_rq != src_rq)
-			switch_rq_lock(this_rq, src_rq);
+	/*
+	 * Under core scheduling, dispatch can run for a sibling rq, so the
+	 * locked rq is not necessarily this CPU's.
+	 */
+	locked_rq = scx_locked_rq();
+
+	if (locked_rq) {
+		if (locked_rq != src_rq)
+			switch_rq_lock(locked_rq, src_rq);
 	} else {
 		raw_spin_rq_lock(src_rq);
 	}
 
-	locked_rq = src_rq;
+	p_rq = src_rq;
 	raw_spin_lock(&src_dsq->lock);
 
 	/* did someone else get to it while we dropped the locks? */
@@ -8964,7 +8967,7 @@ static bool scx_dsq_move(struct bpf_iter_scx_dsq_kern *kit,
 	}
 
 	/* @p is still on $src_dsq and stable, determine the destination */
-	dst_dsq = find_dsq_for_dispatch(sch, this_rq, dsq_id, task_cpu(p));
+	dst_dsq = find_dsq_for_dispatch(sch, locked_rq ?: this_rq(), dsq_id, task_cpu(p));
 
 	/*
 	 * Apply vtime and slice updates before moving. @p is still on $src_dsq
@@ -8977,14 +8980,14 @@ static bool scx_dsq_move(struct bpf_iter_scx_dsq_kern *kit,
 		scx_set_task_slice(p, kit->slice);
 
 	/* execute move */
-	locked_rq = move_task_between_dsqs(sch, p, enq_flags, src_dsq, dst_dsq);
+	p_rq = move_task_between_dsqs(sch, p, enq_flags, src_dsq, dst_dsq);
 	dispatched = true;
 out:
-	if (in_balance) {
-		if (this_rq != locked_rq)
-			switch_rq_lock(locked_rq, this_rq);
+	if (locked_rq) {
+		if (locked_rq != p_rq)
+			switch_rq_lock(p_rq, locked_rq);
 	} else {
-		raw_spin_rq_unlock_irqrestore(locked_rq, flags);
+		raw_spin_rq_unlock_irqrestore(p_rq, flags);
 	}
 
 	kit->cursor.flags &= ~(__SCX_DSQ_ITER_HAS_SLICE |
@@ -9555,6 +9558,10 @@ __bpf_kfunc void scx_bpf_kick_cid(s32 cid, u64 flags, const struct bpf_prog_aux 
  *
  * Return the number of tasks in the DSQ matching @dsq_id. If not found,
  * -%ENOENT is returned.
+ *
+ * %SCX_DSQ_LOCAL resolves to the local DSQ of the rq the current scheduler
+ * operation is locked to - e.g. the rq being dispatched for in ops.dispatch() -
+ * or the calling CPU's when no rq is locked.
  */
 __bpf_kfunc s32 scx_bpf_dsq_nr_queued(u64 dsq_id, const struct bpf_prog_aux *aux)
 {
@@ -9571,7 +9578,7 @@ __bpf_kfunc s32 scx_bpf_dsq_nr_queued(u64 dsq_id, const struct bpf_prog_aux *aux
 	}
 
 	if (dsq_id == SCX_DSQ_LOCAL) {
-		ret = READ_ONCE(this_rq()->scx.local_dsq.nr);
+		ret = READ_ONCE((scx_locked_rq() ?: this_rq())->scx.local_dsq.nr);
 		goto out;
 	} else if ((dsq_id & SCX_DSQ_LOCAL_ON) == SCX_DSQ_LOCAL_ON) {
 		s32 cpu = scx_cpu_ret(sch, dsq_id & SCX_DSQ_LOCAL_CPU_MASK);
@@ -9750,10 +9757,15 @@ __bpf_kfunc struct task_struct *scx_bpf_dsq_peek(u64 dsq_id,
  * - User DSQs
  *
  * Re-enqueues are performed asynchronously. Can be called from anywhere.
+ *
+ * %SCX_DSQ_LOCAL resolves to the local DSQ of the rq the current scheduler
+ * operation is locked to - e.g. the rq being dispatched for in ops.dispatch() -
+ * or the calling CPU's when no rq is locked.
  */
 __bpf_kfunc void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags,
 				   const struct bpf_prog_aux *aux)
 {
+	struct rq *locked_rq = scx_locked_rq();
 	struct scx_sched *sch;
 	struct scx_dispatch_q *dsq;
 
@@ -9772,8 +9784,8 @@ __bpf_kfunc void scx_bpf_dsq_reenq(u64 dsq_id, u64 reenq_flags,
 	if (!(reenq_flags & __SCX_REENQ_FILTER_MASK))
 		reenq_flags |= SCX_REENQ_ANY;
 
-	dsq = find_dsq_for_dispatch(sch, this_rq(), dsq_id, smp_processor_id());
-	schedule_dsq_reenq(sch, dsq, reenq_flags, scx_locked_rq());
+	dsq = find_dsq_for_dispatch(sch, locked_rq ?: this_rq(), dsq_id, smp_processor_id());
+	schedule_dsq_reenq(sch, dsq, reenq_flags, locked_rq);
 }
 
 /**
