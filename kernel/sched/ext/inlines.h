@@ -18,6 +18,7 @@ enum scx_dsp_verdict {
 	SCX_DSP_NONE,		/* nothing to run */
 	SCX_DSP_LOCAL,		/* local DSQ has tasks */
 	SCX_DSP_PREV,		/* keep running @prev */
+	SCX_DSP_RETRY,		/* pick helpers only: restart the pick */
 };
 
 /*
