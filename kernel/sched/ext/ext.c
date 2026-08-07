@@ -2960,14 +2960,14 @@ static inline void maybe_queue_balance_callback(struct rq *rq)
 	rq->scx.flags &= ~SCX_RQ_BAL_CB_PENDING;
 }
 
-static int balance_one(struct rq *rq, struct task_struct *prev)
+static enum scx_dsp_verdict balance_one(struct rq *rq, struct task_struct *prev)
 {
 	struct scx_sched *sch = scx_root_protected_live();
+	enum scx_dsp_verdict verdict;
 	s32 cpu = cpu_of(rq);
 
 	lockdep_assert_rq_held(rq);
 	rq->scx.flags |= SCX_RQ_IN_BALANCE;
-	rq->scx.flags &= ~SCX_RQ_BAL_KEEP;
 
 	scx_process_sync_ecaps(rq, prev);
 
@@ -2999,16 +2999,19 @@ static int balance_one(struct rq *rq, struct task_struct *prev)
 		 */
 		if ((prev->scx.flags & SCX_TASK_QUEUED) && prev->scx.slice &&
 		    !scx_bypassing(sch, cpu)) {
-			rq->scx.flags |= SCX_RQ_BAL_KEEP;
+			verdict = SCX_DSP_PREV;
 			goto has_tasks;
 		}
 	}
 
 	/* if there already are tasks to run, nothing to do */
-	if (rq->scx.local_dsq.nr)
+	if (rq->scx.local_dsq.nr) {
+		verdict = SCX_DSP_LOCAL;
 		goto has_tasks;
+	}
 
-	if (scx_dispatch_sched(sch, rq, prev, false))
+	verdict = scx_dispatch_sched(sch, rq, prev, false);
+	if (verdict != SCX_DSP_NONE)
 		goto has_tasks;
 
 	/*
@@ -3018,12 +3021,12 @@ static int balance_one(struct rq *rq, struct task_struct *prev)
 	if ((prev->scx.flags & SCX_TASK_QUEUED) &&
 	    (!(sch->ops.flags & SCX_OPS_ENQ_LAST) || scx_bypassing(sch, cpu)) &&
 	    scx_task_can_stay_on_cpu(rq, prev)) {
-		rq->scx.flags |= SCX_RQ_BAL_KEEP;
 		__scx_add_event(sch, SCX_EV_DISPATCH_KEEP_LAST, 1);
+		verdict = SCX_DSP_PREV;
 		goto has_tasks;
 	}
 	rq->scx.flags &= ~SCX_RQ_IN_BALANCE;
-	return false;
+	return SCX_DSP_NONE;
 
 has_tasks:
 	/*
@@ -3040,7 +3043,7 @@ has_tasks:
 		scx_schedule_reenq_local(rq, 0);
 
 	rq->scx.flags &= ~SCX_RQ_IN_BALANCE;
-	return true;
+	return verdict;
 }
 
 static void set_next_task_scx(struct rq *rq, struct task_struct *p, bool first)
@@ -3296,27 +3299,23 @@ static struct task_struct *first_local_task(struct rq *rq)
 					struct task_struct, scx.dsq_list.node);
 }
 
-static struct task_struct *
-do_pick_task_scx(struct rq *rq, struct rq_flags *rf, bool force_scx)
+/*
+ * Run dispatch and queue the follow-up work for a pick.
+ */
+static enum scx_dsp_verdict dispatch_pick(struct rq *rq, struct rq_flags *rf,
+					  struct task_struct *prev)
 {
-	struct task_struct *prev = rq->curr;
-	bool keep_prev;
-	struct task_struct *p;
-
-	/* see kick_sync_wait_bal_cb() */
-	smp_store_release(&rq->scx.kick_sync, rq->scx.kick_sync + 1);
-
-	rq_modified_begin(rq, &ext_sched_class);
+	enum scx_dsp_verdict verdict;
 
 	rq_unpin_lock(rq, rf);
-	balance_one(rq, prev);
+	verdict = balance_one(rq, prev);
 	rq_repin_lock(rq, rf);
 	maybe_queue_balance_callback(rq);
 
 	/*
-	 * Defer to a balance callback which can drop rq lock and enable
-	 * IRQs. Waiting directly in the pick path would deadlock against
-	 * CPUs sending us IPIs (e.g. TLB flushes) while we wait for them.
+	 * Defer to a balance callback which can drop rq lock and enable IRQs.
+	 * Waiting directly in the pick path would deadlock against CPUs sending
+	 * us IPIs (e.g. TLB flushes) while we wait for them.
 	 */
 	if (unlikely(rq->scx.kick_sync_pending)) {
 		rq->scx.kick_sync_pending = false;
@@ -3324,10 +3323,32 @@ do_pick_task_scx(struct rq *rq, struct rq_flags *rf, bool force_scx)
 				       kick_sync_wait_bal_cb);
 	}
 
+	if (unlikely(verdict == SCX_DSP_PREV && prev->sched_class != &ext_sched_class)) {
+		WARN_ON_ONCE(scx_enable_state() == SCX_ENABLED);
+		verdict = SCX_DSP_LOCAL;
+	}
+
+	return verdict;
+}
+
+static struct task_struct *
+do_pick_task_scx(struct rq *rq, struct rq_flags *rf, bool force_scx)
+{
+	struct task_struct *prev = rq->curr;
+	enum scx_dsp_verdict verdict;
+	struct task_struct *p;
+
+	/* see kick_sync_wait_bal_cb() */
+	smp_store_release(&rq->scx.kick_sync, rq->scx.kick_sync + 1);
+
+	rq_modified_begin(rq, &ext_sched_class);
+
+	verdict = dispatch_pick(rq, rf, prev);
+
 	/*
-	 * If any higher-priority sched class enqueued a runnable task on
-	 * this rq during balance_one(), abort and return RETRY_TASK, so
-	 * that the scheduler loop can restart.
+	 * If any higher-priority sched class enqueued a runnable task on this
+	 * rq during balance_one(), abort and return RETRY_TASK, so that the
+	 * scheduler loop can restart.
 	 *
 	 * If @force_scx is true, always try to pick a SCHED_EXT task,
 	 * regardless of any higher-priority sched classes activity.
@@ -3335,19 +3356,12 @@ do_pick_task_scx(struct rq *rq, struct rq_flags *rf, bool force_scx)
 	if (!force_scx && rq_modified_above(rq, &ext_sched_class))
 		return RETRY_TASK;
 
-	keep_prev = rq->scx.flags & SCX_RQ_BAL_KEEP;
-	if (unlikely(keep_prev &&
-		     prev->sched_class != &ext_sched_class)) {
-		WARN_ON_ONCE(scx_enable_state() == SCX_ENABLED);
-		keep_prev = false;
-	}
-
 	/*
 	 * If balance_one() is telling us to keep running @prev, replenish slice
 	 * if necessary and keep running @prev. Otherwise, pop the first one
 	 * from the local DSQ.
 	 */
-	if (keep_prev) {
+	if (verdict == SCX_DSP_PREV) {
 		p = prev;
 		if (!p->scx.slice) {
 			/* the slice is consumed, protection ends */
@@ -5962,7 +5976,7 @@ static void unbypass_renotify_idle(struct rq *rq, struct scx_sched *pos,
  *
  * - ops.dispatch() is ignored.
  *
- * - balance_one() does not set %SCX_RQ_BAL_KEEP on non-zero slice as slice
+ * - balance_one() does not report %SCX_DSP_PREV on non-zero slice as slice
  *   can't be trusted. Whenever a tick triggers, the running task is rotated to
  *   the tail of the queue with core_sched_at touched.
  *

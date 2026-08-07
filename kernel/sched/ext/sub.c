@@ -2249,8 +2249,8 @@ __bpf_kfunc bool scx_bpf_sub_dispatch(u64 cgroup_id, const struct bpf_prog_aux *
 	if (scx_missing_caps(child, cpu_of(this_rq), SCX_CAP_BASE))
 		return false;
 
-	return scx_dispatch_sched(child, this_rq, this_rq->scx.sub_dispatch_prev,
-				  true);
+	return scx_dispatch_sched(child, this_rq, this_rq->scx.sub_dispatch_prev, true) !=
+		SCX_DSP_NONE;
 }
 
 /* Validate common inputs. On success, *parent_out and *child_out are set. */
