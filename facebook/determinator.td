@@ -16,6 +16,17 @@ GLOBAL_PREFIX="schedule-build"
 SLP_PROVIDER_ID = "257456667334183"  # kernel_root
 BPF_SELFTESTS_ARCH = "x86_64" # for now the only suported arch for bpf selftests
 
+# Suites to run on the combined selftests kernel, and the one architecture they
+# have been validated on: 15 runs across v7.1-fb, v6.16-fb and v6.13-fb, all
+# x86_64. Other arches keep the previous behaviour of building a selftests
+# kernel and running nothing, rather than being switched on untested.
+SELFTESTS_ARCH = "x86_64"
+SELFTEST_SUITES = ["cgroup", "cachestat"]
+
+# Values of the deprecated `selftests` flag that mean "not set". Mirrors
+# NO_SELFTESTS in the workflow's flags.sky, which cannot be loaded from here.
+NO_SELFTESTS = ["none", "", False, None]
+
 # This is a copy-paste from https://www.internalfb.com/code/fbsource/tools/utd/migrated_nbtd_jobs/extensions/skycastle.td.bzl
 # I don't have a good understanding of what's going on here, but I assume we can use these values as a safe defaults
 def _gen_slp_integration_spec(user_input):
@@ -34,6 +45,7 @@ def _skycastle_impl(
     arch,
     build_only = False,
     selftests = "none",
+    selftest_suites = None,
     flavor = None,
     continuous = False,
     affected_files = None,
@@ -45,6 +57,20 @@ def _skycastle_impl(
         "notify": False,
         "authenticated-build": continuous,
     }
+
+    # The two selftest flags are mutually exclusive. The workflow enforces that
+    # too, but only once the build is running -- catching it here fails the
+    # determinator instead, before a workflow is created.
+    if selftest_suites:
+        if selftests not in NO_SELFTESTS:
+            fail(
+                "Pass selftest_suites or the deprecated selftests flag, not both (got {} and {}) for {}".format(
+                    repr(selftests),
+                    repr(selftest_suites),
+                    alias,
+                )
+            )
+        args["selftest_suites"] = selftest_suites
 
     if flavor:
         args["flavor"] = flavor
@@ -118,7 +144,8 @@ def _skycastle_impl(
                     "run_context": source.run_context(),
                     "user_input": source.user_input(),
                     "arch": arch,
-                    "selftests": "all",
+                    "selftests": "none" if arch == SELFTESTS_ARCH else "all",
+                    "selftest_suites": SELFTEST_SUITES if arch == SELFTESTS_ARCH else None,
                     "affected_files": source.affected_files(),
                 },
             )
