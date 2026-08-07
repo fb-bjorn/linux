@@ -413,12 +413,27 @@ static bool rq_is_open(struct rq *rq, u64 enq_flags)
  */
 DEFINE_PER_CPU(struct rq *, scx_locked_rq_state);
 
+/*
+ * Under core scheduling, a pick that releases the rq lock invalidates the
+ * core-wide selection it is part of. Count the releases so that the core-sched
+ * pick can tell whether one happened across dispatch.
+ */
+static void scx_rq_lock_drop(struct rq *rq)
+{
+	lockdep_assert_rq_held(rq);
+#ifdef CONFIG_SCHED_CORE
+	if (sched_core_enabled(rq))
+		rq->scx.lock_drop_seq++;
+#endif
+}
+
 static void switch_rq_lock(struct rq *from, struct rq *to)
 {
 	bool tracked = scx_locked_rq() == from;
 
 	if (tracked)
 		update_locked_rq(NULL);
+	scx_rq_lock_drop(from);
 	raw_spin_rq_unlock(from);
 	raw_spin_rq_lock(to);
 	if (tracked)
@@ -987,6 +1002,7 @@ static void deferred_irq_workfn(struct irq_work *irq_work)
 
 	raw_spin_rq_lock(rq);
 	run_deferred(rq);
+	scx_rq_lock_drop(rq);
 	raw_spin_rq_unlock(rq);
 }
 
@@ -3280,6 +3296,7 @@ retry:
 			continue;
 		}
 
+		scx_rq_lock_drop(rq);
 		raw_spin_rq_unlock_irq(rq);
 		while (READ_ONCE(cpu_rq(cpu)->scx.kick_sync) == ksyncs[cpu]) {
 			smp_store_release(&rq->scx.kick_sync, rq->scx.kick_sync + 1);
@@ -4471,8 +4488,10 @@ static void reenq_user(struct rq *rq, struct scx_dispatch_q *dsq, u64 reenq_flag
 		task_rq = task_rq(p);
 
 		if (locked_rq != task_rq) {
-			if (locked_rq)
+			if (locked_rq) {
+				scx_rq_lock_drop(locked_rq);
 				raw_spin_rq_unlock(locked_rq);
+			}
 			if (unlikely(!raw_spin_rq_trylock(task_rq))) {
 				raw_spin_unlock(&dsq->lock);
 				raw_spin_rq_lock(task_rq);
@@ -4498,6 +4517,7 @@ static void reenq_user(struct rq *rq, struct scx_dispatch_q *dsq, u64 reenq_flag
 		p->scx.flags &= ~SCX_TASK_REENQ_REASON_MASK;
 
 		if (!(++nr_enqueued % SCX_TASK_ITER_BATCH)) {
+			scx_rq_lock_drop(locked_rq);
 			raw_spin_rq_unlock(locked_rq);
 			locked_rq = NULL;
 			cpu_relax();
@@ -4510,8 +4530,10 @@ static void reenq_user(struct rq *rq, struct scx_dispatch_q *dsq, u64 reenq_flag
 	raw_spin_unlock(&dsq->lock);
 
 	if (locked_rq != rq) {
-		if (locked_rq)
+		if (locked_rq) {
+			scx_rq_lock_drop(locked_rq);
 			raw_spin_rq_unlock(locked_rq);
+		}
 		raw_spin_rq_lock(rq);
 	}
 }
@@ -5721,6 +5743,7 @@ resume:
 		if (!(nr_balanced % SCX_BYPASS_LB_BATCH) && n) {
 			list_move_tail(&cursor.node, &n->scx.dsq_list.node);
 			raw_spin_unlock(&donor_dsq->lock);
+			scx_rq_lock_drop(donor_rq);
 			raw_spin_rq_unlock_irq(donor_rq);
 			cpu_relax();
 			raw_spin_rq_lock_irq(donor_rq);
@@ -5731,6 +5754,7 @@ resume:
 
 	list_del_init(&cursor.node);
 	raw_spin_unlock(&donor_dsq->lock);
+	scx_rq_lock_drop(donor_rq);
 	raw_spin_rq_unlock_irq(donor_rq);
 
 	return nr_balanced;
@@ -6059,6 +6083,7 @@ void scx_bypass(struct scx_sched *sch, bool bypass)
 		 * sees scx_bypassing() before moving tasks to SCX.
 		 */
 		if (!scx_enabled()) {
+			scx_rq_lock_drop(rq);
 			raw_spin_rq_unlock(rq);
 			continue;
 		}
@@ -6092,6 +6117,7 @@ void scx_bypass(struct scx_sched *sch, bool bypass)
 		if (cpu_online(cpu) || cpu == smp_processor_id())
 			resched_curr(rq);
 
+		scx_rq_lock_drop(rq);
 		raw_spin_rq_unlock(rq);
 	}
 
@@ -8426,6 +8452,7 @@ static bool kick_one_cpu(s32 cpu, struct scx_sched_pcpu *pcpu, struct rq *this_r
 		cpumask_clear_cpu(cpu, pcpu->cpus_to_wait);
 	}
 
+	scx_rq_lock_drop(rq);
 	raw_spin_rq_unlock_irqrestore(rq, flags);
 
 	return should_wait;
@@ -8448,6 +8475,7 @@ static void kick_one_cpu_if_idle(s32 cpu, struct scx_sched_pcpu *pcpu,
 			__scx_add_event(pcpu->sch, SCX_EV_SUB_KICK_DENIED, 1);
 	}
 
+	scx_rq_lock_drop(rq);
 	raw_spin_rq_unlock_irqrestore(rq, flags);
 }
 
@@ -8495,6 +8523,7 @@ static void kick_cpus_irq_workfn(struct irq_work *irq_work)
 		raw_spin_rq_lock(this_rq);
 		this_scx->kick_sync_pending = true;
 		resched_curr(this_rq);
+		scx_rq_lock_drop(this_rq);
 		raw_spin_rq_unlock(this_rq);
 	}
 }
@@ -8987,6 +9016,7 @@ out:
 		if (locked_rq != p_rq)
 			switch_rq_lock(p_rq, locked_rq);
 	} else {
+		scx_rq_lock_drop(p_rq);
 		raw_spin_rq_unlock_irqrestore(p_rq, flags);
 	}
 
@@ -9481,9 +9511,11 @@ void scx_kick_cpu(struct scx_sched *sch, s32 cpu, u64 flags)
 
 		if (raw_spin_rq_trylock(target_rq)) {
 			if (can_skip_idle_kick(target_rq)) {
+				scx_rq_lock_drop(target_rq);
 				raw_spin_rq_unlock(target_rq);
 				goto out;
 			}
+			scx_rq_lock_drop(target_rq);
 			raw_spin_rq_unlock(target_rq);
 		}
 		cpumask_set_cpu(cpu, pcpu->cpus_to_kick_if_idle);
