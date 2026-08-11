@@ -103,37 +103,6 @@ def generate_all():
         labels = ["linux_kernel"],
     )
 
-def _base_config(ctx: AnalysisContext) -> Artifact:
-    prepare_config_script = ctx.attrs._prepareconfig[RunInfo]
-    base_config = ctx.actions.declare_output("base.config")
-
-    config_files_dir = ctx.actions.copied_dir(
-        "config_dir",
-        {s.basename: s for s in ctx.attrs.srcs},
-    )
-
-    ctx.actions.run(
-        cmd_args(
-            "bash",
-            "-c",
-            cmd_args(
-                prepare_config_script,
-                "-a",
-                ARCHITECTURE_TO_CONFIG_ARCH[ctx.attrs.arch],
-                "-f",
-                ctx.attrs.flavor,
-                "-p",
-                config_files_dir,
-                ">",
-                base_config.as_output(),
-                delimiter = " ",
-            )
-        ),
-        category = "base",
-    )
-
-    return base_config
-
 def _selftests_config(ctx: AnalysisContext) -> Artifact:
     selftests_config_script = ctx.attrs._selftestsconfig[RunInfo]
     selftests_config = ctx.actions.declare_output("selftests.config")
@@ -181,7 +150,7 @@ def _bpf_selftests_config(ctx: AnalysisContext) -> Artifact:
     return selftests_config
 
 def _impl(ctx: AnalysisContext) -> list[Provider]:
-    base_config = _base_config(ctx)
+    base_config = ctx.attrs.materialized
     selftests_type = SelftestsType(ctx.attrs.selftests)
 
     if selftests_type == SelftestsType("none"):
@@ -220,9 +189,8 @@ _attrs = {
     "arch": attrs.enum(ARCHITECTURES),
     # Use attrs.one_of() to enforce that flavor is one of the allowed values.
     "flavor": attrs.string(default="default"),
+    "materialized": attrs.source(),
     "selftests": attrs.enum(SelftestsType.values()),
-    "srcs": attrs.list(attrs.source()),
-    "_prepareconfig": attrs.exec_dep(default = "//facebook/scripts:prepareconfig"),
     "_selftestsconfig": attrs.exec_dep(default = "//facebook/scripts:selftestsconfig"),
 }
 
@@ -231,7 +199,7 @@ kernel_config_rule = rule(
     attrs = _attrs,
 )
 
-def kernel_config(arch, flavor = None, srcs = []):
+def kernel_config(arch, flavor = None):
     """
     Generate targets that will create the .config file used to configure the
     kernel at build time. Two sets of config targts are created:
@@ -241,7 +209,9 @@ def kernel_config(arch, flavor = None, srcs = []):
       exactly the same configurations as the regular targets, but also include
       whatever configurations are required in order to run selftests.
     """
+    cfg = config_name(arch = arch, flavor = flavor)
     generated_config(arch = arch, flavor = flavor)
+    materialized = "materialized/config-{}.config".format(cfg)
 
     for selftests in SelftestsType.values():
         rule_name = config_name(
@@ -255,5 +225,5 @@ def kernel_config(arch, flavor = None, srcs = []):
             arch=arch,
             flavor=flavor,
             selftests=selftests,
-            srcs=srcs,
+            materialized=materialized,
         )

@@ -13,7 +13,6 @@ filegroup(
     (
         kernel_config(
             arch = arch,
-            srcs = glob(["*.config"]),
         ),
         kernel_bootconfig(
             arch = arch,
@@ -24,7 +23,6 @@ filegroup(
                 kernel_config(
                 arch = arch,
                 flavor = flavor,
-                srcs = glob(["*.config"]),
             ),
                 kernel_bootconfig(
                 arch = arch,
