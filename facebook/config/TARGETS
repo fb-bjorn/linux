@@ -1,7 +1,8 @@
 load("//facebook/bzl:flavors.td.bzl", "ARCHITECTURES", "ARCH_FLAVORS")
-load("//facebook/bzl:config.bzl", "kernel_config", "generate_all")
+load("//facebook/bzl:config.bzl", "kernel_config", "generate_all", "validate_materialized")
 load("//facebook/bzl:bootconfig.bzl", "kernel_bootconfig")
 
+validate_materialized()
 generate_all()
 
 filegroup(

@@ -103,6 +103,18 @@ def generate_all():
         labels = ["linux_kernel"],
     )
 
+def _have_materialized_folder():
+    """Branches without a facebook/config/materialized/ folder will build
+    against the .config generated from fragments (common/arch/flavor).
+    """
+    return len(native.glob(["materialized/*.config"])) > 0
+
+def validate_materialized():
+    if not _have_materialized_folder():
+        warning("facebook/config/materialized/ not found -- kernel configs are " +
+                "resolved at build time. Consider running facebook/scripts/materializeconfigs " +
+                "and commit the result.")
+
 def materialized_config(cfg):
     """The :<cfg>-materialized target validates that the checked-in config
     under facebook/config/materialized/ matches the config resolved from the
@@ -112,6 +124,16 @@ def materialized_config(cfg):
     generated = ":" + cfg + "-generated"
     materialized = "materialized/config-{}.config".format(cfg)
     name = cfg + "-materialized"
+
+    # No materialized configs on this branch, resolve at build time.
+    if not _have_materialized_folder():
+        native.genrule(
+            name = name,
+            cmd = "cp $(location {}) $OUT".format(generated),
+            out = "config",
+            labels = ["linux_kernel"],
+        )
+        return ":" + name
 
     if not native.glob([materialized]):
         native.genrule(
