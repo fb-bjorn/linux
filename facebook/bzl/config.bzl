@@ -103,6 +103,45 @@ def generate_all():
         labels = ["linux_kernel"],
     )
 
+def materialized_config(cfg):
+    """The :<cfg>-materialized target validates that the checked-in config
+    under facebook/config/materialized/ matches the config resolved from the
+    fragments (the :<cfg>-generated target), to ensure we are not building from
+    a stale materialized config.
+    """
+    generated = ":" + cfg + "-generated"
+    materialized = "materialized/config-{}.config".format(cfg)
+    name = cfg + "-materialized"
+
+    if not native.glob([materialized]):
+        native.genrule(
+            name = name,
+            cmd = """echo "ERROR: {materialized} does not exist." >&2
+echo "Run facebook/scripts/materializeconfigs and commit the result." >&2
+exit 1
+""".format(materialized = materialized),
+            out = "config",
+            labels = ["linux_kernel"],
+        )
+        return ":" + name
+
+    native.genrule(
+        name = name,
+        srcs = [materialized],
+        cmd = """set -e
+if ! diff -q $SRCS $(location {generated}) >/dev/null 2>&1; then
+    echo "ERROR: {materialized} is stale (fragments changed without regenerating)." >&2
+    echo "Regenerate with: facebook/scripts/materializeconfigs" >&2
+    diff -u $SRCS $(location {generated}) >&2 || true
+    exit 1
+fi
+cp $SRCS $OUT
+""".format(generated = generated, materialized = materialized),
+        out = "config",
+        labels = ["linux_kernel"],
+    )
+    return ":" + name
+
 def _selftests_config(ctx: AnalysisContext) -> Artifact:
     selftests_config_script = ctx.attrs._selftestsconfig[RunInfo]
     selftests_config = ctx.actions.declare_output("selftests.config")
@@ -211,7 +250,7 @@ def kernel_config(arch, flavor = None):
     """
     cfg = config_name(arch = arch, flavor = flavor)
     generated_config(arch = arch, flavor = flavor)
-    materialized = "materialized/config-{}.config".format(cfg)
+    materialized = materialized_config(cfg)
 
     for selftests in SelftestsType.values():
         rule_name = config_name(
