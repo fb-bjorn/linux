@@ -206,21 +206,6 @@ def klp():
         labels = ["linux_kernel"],
     )
 
-    #checkout target
-    native.genrule(
-        name = "target-sources",
-        cmd = """sudo rm -rf $OUT; mkdir -p $OUT
-            HOME=/dev/null git clone -n `HOME=/dev/null git rev-parse --show-toplevel` $OUT
-            HOME=/dev/null git -C $OUT checkout `cat $(location :to_tag)`
-            pushd $OUT
-            make mrproper
-            popd
-        """,
-        cacheable = False,
-        out = "target-sources",
-        labels = ["linux_kernel"],
-    )
-
     #build the rpm version
     #more details on versioning available in buildinfo()
     #i don't have better idea on how to map between git tag/branch and rpm
@@ -317,7 +302,7 @@ def klp():
     bind_ros.append(("$(location :tooling)", "/tmp/tooling"))
 
     #feed artifacts to klp-build in a container
-    bind_rws = [(":baseline-sources", "/rw/compile"), ("$OUT", "/rw/output"), (":target-sources", "/rw/target")]
+    bind_rws = [(":baseline-sources", "/rw/compile"), ("$OUT", "/rw/output")]
     container_genrule(
         name="klp-build",
         arch=arch,
