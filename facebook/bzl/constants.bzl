@@ -1,8 +1,8 @@
-BUILD_IMAGE_X86_64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/update-libbpf1.6.c9.llvm21.x86_64"
-BUILD_IMAGE_X86_64_SHA256="53348fa4c06084cda3dc2274ed1a167effd09bbd060179ac93df8e896969e1a8"
+BUILD_IMAGE_X86_64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/D116030286.c9.llvm21.x86_64"
+BUILD_IMAGE_X86_64_SHA256="1db787c2de31b649dbacdfe1c86f22f4d02d241228a34fe5eaec1ac2833440c5"
 
-BUILD_IMAGE_AARCH64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/update-libbpf1.6.c9.llvm21.aarch64"
-BUILD_IMAGE_AARCH64_SHA256="091fd520adcd47fba8cd161ce2598ed84abe775e9a216e29e3c0ff8e52cf9dbe"
+BUILD_IMAGE_AARCH64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/D116030286.c9.llvm21.aarch64"
+BUILD_IMAGE_AARCH64_SHA256="76fdb550b6dc086dae234f6add1210419f60bed6ae70f9a866a2bc2b15a48b2c"
 
 KPATCH_BUILD_RPM_URI="https://yum/yum/centos/9/backports/x86_64/RPMS/kpatch-build-0.9.11-0.4.hs.el9.x86_64.rpm"
 KPATCH_BUILD_RPM_SHA256="054acc1dc50ff3c0943339642b52d0cb10c7c060ff459cd913d1fde94dc6acff"
