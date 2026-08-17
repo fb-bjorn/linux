@@ -2,7 +2,7 @@
 load(":flavors.td.bzl", "ARCH_X86_64", "ARCH_AARCH64", "ARCHITECTURE_TO_KERNEL_ARCH", "ARCHITECTURE_TO_CONFIG_ARCH", "ARCHITECTURE_TO_RPMBUILD_TARGET")
 load(":container.bzl", "container_genrule", "default_container_image")
 load(":kernel.bzl", "buildinfo")
-load(":constants.bzl", "CLANG_TRAIN_DATA_URI", "CLANG_TRAIN_DATA_SHA256", "KPATCH_BUILD_RPM_URI")
+load(":constants.bzl", "CLANG_TRAIN_DATA_URI", "CLANG_TRAIN_DATA_SHA256")
 load(":constants.bzl", "AARCH64_TRAIN_DATA_URI", "AARCH64_TRAIN_DATA_SHA256")
 load(":bootconfig.bzl", "bootconfig_name")
 
@@ -108,8 +108,25 @@ def klp():
         name="patches",
         cmd="""mkdir -p $OUT
             HOME=/dev/null git format-patch -k `cat $(location :from_tag)`..`cat $(location :to_tag)` -o $OUT/
-            # Drop hunkless patches (e.g. empty placeholder commits like "kdump: new empty commit"); kpatch-build rejects them as unapplicable.
-            for p in $OUT/*.patch; do grep -q '^diff --git' $p || rm -f $p; done
+            # Drop patches klp-build cannot use:
+            #   - hunkless ones (empty placeholder commits)
+            #   - ones touching only build tooling.  facebook/ is read from the
+            #     outer checkout and never compiled; scripts/livepatch and
+            #     tools/objtool are already in /rw/compile via the :tooling
+            #     overlay, so re-applying them fails as already applied.
+            #     klp-build also refreshes each patch against a pristine tree,
+            #     so a chain of commits to one file could not apply regardless.
+            overlaid=' b/(facebook|scripts/livepatch|tools/objtool)/'
+            for p in $OUT/*.patch; do
+                grep -q '^diff --git' $p || { rm -f $p; continue; }
+                all=`grep -c '^diff --git' $p`
+                tool=`grep '^diff --git' $p | grep -cE "$overlaid" || true`
+                [ "$tool" = 0 ] && continue
+                [ "$tool" = "$all" ] && { rm -f $p; continue; }
+                echo "ERROR: `basename $p` changes both build tooling and kernel" >&2
+                echo "source; split it so the tooling half can come from the overlay." >&2
+                exit 1
+            done
             export hotfix=`cat $(location :hotfix)`
             cat `HOME=/dev/null git rev-parse --show-toplevel`/facebook/9999-Dummy-patch-to-bump-hotfix-version.patch.template | envsubst > $OUT/9999-Dummy-patch-to-bump-hotfix-version.patch
         """,
@@ -189,21 +206,6 @@ def klp():
         labels = ["linux_kernel"],
     )
 
-    #checkout target
-    native.genrule(
-        name = "target-sources",
-        cmd = """sudo rm -rf $OUT; mkdir -p $OUT
-            HOME=/dev/null git clone -n `HOME=/dev/null git rev-parse --show-toplevel` $OUT
-            HOME=/dev/null git -C $OUT checkout `cat $(location :to_tag)`
-            pushd $OUT
-            make mrproper
-            popd
-        """,
-        cacheable = False,
-        out = "target-sources",
-        labels = ["linux_kernel"],
-    )
-
     #build the rpm version
     #more details on versioning available in buildinfo()
     #i don't have better idea on how to map between git tag/branch and rpm
@@ -280,77 +282,68 @@ def klp():
             )
 
         bind_ros.append(("$(location :target-train-data)", "/tmp/vmlinux.profdata"))
-        train_data_args = "-p /tmp/vmlinux.profdata"
+        train_data_args = "CFLAGS_PGO_CLANG=-fprofile-use=/tmp/vmlinux.profdata"
 
 
+    # klp-build ships in the kernel tree, so /rw/compile would otherwise run
+    # the baseline's copy and a tooling fix could not ride along in a hotfix.
+    # Overlay it from to_tag so both builds use the same version.
     native.genrule(
-      name = "kpatch-rpm-dir",
-      cmd = """
-          mkdir -p $OUT
-          pushd $OUT
-          curl -k -LO {kpatch_rpm_uri}
-          popd
-      """.format(kpatch_rpm_uri=KPATCH_BUILD_RPM_URI),
-      out = "kpatch-rpm-dir",
+      name = "tooling",
+      cmd = """mkdir -p $OUT
+          HOME=/dev/null git -C `HOME=/dev/null git rev-parse --show-toplevel` \
+              archive `cat $(location :to_tag)` scripts/livepatch tools/objtool \
+              > $OUT/tooling.tar
+      """,
+      out = "tooling",
+      cacheable = False,
       labels = ["linux_kernel"],
     )
-    bind_ros.append(("$(location :kpatch-rpm-dir)", "/tmp/kpatch-build-rpm"))
+    bind_ros.append(("$(location :tooling)", "/tmp/tooling"))
 
-    #feed artifacts to kpatch-build in a container
-    bind_rws = [(":baseline-sources", "/rw/compile"), ("$OUT", "/rw/output"), (":target-sources", "/rw/target")]
+    #feed artifacts to klp-build in a container
+    bind_rws = [(":baseline-sources", "/rw/compile"), ("$OUT", "/rw/output")]
     container_genrule(
         name="klp-build",
         arch=arch,
         cmd="""
             rpm -ivh /tmp/kernel-bin/*.rpm /tmp/kernel-devel/*.rpm --ignorearch
-            test -f /tmp/kpatch-build-rpm/*.rpm && rpm -Uvh /tmp/kpatch-build-rpm/*.rpm
             pushd /rw/compile
             cp /tmp/config .config
             cp /tmp/bootconfig .bootconfig
-            make {compiler_args} olddefconfig
-            if grep -q CONFIG_LTO_CLANG=y /rw/compile/.config ; then
-                ver=`cat /tmp/uname`
-                # e.g., 6.4.3-0_fbk2_rc7_778_g4b661353af47 => -0_fbk2_rc7_778_g4b661353af47
-                extraver=-`echo $ver | cut -d '-' -f 2`
-                sed "s|EXTRAVERSION =|EXTRAVERSION = $extraver|g" -i Makefile
+            tar -xf /tmp/tooling/tooling.tar
+
+            # klp-build drives plain make, so these must be in the environment.
+            export {compiler_args}
+            make olddefconfig
+
+            # A missing profile silently changes inlining, symbol names and
+            # sympos.  kpatch-build refused to build without one.
+            if grep -q "^CONFIG_PGO_CLANG=y" .config && [ ! -f /tmp/vmlinux.profdata ]; then
+                echo "ERROR: CONFIG_PGO_CLANG=y but no profile data supplied." >&2
+                exit 1
             fi
-            popd
 
-            # Save the original kpatch-build just in case that we need the original later.
-            cp /bin/kpatch-build /tmp
-
-            # ./scripts/setlocalversion signature changed in 6.4 compared to 5.19, the 5.19 option
-            # '--save-scmversion' is not supported any more.
-            #   f6e09b07cc12  kbuild: do not put .scmversion into the source tarball
-            # Make a change to kpatch-build file itself to remove the unsupported option.
-            sed "s|setlocalversion --save-scmversion|setlocalversion|g" -i /bin/kpatch-build
-
-            # init/version-timestamp.c is introduced after 5.19.
-            #   2df8220cc511  kbuild: build init/built-in.a just once
-            # The init/version-timestamp.o is built after some compilation/build has been
-            # done, so it can have accurate version information. The init/version-timestamp.o
-            # is used in final linking. Different build environment, including machine or
-            # build time can make init/version-timestamp.o different from each other.
-            # Make two changes in kpatch-build to avoid init/version-timestamp.o introduced
-            # build failures.
-            sed "s|lib\/lib\.a)|init\/version-timestamp\.o \| lib\/lib\.a)|g" -i /bin/kpatch-build
-            sed "s|usr\/initramfs_data\.o|usr\/initramfs_data\.o \|\| \"\$i\" = init\/version-timestamp\.o |g" -i /bin/kpatch-build
-
-            # ./scripts/setlocalversion has the following change in 6.4 compared to 5.19,
-            #   ec31f868ec674e  setlocalversion: absorb \$(KERNELVERSION)
-            # it expects a non-empty KERNELVERSION string. Let us add it before calling kpatch-build.
-            pushd /rw/compile
-            export KERNELVERSION=`make kernelversion`
-            popd
+            # EXTRAVERSION must match the deployed uname or vermagic rejects the
+            # module.  The Makefile assigns CFLAGS_PGO_CLANG with := so the
+            # environment loses; assignments in MAKEFLAGS count as command line
+            # and reach the recursive sub-makes.
+            extraver=-`cat /tmp/uname | cut -d '-' -f 2`
+            export MAKEFLAGS="EXTRAVERSION=$extraver {train_data_args}"
 
             export PATH=$PATH:/usr/libexec/git-core/
-            TARGET_ARCH={arch} kpatch-build {train_data_args} -s /rw/compile -c /rw/compile/.config -v /boot/vmlinux* -o /rw/output -n klp_`cat /tmp/baseline_rpm_version`_`cat /tmp/hotfix` /tmp/patches/* 2>&1 | tee /tmp/kpatch.out
+            name=klp_`cat /tmp/baseline_rpm_version`_`cat /tmp/hotfix`
+            ./scripts/livepatch/klp-build -j `nproc` -o /rw/output/$name.ko \
+                /tmp/patches/* 2>&1 | tee /tmp/klp.out
             rc=$PIPESTATUS
+            popd
+
+            # Keep the log on success too: it records which objects changed.
+            cp /tmp/klp.out /rw/output/ 2>/dev/null || true
+
             if [ $rc -ne 0 ]; then
-                cp /root/.kpatch/build.log /rw/output/ 2>/dev/null || true
-                # No-op for this arch (e.g. an x86-only fix built for aarch64): not a build error, nothing to ship.
-                # kpatch-build prints "no functional changes found" to its output (not build.log) -- match it there.
-                if grep -q "no functional changes found" /tmp/kpatch.out; then
+                # A fix which does not apply to this arch is not a build error.
+                if grep -q "no changes detected" /tmp/klp.out; then
                     rm -f /rw/output/*.ko
                     echo KLP_NOOP > /rw/output/klp.noop
                     exit 0
@@ -358,26 +351,12 @@ def klp():
                 exit $rc
             fi
 
-            # kpatch-build returned success, but that alone does not guarantee a loadable
-            # module. Confirm a real ELF .ko was produced before we inspect and package it,
-            # so a silent or partial failure cannot ship a non-module .ko. The jump_table
-            # check just below runs readelf on the .ko and would otherwise treat a missing
-            # or non-ELF file as having no jump table and package it anyway.
+            # Guard against a silent partial failure shipping a non-module .ko.
             if ! ls /rw/output/*.ko >/dev/null 2>&1 || ! readelf -h /rw/output/*.ko >/dev/null 2>&1; then
-                cp /root/.kpatch/build.log /rw/output/ 2>/dev/null || true
-                echo "ERROR: kpatch-build reported success but produced no valid ELF .ko module." >&2
+                echo "ERROR: klp-build reported success but produced no valid ELF .ko module." >&2
                 exit 1
             fi
-
-            if readelf -S -W /rw/output/*.ko | grep -q '.klp.rela.vmlinux.__jump_table'; then
-                echo "ERROR: .klp.rela.vmlinux.__jump_table found in KLP module." | tee -a /root/.kpatch/build.log
-                echo "Patched functions reference static keys via static_branch_*()." | tee -a /root/.kpatch/build.log
-                echo "Rewrite to use static_key_enabled() instead." | tee -a /root/.kpatch/build.log
-                cp /root/.kpatch/build.log /rw/output/
-                rm /rw/output/*.ko
-                exit 1
-            fi
-        """.format(train_data_args = train_data_args, compiler_args = compiler_args, arch = arch),
+        """.format(train_data_args = train_data_args, compiler_args = compiler_args),
         bind_ro=bind_ros,
         bind_rw=bind_rws,
         cacheable=False,
