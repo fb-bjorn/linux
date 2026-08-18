@@ -342,12 +342,6 @@ def klp():
             cp /tmp/klp.out /rw/output/ 2>/dev/null || true
 
             if [ $rc -ne 0 ]; then
-                # A fix which does not apply to this arch is not a build error.
-                if grep -q "no changes detected" /tmp/klp.out; then
-                    rm -f /rw/output/*.ko
-                    echo KLP_NOOP > /rw/output/klp.noop
-                    exit 0
-                fi
                 exit $rc
             fi
 
@@ -364,7 +358,6 @@ def klp():
     )
     # prepare packaging
     bind_ros.append(("$(location :klp-spec)", "/tmp/klp.spec"))
-    bind_ros.append(("$(location :klp-noop-spec)", "/tmp/klp-noop.spec"))
     bind_ros.append(("$(location :klp)", "/tmp/module"))
     native.genrule(
         name = "klp-spec",
@@ -378,35 +371,16 @@ def klp():
         cacheable=False,
         labels = ["linux_kernel"],
     )
-    # Spec for the empty placeholder rpm built when a hotfix is a no-op for this
-    # arch: same package name/version, ships a README marker instead of a .ko.
-    native.genrule(
-        name = "klp-noop-spec",
-        cmd = """
-            SPECOUT=`pwd`/$OUT
-            pushd `HOME=/dev/null git rev-parse --show-toplevel`
-            cp -a facebook/build/klp-noop.spec $SPECOUT
-            popd
-        """,
-        out = "klp-noop.spec",
-        cacheable=False,
-        labels = ["linux_kernel"],
-    )
-
     if sign == "true":
         native.genrule(
             name = "klp",
             cmd = """
-            if [ -f $(location :klp-build)/klp.noop ]; then
-                cp $(location :klp-build)/klp.noop $OUT
-            else
-                chmod +x $(location //facebook:sign-kernel-build-sh)
-                $(location //facebook:sign-kernel-build-sh) \
-                    $(location :klp-build) \
-                    {sign_key} \
-                    $(location //facebook:sign-sandcastle-spec) \
-                    $OUT
-            fi
+            chmod +x $(location //facebook:sign-kernel-build-sh)
+            $(location //facebook:sign-kernel-build-sh) \
+                $(location :klp-build) \
+                {sign_key} \
+                $(location //facebook:sign-sandcastle-spec) \
+                $OUT
             """.format(sign_key = sign_key),
             out = "klp.ko",
             cacheable = False,
@@ -416,11 +390,7 @@ def klp():
         native.genrule(
             name = "klp",
             cmd = """
-            if [ -f $(location :klp-build)/klp.noop ]; then
-                cp $(location :klp-build)/klp.noop $OUT
-            else
-                cp -a $(location :klp-build)/*.ko $OUT
-            fi
+            cp -a $(location :klp-build)/*.ko $OUT
             """,
             out = "klp.ko",
             cacheable = False,
@@ -433,19 +403,8 @@ def klp():
         arch=arch,
         cmd="""
             cat /tmp/to_tag
-            if [ "`head -1 /tmp/module 2>/dev/null`" = "KLP_NOOP" ]; then
-                # No-op for this arch: emit the klp.noop marker first so it is always present
-                # for the workflow to allowlist-gate, then build an empty placeholder rpm
-                # (same name/version, ships a README instead of a .ko) so the arch repo still
-                # has a package to install.
-                echo "KLP is a no-op for this arch; emitting klp.noop marker and building an empty placeholder rpm."
-                echo KLP_NOOP > /rw/output/klp.noop
-                rpmbuild --target={target} -ba /tmp/klp-noop.spec --define "short_kernel_version `cat /tmp/baseline_rpm_version`" --define "rpm_kernel_version `cat /tmp/uname`" --define "hf_name `cat /tmp/hotfix`"
-                cp -vR /root/rpmbuild/RPMS/*/*.rpm /rw/output/
-            else
-                rpmbuild --target={target} -ba /tmp/klp.spec --define "short_kernel_version `cat /tmp/baseline_rpm_version`" --define "rpm_kernel_version `cat /tmp/uname`" --define "module_path /tmp/module" --define "hf_name `cat /tmp/hotfix`"
-                cp -vR /root/rpmbuild/RPMS/*/*.rpm /rw/output/
-            fi
+            rpmbuild --target={target} -ba /tmp/klp.spec --define "short_kernel_version `cat /tmp/baseline_rpm_version`" --define "rpm_kernel_version `cat /tmp/uname`" --define "module_path /tmp/module" --define "hf_name `cat /tmp/hotfix`"
+            cp -vR /root/rpmbuild/RPMS/*/*.rpm /rw/output/
         """.format(target=ARCHITECTURE_TO_RPMBUILD_TARGET[arch]),
         bind_ro=bind_ros,
         bind_rw=bind_rws,

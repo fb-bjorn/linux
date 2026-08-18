@@ -3,16 +3,32 @@ From: Sergei Iudin <tsipa740@gmail.com>
 Date: Mon, 15 Nov 2021 16:45:24 -0800
 Subject: [PATCH] [PATCH] Dummy patch to bump hotfix version
 
+klp-build refuses to emit a module when a hotfix changes no object on
+this architecture, and the build then ships an empty placeholder RPM.
+Add a no-op to a cold function so every KLP contains one changed
+function and a real module is produced everywhere.
+
+version_proc_show() is only reached by reading /proc/version, so the
+livepatch transition never has to wait for it to leave a task's stack,
+and the inserted instruction is unreachable in practice.
+
+asm volatile() rather than barrier(): a compiler barrier changes no
+machine code here, because the seq_printf() call already clobbers
+memory, so klp-build would still see an unchanged function.
 ---
- include/hotfix/hotfix.h | 1 +
+ fs/proc/version.c | 1 +
  1 file changed, 1 insertion(+)
 
-diff --git a/include/hotfix/hotfix.h b/include/hotfix/hotfix.h
-index e69de29bb2d1..4dc22ddea7fd 100644
---- a/include/hotfix/hotfix.h
-+++ b/include/hotfix/hotfix.h
-@@ -0,0 +1 @@
-+#define HF_VERSION "${hotfix}"
+diff --git a/fs/proc/version.c b/fs/proc/version.c
+--- a/fs/proc/version.c
++++ b/fs/proc/version.c
+@@ -9,6 +9,7 @@
+ 
+ static int version_proc_show(struct seq_file *m, void *v)
+ {
++	asm volatile("nop");	/* KLP: no-op, forces a changed function */
+ 	seq_printf(m, linux_proc_banner,
+ 		utsname()->sysname,
+ 		utsname()->release,
 --
 2.30.2
-
