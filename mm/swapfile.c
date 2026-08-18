@@ -2125,7 +2125,7 @@ void swap_free_hibernation_slot(swp_entry_t entry)
 	pgoff_t offset = swp_offset(entry);
 
 	si = get_swap_device(entry);
-	if (WARN_ON(!si))
+	if (WARN_ON(IS_ERR_OR_NULL(si)))
 		return;
 
 	ci = swap_cluster_lock(si, offset);
