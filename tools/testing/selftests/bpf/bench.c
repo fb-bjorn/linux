@@ -276,6 +276,7 @@ static const struct argp_option opts[] = {
 extern struct argp bench_ringbufs_argp;
 extern struct argp bench_bloom_map_argp;
 extern struct argp bench_bpf_loop_argp;
+extern struct argp bench_bpf_for_argp;
 extern struct argp bench_local_storage_argp;
 extern struct argp bench_local_storage_rcu_tasks_trace_argp;
 extern struct argp bench_strncmp_argp;
@@ -286,11 +287,13 @@ extern struct argp bench_trigger_batch_argp;
 extern struct argp bench_crypto_argp;
 extern struct argp bench_sockmap_argp;
 extern struct argp bench_lpm_trie_map_argp;
+extern struct argp bench_xdp_lb_argp;
 
 static const struct argp_child bench_parsers[] = {
 	{ &bench_ringbufs_argp, 0, "Ring buffers benchmark", 0 },
 	{ &bench_bloom_map_argp, 0, "Bloom filter map benchmark", 0 },
 	{ &bench_bpf_loop_argp, 0, "bpf_loop helper benchmark", 0 },
+	{ &bench_bpf_for_argp, 0, "bpf_for loop benchmark", 0 },
 	{ &bench_local_storage_argp, 0, "local_storage benchmark", 0 },
 	{ &bench_strncmp_argp, 0, "bpf_strncmp helper benchmark", 0 },
 	{ &bench_local_storage_rcu_tasks_trace_argp, 0,
@@ -302,6 +305,7 @@ static const struct argp_child bench_parsers[] = {
 	{ &bench_crypto_argp, 0, "bpf crypto benchmark", 0 },
 	{ &bench_sockmap_argp, 0, "bpf sockmap benchmark", 0 },
 	{ &bench_lpm_trie_map_argp, 0, "LPM trie map benchmark", 0 },
+	{ &bench_xdp_lb_argp, 0, "XDP load-balancer benchmark", 0 },
 	{},
 };
 
@@ -555,6 +559,7 @@ extern const struct bench bench_bloom_false_positive;
 extern const struct bench bench_hashmap_without_bloom;
 extern const struct bench bench_hashmap_with_bloom;
 extern const struct bench bench_bpf_loop;
+extern const struct bench bench_bpf_for;
 extern const struct bench bench_strncmp_no_helper;
 extern const struct bench bench_strncmp_helper;
 extern const struct bench bench_bpf_hashmap_full_update;
@@ -578,6 +583,8 @@ extern const struct bench bench_lpm_trie_insert;
 extern const struct bench bench_lpm_trie_update;
 extern const struct bench bench_lpm_trie_delete;
 extern const struct bench bench_lpm_trie_free;
+extern const struct bench bench_bpf_nop;
+extern const struct bench bench_xdp_lb;
 
 static const struct bench *benchs[] = {
 	&bench_count_global,
@@ -636,6 +643,7 @@ static const struct bench *benchs[] = {
 	&bench_hashmap_without_bloom,
 	&bench_hashmap_with_bloom,
 	&bench_bpf_loop,
+	&bench_bpf_for,
 	&bench_strncmp_no_helper,
 	&bench_strncmp_helper,
 	&bench_bpf_hashmap_full_update,
@@ -659,6 +667,8 @@ static const struct bench *benchs[] = {
 	&bench_lpm_trie_update,
 	&bench_lpm_trie_delete,
 	&bench_lpm_trie_free,
+	&bench_bpf_nop,
+	&bench_xdp_lb,
 };
 
 static void find_benchmark(void)
@@ -747,6 +757,13 @@ static void setup_benchmark(void)
 static pthread_mutex_t bench_done_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t bench_done = PTHREAD_COND_INITIALIZER;
 
+void bench_force_done(void)
+{
+	pthread_mutex_lock(&bench_done_mtx);
+	pthread_cond_signal(&bench_done);
+	pthread_mutex_unlock(&bench_done_mtx);
+}
+
 static void collect_measurements(long delta_ns) {
 	int iter = state.res_cnt++;
 	struct bench_res *res = &state.results[iter];
@@ -756,11 +773,8 @@ static void collect_measurements(long delta_ns) {
 	if (bench->report_progress)
 		bench->report_progress(iter, res, delta_ns);
 
-	if (iter == env.duration_sec + env.warmup_sec) {
-		pthread_mutex_lock(&bench_done_mtx);
-		pthread_cond_signal(&bench_done);
-		pthread_mutex_unlock(&bench_done_mtx);
-	}
+	if (iter == env.duration_sec + env.warmup_sec)
+		bench_force_done();
 }
 
 int main(int argc, char **argv)

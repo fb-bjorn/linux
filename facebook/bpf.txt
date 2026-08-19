@@ -1,2 +1,33 @@
-bpf: 9dfdb706e164a ("selftests/bpf: fix inet_csk_accept prototype in test_sk_storage_tracing.c")
-bpf-next: 6ba7acdb93b4 ("selftests/bpf: Add selftest for bits iter")
+bpf: a13307e97d5c ("Merge tag 'bpf-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf")
+bpf-next: f79066c78402 ("selftests/bpf: Add tests for a store on a fault prone qdisc pointer")
+
+# v7.1-fb BPF sync, 2026-08-19. Range: bpf-next from the v7.1 merge window
+# (2026-06-16) through 2026-08-17. bpf/master was fully contained in bpf-next at
+# the time of this sync, so the bpf tree needed no separate sweep.
+#
+# Commits below were not backported. Lines start with the upstream 12-char hash
+# so future runs filter them out.
+
+# Already in v7.1-fb via 9e22c6719132, which backported the same 13 upstream
+# commits from a different revision of the series. Verified equivalent.
+8f4fa9f89b72 rhashtable: Add rhashtable_next_key() API
+e673eee0f49e rhashtable: Add selftest for rhashtable_next_key()
+46730ee6e884 rhashtable: Use irq work for shrinking
+16b4d3e2fb24 bpf: Implement resizable hashmap basic functions
+818e00848227 bpf: Implement iteration ops for resizable hashtab
+6905f8601298 bpf: Allow special fields in resizable hashtab
+9dcbb5045fe5 bpf: Optimize word-sized keys for resizable hashtable
+6e46ff0abefd libbpf: Support resizable hashtable
+249996365b66 selftests/bpf: Add basic tests for resizable hash map
+a996794fda84 selftests/bpf: Add BPF iterator tests for resizable hash map
+2bea44ea3c4e bpftool: Add rhash map documentation
+84f7a49e76ec selftests/bpf: Add resizable hashmap to benchmarks
+1444ee886e6f rhashtable: Fix rhashtable_next_key() build warnings
+
+# Already present in v7.1-fb verbatim.
+f3f34ca45b96 bpf, sockmap: Fix wrong rsge offset in bpf_msg_push_data()
+
+# Requires the per-sb xattr cache API from 1e7cd8a53b72, which landed in 7.2 and
+# is not in our base; without it the build fails on struct simple_xattr_cache.
+9722955b5430 bpf: Add simple xattr support to bpffs
+28254722a459 selinux: bpf: check SBLABEL_MNT before isec init

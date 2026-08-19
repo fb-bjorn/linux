@@ -327,7 +327,7 @@ static int sanity_check_usdt_elf(Elf *elf, const char *path)
 	int endianness;
 
 	if (elf_kind(elf) != ELF_K_ELF) {
-		pr_warn("usdt: unrecognized ELF kind %d for '%s'\n", elf_kind(elf), path);
+		pr_warn("usdt: unrecognized ELF kind %u for '%s'\n", elf_kind(elf), path);
 		return -EBADF;
 	}
 
@@ -438,8 +438,9 @@ static int parse_elf_segs(Elf *elf, const char *path, struct elf_seg **segs, siz
 		}
 
 		pr_debug("usdt: discovered PHDR #%d in '%s': vaddr 0x%lx memsz 0x%lx offset 0x%lx type 0x%lx flags 0x%lx\n",
-			 i, path, (long)phdr.p_vaddr, (long)phdr.p_memsz, (long)phdr.p_offset,
-			 (long)phdr.p_type, (long)phdr.p_flags);
+			 i, path,
+			 (unsigned long)phdr.p_vaddr, (unsigned long)phdr.p_memsz, (unsigned long)phdr.p_offset,
+			 (unsigned long)phdr.p_type, (unsigned long)phdr.p_flags);
 		if (phdr.p_type != PT_LOAD)
 			continue;
 
@@ -468,10 +469,10 @@ static int parse_elf_segs(Elf *elf, const char *path, struct elf_seg **segs, siz
 
 static int parse_vma_segs(int pid, const char *lib_path, struct elf_seg **segs, size_t *seg_cnt)
 {
-	char path[PATH_MAX], line[PATH_MAX], mode[16];
+	char path[PATH_MAX], line[4096], mode[16];
 	size_t seg_start, seg_end, seg_off;
 	struct elf_seg *seg;
-	int tmp_pid, i, err;
+	int tmp_pid, n, i, err;
 	FILE *f;
 
 	*seg_cnt = 0;
@@ -480,8 +481,13 @@ static int parse_vma_segs(int pid, const char *lib_path, struct elf_seg **segs, 
 	 * /proc/<pid>/root/<path>. They will be reported as just /<path> in
 	 * /proc/<pid>/maps.
 	 */
-	if (sscanf(lib_path, "/proc/%d/root%s", &tmp_pid, path) == 2 && pid == tmp_pid)
+	/* %n is not counted in sscanf() return value, so initialize it. */
+	n = 0;
+	if (sscanf(lib_path, "/proc/%d/root%n", &tmp_pid, &n) == 1 &&
+	    n > 0 && pid == tmp_pid && lib_path[n] == '/') {
+		libbpf_strlcpy(path, lib_path + n, sizeof(path));
 		goto proceed;
+	}
 
 	if (!realpath(lib_path, path)) {
 		pr_warn("usdt: failed to get absolute path of '%s' (err %s), using path as is...\n",
@@ -504,8 +510,11 @@ proceed:
 	 * 7f5c6f5d1000-7f5c6f5d3000 rw-p 001c7000 08:04 21238613      /usr/lib64/libc-2.17.so
 	 * 7f5c6f5d3000-7f5c6f5d8000 rw-p 00000000 00:00 0
 	 * 7f5c6f5d8000-7f5c6f5d9000 r-xp 00000000 103:01 362990598    /data/users/andriin/linux/tools/bpf/usdt/libhello_usdt.so
+	 *
+	 * Some VMA names can be longer than the local buffer. Bound the
+	 * writes, but still consume the rest of the line.
 	 */
-	while (fscanf(f, "%zx-%zx %s %zx %*s %*d%[^\n]\n",
+	while (fscanf(f, "%zx-%zx %15s %zx %*s %*d%4095[^\n]%*[^\n]\n",
 		      &seg_start, &seg_end, mode, &seg_off, line) == 5) {
 		void *tmp;
 
@@ -711,14 +720,14 @@ static int collect_usdt_targets(struct usdt_manager *man, struct elf_fd *elf_fd,
 		if (!seg) {
 			err = -ESRCH;
 			pr_warn("usdt: failed to find ELF program segment for '%s:%s' in '%s' at IP 0x%lx\n",
-				usdt_provider, usdt_name, path, usdt_abs_ip);
+				usdt_provider, usdt_name, path, (unsigned long)usdt_abs_ip);
 			goto err_out;
 		}
 		if (!seg->is_exec) {
 			err = -ESRCH;
 			pr_warn("usdt: matched ELF binary '%s' segment [0x%lx, 0x%lx) for '%s:%s' at IP 0x%lx is not executable\n",
-				path, seg->start, seg->end, usdt_provider, usdt_name,
-				usdt_abs_ip);
+				path, (unsigned long)seg->start, (unsigned long)seg->end, usdt_provider, usdt_name,
+				(unsigned long)usdt_abs_ip);
 			goto err_out;
 		}
 		/* translate from virtual address to file offset */
@@ -758,7 +767,7 @@ static int collect_usdt_targets(struct usdt_manager *man, struct elf_fd *elf_fd,
 			if (!seg) {
 				err = -ESRCH;
 				pr_warn("usdt: failed to find shared lib memory segment for '%s:%s' in '%s' at relative IP 0x%lx\n",
-					usdt_provider, usdt_name, path, usdt_rel_ip);
+					usdt_provider, usdt_name, path, (unsigned long)usdt_rel_ip);
 				goto err_out;
 			}
 
@@ -767,8 +776,10 @@ static int collect_usdt_targets(struct usdt_manager *man, struct elf_fd *elf_fd,
 
 		pr_debug("usdt: probe for '%s:%s' in %s '%s': addr 0x%lx base 0x%lx (resolved abs_ip 0x%lx rel_ip 0x%lx) args '%s' in segment [0x%lx, 0x%lx) at offset 0x%lx\n",
 			 usdt_provider, usdt_name, ehdr.e_type == ET_EXEC ? "exec" : "lib ", path,
-			 note.loc_addr, note.base_addr, usdt_abs_ip, usdt_rel_ip, note.args,
-			 seg ? seg->start : 0, seg ? seg->end : 0, seg ? seg->offset : 0);
+			 (unsigned long)note.loc_addr, (unsigned long)note.base_addr,
+			 (unsigned long)usdt_abs_ip, (unsigned long)usdt_rel_ip, note.args,
+			 (unsigned long)(seg ? seg->start : 0), (unsigned long)(seg ? seg->end : 0),
+			 (unsigned long)(seg ? seg->offset : 0));
 
 		/* Adjust semaphore address to be a file offset */
 		if (note.sema_addr) {
@@ -783,14 +794,14 @@ static int collect_usdt_targets(struct usdt_manager *man, struct elf_fd *elf_fd,
 			if (!seg) {
 				err = -ESRCH;
 				pr_warn("usdt: failed to find ELF loadable segment with semaphore of '%s:%s' in '%s' at 0x%lx\n",
-					usdt_provider, usdt_name, path, note.sema_addr);
+					usdt_provider, usdt_name, path, (unsigned long)note.sema_addr);
 				goto err_out;
 			}
 			if (seg->is_exec) {
 				err = -ESRCH;
 				pr_warn("usdt: matched ELF binary '%s' segment [0x%lx, 0x%lx] for semaphore of '%s:%s' at 0x%lx is executable\n",
-					path, seg->start, seg->end, usdt_provider, usdt_name,
-					note.sema_addr);
+					path, (unsigned long)seg->start, (unsigned long)seg->end, usdt_provider, usdt_name,
+					(unsigned long)note.sema_addr);
 				goto err_out;
 			}
 
@@ -798,8 +809,8 @@ static int collect_usdt_targets(struct usdt_manager *man, struct elf_fd *elf_fd,
 
 			pr_debug("usdt: sema  for '%s:%s' in %s '%s': addr 0x%lx base 0x%lx (resolved 0x%lx) in segment [0x%lx, 0x%lx] at offset 0x%lx\n",
 				 usdt_provider, usdt_name, ehdr.e_type == ET_EXEC ? "exec" : "lib ",
-				 path, note.sema_addr, note.base_addr, usdt_sema_off,
-				 seg->start, seg->end, seg->offset);
+				 path, (unsigned long)note.sema_addr, (unsigned long)note.base_addr, (unsigned long)usdt_sema_off,
+				 (unsigned long)seg->start, (unsigned long)seg->end, (unsigned long)seg->offset);
 		}
 
 		/* Record adjusted addresses and offsets and parse USDT spec */
@@ -1109,7 +1120,7 @@ struct bpf_link *usdt_manager_attach_usdt(struct usdt_manager *man, const struct
 				        spec_id, usdt_provider, usdt_name, path);
 			} else {
 				pr_warn("usdt: failed to map IP 0x%lx to spec #%d for '%s:%s' in '%s': %s\n",
-					target->abs_ip, spec_id, usdt_provider, usdt_name,
+					(unsigned long)target->abs_ip, spec_id, usdt_provider, usdt_name,
 					path, errstr(err));
 			}
 			goto err_out;
