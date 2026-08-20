@@ -62,3 +62,8 @@ tracing_struct
 
 # tests depending on speculation mitigation being off internally while on upstream.
 verifier_movsx/MOV32SX*@unpriv                  # See yhs comment in https://www.internalfb.com/diff/D60610844?transaction_fbid=1032811231711873
+
+# tests whose fentry/fexit target is inlined away by CONFIG_LTO_CLANG_THIN, so the
+# attach succeeds against the surviving out-of-line copy but the hook never runs.
+d_path/basic                                    # close trampoline for filp_close was not called, NOTE: LTO inlines filp_close, fentry never fires
+htab_update/reenter_update                      # no reentrancy: actual 0 != expected -35, NOTE: LTO inlines bpf_obj_cancel_fields, fentry never fires
