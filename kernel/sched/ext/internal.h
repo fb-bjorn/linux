@@ -1598,6 +1598,7 @@ struct scx_sched {
 	 * but it doesn't really matter.
 	 */
 	bool			warned_zero_slice:1;
+	bool			warned_deprecated_rq:1;
 	bool			warned_unassoc_progs:1;
 
 	struct list_head	all;
