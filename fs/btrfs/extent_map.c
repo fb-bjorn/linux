@@ -9,6 +9,7 @@
 #include "compression.h"
 #include "btrfs_inode.h"
 #include "disk-io.h"
+#include "ordered-data.h"
 
 
 static struct kmem_cache *extent_map_cache;
@@ -828,6 +829,57 @@ static void drop_all_extent_maps_fast(struct btrfs_inode *inode)
 }
 
 /*
+ * DEBUG: find a drop that will make a pending unpin fail.
+ *
+ * btrfs_drop_extent_map_range() splits pinned extent maps on purpose. The
+ * splits keep EXTENT_FLAG_PINNED. A caller that must not disturb a pinned map
+ * passes skip_pinned.
+ *
+ * One case is still fatal. btrfs_unpin_extent_cache() finds the map by the file
+ * offset of its ordered extent. It needs a map that starts at exactly that
+ * offset. A drop that covers em->start removes that map, or a tail split moves
+ * it to @end. The unpin then fails with -ENOENT or with -EUCLEAN, and the endio
+ * worker aborts the transaction.
+ *
+ * There are 3 necessary conditions to hit this problem:
+ *
+ *  1. The map is pinned. An unpin is still to come.
+ *  2. The drop covers em->start. A head split keeps em->start, and the unpin
+ *     then finds its map.
+ *  3. An ordered extent starts at em->start, and it has no error.
+ *
+ * This is a diagnostic-only BUG(). Do not send it upstream.
+ */
+static void debug_check_pinned_em_drop(struct btrfs_inode *inode,
+				       const struct extent_map *em,
+				       u64 start, u64 end)
+{
+	struct btrfs_ordered_extent *oe;
+	bool unpin_pending;
+
+	if (likely(!(em->flags & EXTENT_FLAG_PINNED)))
+		return;
+
+	if (start > em->start)
+		return;
+
+	oe = btrfs_lookup_ordered_extent(inode, em->start);
+	if (!oe)
+		return;
+	unpin_pending = (oe->file_offset == em->start) &&
+			!test_bit(BTRFS_ORDERED_IOERR, &oe->flags);
+	btrfs_put_ordered_extent(oe);
+	if (!unpin_pending)
+		return;
+
+	btrfs_dump_extent_map(em, "start dropped while an unpin is pending");
+	btrfs_crit(inode->root->fs_info,
+"drop of range [%llu, %llu) removes the start of a pinned extent map of inode %llu (root %lld) that an ordered extent has not unpinned yet",
+		   start, end, btrfs_ino(inode), btrfs_root_id(inode->root));
+	BUG();
+}
+
+/*
  * Drop all extent maps in a given range.
  *
  * @inode:       The target inode.
@@ -898,6 +950,9 @@ void btrfs_drop_extent_map_range(struct btrfs_inode *inode, u64 start, u64 end,
 			start = em_end;
 			goto next;
 		}
+
+		/* [META-ONLY debug] */
+		debug_check_pinned_em_drop(inode, em, start, end);
 
 		/*
 		 * In case we split the extent map, we want to preserve the
