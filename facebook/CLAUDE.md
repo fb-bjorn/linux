@@ -28,6 +28,10 @@ build container's toolchain (`scripts/kconfig/merge_config.sh` +
 `make LLVM=1 alldefconfig`, run in the build container), so the committed config
 matches what the kernel is actually built with.
 
+Configs are always resolved with the target arch's native toolchain, so the
+result does not depend on the host. On an x86_64 host the arm64 flavors resolve
+under binfmt_misc. The kernel compile itself still cross-compiles.
+
 A branch can opt out by not having a `facebook/config/materialized/` directory
 at all: it then carries only the fragments and resolves them in the container at
 build time, and the build prints a warning saying so. That suits branches where

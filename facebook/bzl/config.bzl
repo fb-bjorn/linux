@@ -1,4 +1,4 @@
-load(":container.bzl", "container_genrule")
+load(":container.bzl", "container_genrule", "target_container_image")
 load(":flavors.td.bzl", "ARCHITECTURE_TO_CONFIG_ARCH", "ARCH_FLAVORS", "ARCHITECTURES")
 load(":constants.bzl", "SELFTESTS", "SelftestsType")
 
@@ -65,6 +65,8 @@ def generated_config(arch, flavor = None):
     container_genrule(
         name = cfg + "-generate",
         arch = arch,
+        # Use native toolchain to avoid toolchain-derived configs flagged as stale when cross-compiling.
+        image_override = "$(location {})".format(target_container_image(arch)),
         cmd = _MERGE_CONFIG.format(
             carch = carch,
             fragments = " ".join(["/ro/frags/" + f for f in fragments]),
