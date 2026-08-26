@@ -1575,7 +1575,7 @@ static int dut_rx(const struct config *cfg)
 	}
 
 	ksft_ready();
-	if (cfg->hold_ms)
+	if (cfg->hold_ms && !cfg->starve_after)
 		usleep(cfg->hold_ms * 1000);
 	while (received < cfg->count) {
 		struct xdp_desc *descs = xsk.rx.desc;

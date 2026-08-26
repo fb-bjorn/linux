@@ -529,6 +529,42 @@ def test_tx_unaligned_end(cfg):
             support=Support.OPTIONAL)
 
 
+def test_rx_reuse(cfg):
+    _run_rx(cfg, count=100000,
+            extra=["--frames", "64", "--ring-size", "64",
+                   "--allow-gaps"],
+            peer_count=200000, peer_extra=["--interval-us", "20"])
+
+
+def test_tx_wrap(cfg):
+    _run_tx(cfg, count=4096,
+            extra=["--frames", "8", "--ring-size", "8"])
+
+
+def test_tx_ring_full(cfg):
+    ring_size = 8
+
+    _run_tx(cfg, count=ring_size + 1,
+            extra=["--frames", str(ring_size), "--ring-size",
+                   str(ring_size), "--tx-full"])
+
+
+def test_rx_refill(cfg):
+    _run_rx(cfg, count=128,
+            extra=["--frames", "64", "--ring-size", "64",
+                   "--starve-after", "64", "--hold-ms", "100",
+                   "--refill-batch", "16", "--allow-gaps"],
+            peer_count=2048, peer_extra=["--interval-us", "1000"])
+
+
+def test_rx_ring_full(cfg):
+    _run_rx(cfg, count=64,
+            extra=["--frames", "128", "--ring-size", "128",
+                   "--rx-ring-size", "64", "--hold-ms", "100"],
+            peer_count=512, peer_extra=["--interval-us", "100"],
+            peer_start=PeerStart.GATED)
+
+
 def _setup(cfg):
     if getattr(cfg, "_xsk_setup_done", False):
         return
@@ -565,6 +601,11 @@ def main():
             test_tx_invalid,
             test_tx_unaligned,
             test_tx_unaligned_end,
+            test_rx_reuse,
+            test_tx_wrap,
+            test_tx_ring_full,
+            test_rx_refill,
+            test_rx_ring_full,
         ], args=(cfg,))
     ksft_exit()
 
