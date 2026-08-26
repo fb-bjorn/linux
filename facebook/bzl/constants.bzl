@@ -1,5 +1,5 @@
-BUILD_IMAGE_X86_64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/D116030286.c9.llvm21.x86_64"
-BUILD_IMAGE_X86_64_SHA256="1db787c2de31b649dbacdfe1c86f22f4d02d241228a34fe5eaec1ac2833440c5"
+BUILD_IMAGE_X86_64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/D117345520.c9.llvm21.x86_64"
+BUILD_IMAGE_X86_64_SHA256="481e0c97c73b4c7ec02fbcc644477b2faa82154fcc180b2591ce72564d7554fe"
 
 BUILD_IMAGE_AARCH64_URI="https://interncache-all.fbcdn.net/manifold/linux_kernel/tree/build_images/D116030286.c9.llvm21.aarch64"
 BUILD_IMAGE_AARCH64_SHA256="76fdb550b6dc086dae234f6add1210419f60bed6ae70f9a866a2bc2b15a48b2c"
