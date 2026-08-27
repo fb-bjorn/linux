@@ -1343,8 +1343,12 @@ static int xsk_open(const struct config *cfg, struct xsk *xsk)
 	optlen = sizeof(options);
 	if (getsockopt(xsk->fd, SOL_XDP, XDP_OPTIONS, &options, &optlen))
 		return -errno;
-	if (!cfg->sw_checksum && !(options.flags & XDP_OPTIONS_ZEROCOPY))
+	if (cfg->sw_checksum) {
+		if (options.flags & XDP_OPTIONS_ZEROCOPY)
+			return -EINVAL;
+	} else if (!(options.flags & XDP_OPTIONS_ZEROCOPY)) {
 		return -EOPNOTSUPP;
+	}
 	xsk->queue = cfg->queue;
 
 	if (!cfg->map_id)
@@ -2035,6 +2039,7 @@ static int dut_tx(const struct config *cfg)
 	struct hwtstamp_config hwtstamp = {};
 	struct xdp_statistics before = {};
 	struct xdp_statistics after = {};
+	enum exit_code code = EXIT_FAIL;
 	bool restore_hwtstamp = false;
 	__u64 last_timestamp = 0;
 	unsigned char *packet;
@@ -2047,7 +2052,8 @@ static int dut_tx(const struct config *cfg)
 		err = hwtstamp_set(cfg->ifname, &hwtstamp);
 		if (err) {
 			fail("timestamp setup: %s", strerror(-err));
-			if (err == -EOPNOTSUPP || err == -ENOTTY)
+			if (err == -EOPNOTSUPP || err == -ENOTTY ||
+			    err == -EINVAL)
 				return EXIT_UNSUPPORTED;
 			return EXIT_FAIL;
 		}
@@ -2068,6 +2074,9 @@ static int dut_tx(const struct config *cfg)
 		phc_fd = phc_open(cfg->ifname);
 		if (phc_fd < 0) {
 			err = fail("PHC open: %s", strerror(-phc_fd));
+			if (phc_fd == -EOPNOTSUPP || phc_fd == -ENOENT ||
+			    phc_fd == -ENODEV)
+				code = EXIT_UNSUPPORTED;
 			goto out_close;
 		}
 	}
@@ -2246,7 +2255,7 @@ out_close:
 	xsk_close(&xsk);
 	if (restore_hwtstamp)
 		hwtstamp_restore(cfg->ifname, &hwtstamp);
-	return err ? EXIT_FAIL : EXIT_OK;
+	return err ? code : EXIT_OK;
 }
 
 static int probe(const struct config *cfg)

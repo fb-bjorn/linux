@@ -13,7 +13,7 @@ from pathlib import Path
 
 from lib.py import bkg, bpf_prog_map_ids, bpftool, cmd, defer
 from lib.py import ethtool, ip, ksft_exit, ksft_run, rand_port
-from lib.py import rand_ports
+from lib.py import rand_ports, tc
 from lib.py import wait_port_listen
 from lib.py import CmdExitFailure, CmdInitFailure, EthtoolFamily
 from lib.py import KsftFailEx, KsftSkipEx
@@ -39,12 +39,15 @@ XDP_PACKET_HEADROOM = 256
 SG_CHUNK_SIZE = 4096
 SG_RX_LENGTH = SG_CHUNK_SIZE + 1
 MAX_HELPER_SEGS = 64
+MAX_TRAFFIC_CLASSES = 16
+MQPRIO_HANDLE = "8001:"
 XSK_FRAME_ALIGN = 128
 XSK_MTU_OVERHEAD = 26
 UNSUPPORTED_ERRNOS = {errno.EINVAL, errno.EOPNOTSUPP}
 UNSUPPORTED_MESSAGES = ("invalid argument", "not supported",
                         "operation not supported")
 RECONFIG_REJECTIONS = UNSUPPORTED_MESSAGES + ("device or resource busy",)
+QDISC_REJECTIONS = UNSUPPORTED_MESSAGES + ("qdisc kind is unknown",)
 
 
 class Support(Enum):
@@ -89,6 +92,12 @@ def _set_base_mtu(cfg):
 @ksft_disruptive
 def _require_disruptive():
     pass
+
+
+def _require_cmd(name):
+    result = cmd(f"command -v -- {name}", shell=True, fail=False)
+    if result.ret:
+        raise KsftSkipEx(f"test requires command: {name}")
 
 
 def _skip_unsupported(result, operation, messages=UNSUPPORTED_MESSAGES):
@@ -216,6 +225,38 @@ def _max_mtu(cfg):
     remote = cfg.remote_dev.get("max_mtu", local)
 
     return min(local, remote)
+
+
+def _setup_etf(cfg, queue):
+    _require_cmd("tc")
+    channels = cfg.ethnl.channels_get({"header": {"dev-index": cfg.ifindex}})
+    count = min(channels.get("combined-count", 0), MAX_TRAFFIC_CLASSES)
+    if count <= queue:
+        raise KsftSkipEx(f"ETF needs queue {queue}")
+
+    qdiscs = tc(f"qdisc show dev {cfg.ifname}", json=True)
+    root = next((qdisc for qdisc in qdiscs if qdisc.get("root")), None)
+    if root and root.get("kind") not in ("mq", "noqueue"):
+        raise KsftSkipEx("refusing to replace a configured root qdisc")
+    if root and root.get("kind") == "mq" and root.get("handle") != "0:":
+        raise KsftSkipEx("refusing to replace an addressable mq qdisc")
+
+    prio_map = " ".join(str(min(prio, count - 1))
+                        for prio in range(MAX_TRAFFIC_CLASSES))
+    queues = " ".join(f"1@{index}" for index in range(count))
+    try:
+        tc(f"qdisc replace dev {cfg.ifname} root handle {MQPRIO_HANDLE} "
+           f"mqprio num_tc {count} map {prio_map} queues {queues} hw 0")
+    except CmdExitFailure as exc:
+        _skip_unsupported(exc.cmd, "mqprio setup", QDISC_REJECTIONS)
+    defer(cmd, f"tc qdisc del dev {cfg.ifname} root", fail=False)
+
+    parent = f"{MQPRIO_HANDLE}{queue + 1}"
+    try:
+        tc(f"qdisc replace dev {cfg.ifname} parent {parent} "
+           "etf offload clockid CLOCK_TAI delta 500000")
+    except CmdExitFailure as exc:
+        _skip_unsupported(exc.cmd, "ETF setup", QDISC_REJECTIONS)
 
 
 def _load_bpf(cfg, port, port2=None):
@@ -902,6 +943,40 @@ def test_tx_sg_limit(cfg):
             peer_count=0, peer_extra=["--timeout-ms", "1000"])
 
 
+def test_tx_checksum(cfg):
+    _require_zc(cfg)
+    if "tx-checksum" not in cfg.xsk_features:
+        raise KsftSkipEx("device does not advertise XSK TX checksum")
+
+    _run_tx(cfg, extra=["--tx-checksum"])
+
+
+def test_tx_sw_checksum(cfg):
+    _run_tx(cfg, extra=["--sw-checksum"], support=Support.OPTIONAL)
+
+
+@ksft_disruptive
+def test_tx_timestamp(cfg):
+    _require_zc(cfg)
+    if "tx-timestamp" not in cfg.xsk_features:
+        raise KsftSkipEx("device does not advertise XSK TX timestamp")
+
+    _run_tx(cfg, count=16, extra=["--tx-timestamp"])
+
+
+@ksft_disruptive
+def test_tx_launch_time(cfg):
+    _require_zc(cfg)
+    if "tx-launch-time-fifo" not in cfg.xsk_features:
+        raise KsftSkipEx("device does not advertise XSK launch time")
+
+    _set_base_mtu(cfg)
+    _setup_queues(cfg, MIN_QUEUES)
+    _setup_etf(cfg, TEST_QUEUE)
+    _run_tx(cfg, count=4, extra=["--launch-time"],
+            mtu_mode=MtuMode.CONFIGURED)
+
+
 def _setup(cfg):
     if getattr(cfg, "_xsk_setup_done", False):
         return
@@ -954,6 +1029,10 @@ def main():
             test_bound_mtu,
             test_bound_channels,
             test_irq_move,
+            test_tx_checksum,
+            test_tx_sw_checksum,
+            test_tx_timestamp,
+            test_tx_launch_time,
         ], args=(cfg,))
     ksft_exit()
 
