@@ -2347,7 +2347,8 @@ static int shared_open(const struct config *cfg, const struct xsk *owner,
 }
 
 static int shared_recv(const struct config *cfg, struct xsk *xsk,
-		       __u64 deadline, void *packet, void *expected)
+		       __u32 first, __u32 frame_count, __u64 deadline,
+		       void *packet, void *expected)
 {
 	struct xdp_desc *ring = xsk->rx.desc;
 	__u32 held[MAX_BATCH];
@@ -2379,7 +2380,8 @@ static int shared_recv(const struct config *cfg, struct xsk *xsk,
 			int frame;
 
 			frame = frame_find(cfg, xsk, desc->addr);
-			if (frame < 0 ||
+			if (frame < 0 || (__u32)frame < first ||
+			    (__u32)frame >= first + frame_count ||
 			    xsk->frames[frame].state != FRAME_FILL) {
 				err = fail("shared UMEM ownership failure");
 				goto release;
@@ -2490,10 +2492,12 @@ static int shared(const struct config *cfg)
 
 	ksft_ready();
 	deadline = now_ms() + cfg->timeout_ms;
-	err = shared_recv(&owner_cfg, &owner, deadline, packet, expected);
+	err = shared_recv(&owner_cfg, &owner, 0, split, deadline, packet,
+			  expected);
 	if (!err) {
 		deadline = now_ms() + cfg->timeout_ms;
-		err = shared_recv(&second_cfg, &second, deadline, packet,
+		err = shared_recv(&second_cfg, &second, split,
+				  cfg->frame_count - split, deadline, packet,
 				  expected);
 	}
 

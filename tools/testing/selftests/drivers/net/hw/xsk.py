@@ -7,11 +7,12 @@ import re
 import shlex
 import socket
 import sys
+import time
 from enum import Enum, auto
 from pathlib import Path
 
 from lib.py import bkg, bpf_prog_map_ids, bpftool, cmd, defer
-from lib.py import ethtool, ip, ksft_exit, ksft_run
+from lib.py import ethtool, ip, ksft_exit, ksft_run, rand_port
 from lib.py import rand_ports
 from lib.py import wait_port_listen
 from lib.py import CmdExitFailure, CmdInitFailure, EthtoolFamily
@@ -54,6 +55,11 @@ class Support(Enum):
 class MtuMode(Enum):
     BASE = auto()
     CONFIGURED = auto()
+
+
+class SharedMode(Enum):
+    STARVE = auto()
+    SG = auto()
 
 
 class PeerStart(Enum):
@@ -568,6 +574,270 @@ def test_rx_ring_full(cfg):
             peer_start=PeerStart.GATED)
 
 
+def test_bind_before_attach(cfg):
+    port = rand_port()
+
+    _require_zc(cfg)
+    _set_base_mtu(cfg)
+    _add_flow_rule(cfg, port, TEST_QUEUE)
+    _probe(cfg)
+    pin, map_id = _load_bpf(cfg, port)
+
+    dut = _common_args(cfg, "dut-rx", port)
+    dut += ["--queue", str(TEST_QUEUE), "--map-id", str(map_id)]
+    peer = _common_args(cfg, "peer-tx", port)
+    peer += ["--interval-us", str(RX_INTERVAL_US)]
+
+    try:
+        with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+            _attach_xdp(cfg, pin)
+            _run_peer(cfg, peer)
+    except (CmdExitFailure, CmdInitFailure) as exc:
+        _helper_failure(exc, Support.REQUIRED)
+
+
+def test_rebind(cfg):
+    _require_zc(cfg)
+    _set_base_mtu(cfg)
+    _setup_queues(cfg, MIN_QUEUES)
+    port = rand_port()
+    pin, _ = _load_bpf(cfg, port)
+    xdp_cleanup = _attach_xdp(cfg, pin)
+
+    args = [str(cfg.bin_local), "probe", "--interface", cfg.ifname,
+            "--queue", str(TEST_QUEUE)]
+    for _ in range(100):
+        result = cmd(shlex.join(args), fail=False)
+        if result.ret:
+            raise KsftFailEx(f"AF_XDP rebind failed: {result}")
+
+    cfg.require_cmd("ping", local=False, remote=True)
+    cmd(f"ping -{cfg.addr_ipver} -c 1 -W 2 {cfg.addr}", host=cfg.remote)
+    xdp_cleanup.exec()
+    _run_tx(cfg, count=1)
+
+
+def _run_tx_change(cfg, change, restore):
+    port, ready_port = rand_ports(2)
+
+    _require_zc(cfg)
+    _set_base_mtu(cfg)
+    _setup_queues(cfg, MIN_QUEUES)
+    pin, _ = _load_bpf(cfg, port)
+    xdp_cleanup = _attach_xdp(cfg, pin)
+    _probe(cfg)
+
+    dut = _common_args(cfg, "dut-tx", port, count=16)
+    dut += ["--queue", str(TEST_QUEUE), "--hold-ms", "2000"]
+    peer = _common_args(cfg, "peer-rx", port, count=16)
+    peer += ["--ready-port", str(ready_port)]
+
+    try:
+        with bkg(shlex.join(peer), host=cfg.remote, exit_wait=True):
+            wait_port_listen(ready_port, host=cfg.remote)
+            with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+                result = change()
+                if result.ret:
+                    _skip_unsupported(result, "live reconfiguration",
+                                      RECONFIG_REJECTIONS)
+                restorer = defer(restore)
+    except (CmdExitFailure, CmdInitFailure) as exc:
+        _helper_failure(exc, Support.REQUIRED)
+
+    restorer.exec()
+    xdp_cleanup.exec()
+    _run_tx(cfg, count=1)
+
+
+@ksft_disruptive
+def test_bound_mtu(cfg):
+    _require_zc(cfg)
+
+    _set_base_mtu(cfg)
+    mtu = BASE_MTU
+    new_mtu = mtu + 1
+
+    def change():
+        return cmd(f"ip link set dev {cfg.ifname} mtu {new_mtu}",
+                   fail=False)
+
+    def restore():
+        ip(f"link set dev {cfg.ifname} mtu {mtu}")
+
+    _run_tx_change(cfg, change, restore)
+
+
+@ksft_disruptive
+def test_bound_channels(cfg):
+    _require_zc(cfg)
+
+    channels = cfg.ethnl.channels_get({"header": {"dev-index": cfg.ifindex}})
+    current = channels.get("combined-count", 0)
+    maximum = channels.get("combined-max", 0)
+    if current < MIN_QUEUES:
+        raise KsftSkipEx("test requires two active combined queues")
+    if current < maximum:
+        changed = current + 1
+    elif current > MIN_QUEUES:
+        changed = current - 1
+    else:
+        raise KsftSkipEx("no safe combined queue-count change")
+
+    def change():
+        return cmd(f"ethtool -L {cfg.ifname} combined {changed}",
+                   fail=False)
+
+    def restore():
+        ethtool(f"-L {cfg.ifname} combined {current}")
+
+    _run_tx_change(cfg, change, restore)
+
+
+def _write_file(path, value):
+    with open(path, "w", encoding="utf-8") as file:
+        file.write(value)
+
+
+def _queue_irq(cfg, queue):
+    info = cfg.netnl.queue_get({"ifindex": cfg.ifindex, "type": "rx",
+                                "id": queue})
+    napi_id = info.get("napi-id")
+    if napi_id is None:
+        raise KsftSkipEx("queue has no NAPI ID")
+
+    napi = cfg.netnl.napi_get({"id": napi_id})
+    if "irq" not in napi:
+        raise KsftSkipEx("queue NAPI has no IRQ")
+
+    return napi["irq"]
+
+
+@ksft_disruptive
+def test_irq_move(cfg):
+    port = rand_port()
+
+    _require_zc(cfg)
+    _set_base_mtu(cfg)
+    _add_flow_rule(cfg, port, TEST_QUEUE)
+    pin, map_id = _load_bpf(cfg, port)
+    _attach_xdp(cfg, pin)
+    _probe(cfg)
+
+    cpus = sorted(os.sched_getaffinity(0))
+    if len(cpus) < 2:
+        raise KsftSkipEx("test requires two CPUs")
+
+    irq = _queue_irq(cfg, TEST_QUEUE)
+    affinity = Path(f"/proc/irq/{irq}/smp_affinity_list")
+    try:
+        old = affinity.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise KsftSkipEx(f"cannot read IRQ {irq} affinity") from exc
+
+    dut = _common_args(cfg, "dut-rx", port, 4096)
+    dut += ["--queue", str(TEST_QUEUE), "--map-id", str(map_id)]
+    dut += ["--allow-gaps"]
+    peer = _common_args(cfg, "peer-tx", port, 16384)
+    peer += ["--interval-us", "100"]
+
+    try:
+        _write_file(affinity, str(cpus[0]))
+    except OSError as exc:
+        raise KsftSkipEx(f"cannot set IRQ {irq} affinity") from exc
+    defer(_write_file, affinity, old)
+
+    try:
+        with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+            with bkg(shlex.join(peer), host=cfg.remote, exit_wait=True):
+                time.sleep(0.1)
+                _write_file(affinity, str(cpus[1]))
+    except (CmdExitFailure, CmdInitFailure) as exc:
+        _helper_failure(exc, Support.REQUIRED)
+
+
+def _run_shared(cfg, *, length=DEFAULT_LENGTH, frags=1, min_frags=1,
+                mode=SharedMode.STARVE):
+    _require_zc(cfg)
+    _setup_queues(cfg, 3)
+    _require_ntuple(cfg)
+
+    port, port2 = rand_ports(2)
+    frame_count = 128
+    if mode == SharedMode.STARVE:
+        packet_count = 65
+    else:
+        packet_count = 1
+    _isolate_rx(cfg)
+    _add_rule(cfg, port, 1)
+    _add_rule(cfg, port2, 2)
+    pin, map_id = _load_bpf(cfg, port, port2)
+    _attach_xdp(cfg, pin)
+
+    probe_extra = None
+    if frags > 1:
+        probe_extra = ["--sg", "--frags", str(frags),
+                       "--min-frags", str(min_frags)]
+    _probe(cfg, probe_extra, length=length)
+
+    dut = _common_args(cfg, "shared", port, count=packet_count,
+                       length=length)
+    dut += ["--queue", "1", "--queue2", "2", "--port2", str(port2),
+            "--map-id", str(map_id), "--frames", str(frame_count),
+            "--ring-size", str(frame_count)]
+    if mode == SharedMode.STARVE:
+        dut += ["--starve-after", "64", "--hold-ms", "100"]
+    if frags > 1:
+        dut += ["--sg", "--frags", str(frags),
+                "--min-frags", str(min_frags)]
+    peer = _common_args(cfg, "peer-tx", port, count=packet_count,
+                        length=length)
+    peer2 = _common_args(cfg, "peer-tx", port2, count=packet_count,
+                         length=length)
+    if mode == SharedMode.STARVE:
+        pause = ["--interval-us", "100", "--pause-after", "64",
+                 "--pause-ms", "200"]
+        peer += pause
+        peer2 += pause
+
+    try:
+        with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+            _run_peer(cfg, peer)
+            _run_peer(cfg, peer2)
+    except (CmdExitFailure, CmdInitFailure) as exc:
+        match = re.search(r"shared_bind_errno=(\d+)",
+                          exc.cmd.stderr or "")
+        bind_errno = int(match.group(1)) if match else None
+        if (exc.cmd.ret == XSK_BIND_ERROR and
+                bind_errno in UNSUPPORTED_ERRNOS):
+            raise KsftSkipEx("shared UMEM bind rejected") from exc
+        raise KsftFailEx(f"shared UMEM test failed: {exc.cmd}") from exc
+
+
+def test_shared_umem(cfg):
+    _require_zc(cfg)
+
+    _set_base_mtu(cfg)
+    _run_shared(cfg)
+
+
+@ksft_disruptive
+def test_shared_umem_sg(cfg):
+    _require_zc(cfg)
+    if cfg.zc_max_segs < 2:
+        raise KsftSkipEx("device does not advertise multi-buffer zero-copy")
+    if cfg.zc_max_segs > MAX_HELPER_SEGS:
+        raise KsftSkipEx(f"segment limit {cfg.zc_max_segs} is too large")
+
+    length = SG_RX_LENGTH
+    mtu = length - ETH_HEADER_LEN
+    if mtu > _max_mtu(cfg):
+        raise KsftSkipEx(f"test needs MTU {mtu}")
+
+    _set_mtu(cfg, mtu)
+    _run_shared(cfg, length=length, frags=cfg.zc_max_segs,
+                min_frags=2, mode=SharedMode.SG)
+
+
 @ksft_disruptive
 def test_rx_sg(cfg):
     _require_zc(cfg)
@@ -677,6 +947,13 @@ def main():
             test_tx_sg,
             test_rx_sg_required,
             test_tx_sg_limit,
+            test_bind_before_attach,
+            test_rebind,
+            test_shared_umem,
+            test_shared_umem_sg,
+            test_bound_mtu,
+            test_bound_channels,
+            test_irq_move,
         ], args=(cfg,))
     ksft_exit()
 
