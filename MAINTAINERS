@@ -29517,6 +29517,7 @@ F:	net/xdp/
 F:	tools/testing/selftests/bpf/*xsk*
 F:	tools/testing/selftests/drivers/net/hw/xsk.bpf.c
 F:	tools/testing/selftests/drivers/net/hw/xsk.c
+F:	tools/testing/selftests/drivers/net/hw/xsk.py
 
 XEN BLOCK SUBSYSTEM
 M:	Roger Pau Monné <roger@xenproject.org>
