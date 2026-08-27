@@ -18,7 +18,7 @@ from lib.py import CmdExitFailure, CmdInitFailure, EthtoolFamily
 from lib.py import KsftFailEx, KsftSkipEx
 from lib.py import NetdevFamily
 from lib.py import NetDrvEpEnv
-from lib.py import ksft_disruptive
+from lib.py import KsftNamedVariant, ksft_disruptive, ksft_variants
 
 
 DEFAULT_COUNT = 256
@@ -26,11 +26,17 @@ DEFAULT_LENGTH = 256
 DEFAULT_SEED = 1
 RX_INTERVAL_US = 100
 BASE_MTU = 1500
+MAX_PACKET_SIZE = 65535
 MIN_QUEUES = 2
 TEST_QUEUE = 1
 XSK_BIND_ERROR = 2
 XSK_LAYOUT_UNSUPPORTED = 3
 XSK_FEATURE_UNSUPPORTED = 4
+ETH_HEADER_LEN = 14
+# Keep these in step with xp_assign_dev() AF_XDP pool geometry.
+XDP_PACKET_HEADROOM = 256
+XSK_FRAME_ALIGN = 128
+XSK_MTU_OVERHEAD = 26
 UNSUPPORTED_ERRNOS = {errno.EINVAL, errno.EOPNOTSUPP}
 UNSUPPORTED_MESSAGES = ("invalid argument", "not supported",
                         "operation not supported")
@@ -194,6 +200,13 @@ def _set_mtu(cfg, mtu):
                               RECONFIG_REJECTIONS)
         defer(ip, f"link set dev {cfg.remote_ifname} mtu {remote_mtu}",
               host=cfg.remote)
+
+
+def _max_mtu(cfg):
+    local = cfg.dev.get("max_mtu", MAX_PACKET_SIZE - ETH_HEADER_LEN)
+    remote = cfg.remote_dev.get("max_mtu", local)
+
+    return min(local, remote)
 
 
 def _load_bpf(cfg, port, port2=None):
@@ -417,6 +430,105 @@ def test_tx_4k(cfg):
     _run_tx(cfg)
 
 
+def test_rx_2k(cfg):
+    _run_rx(cfg, length=1514, extra=["--chunk-size", "2048"],
+            support=Support.OPTIONAL)
+
+
+def test_rx_fill_mask(cfg):
+    _run_rx(cfg, length=1514,
+            extra=["--chunk-size", "2048", "--fill-offset", "64"],
+            support=Support.OPTIONAL)
+
+
+@ksft_variants([
+    KsftNamedVariant("1", 1),
+    KsftNamedVariant("128", 128),
+    KsftNamedVariant("256", 256),
+])
+def test_rx_headroom(cfg, headroom):
+    _run_rx(cfg, length=1514,
+            extra=["--chunk-size", "2048", "--headroom", str(headroom)],
+            support=Support.OPTIONAL)
+
+
+def test_rx_headroom_limit(cfg):
+    _require_zc(cfg)
+    _set_base_mtu(cfg)
+    _setup_queues(cfg, MIN_QUEUES)
+    _probe(cfg, ["--chunk-size", "2048", "--headroom", "257"],
+           expect_errno=errno.EINVAL)
+
+
+@ksft_disruptive
+def test_rx_single_boundary(cfg):
+    chunk_size = 2048
+    headroom = 256
+
+    _require_zc(cfg)
+
+    capacity = chunk_size - XDP_PACKET_HEADROOM - headroom
+    capacity &= -XSK_FRAME_ALIGN
+    mtu = capacity - XSK_MTU_OVERHEAD
+    length = mtu + ETH_HEADER_LEN
+
+    if mtu > _max_mtu(cfg):
+        raise KsftSkipEx(f"test needs MTU {mtu}")
+    _set_mtu(cfg, mtu)
+    _run_rx(cfg, length=length,
+            extra=["--chunk-size", str(chunk_size),
+                   "--headroom", str(headroom)],
+            support=Support.OPTIONAL, mtu_mode=MtuMode.CONFIGURED)
+
+
+def test_rx_unaligned(cfg):
+    _run_rx(cfg, length=1514,
+            extra=["--chunk-size", "2048", "--fill-offset", "128",
+                   "--unaligned"], support=Support.OPTIONAL)
+
+
+def test_rx_unaligned_3k(cfg):
+    _run_rx(cfg, length=1514,
+            extra=["--chunk-size", "3072", "--fill-offset", "128",
+                   "--unaligned"], support=Support.OPTIONAL)
+
+
+def test_rx_cross_page(cfg):
+    # Prove steering before treating cross-page silence as unsupported.
+    _run_rx(cfg, count=1)
+    _run_rx(cfg, count=8, length=512,
+            extra=["--chunk-size", "2048", "--frames", "64",
+                   "--ring-size", "64", "--cross-page",
+                   "--probe-layout", "--unaligned", "--allow-gaps",
+                   "--timeout-ms", "2000"], support=Support.OPTIONAL,
+            peer_count=64, peer_extra=["--interval-us", "100"])
+
+
+def test_tx_offset(cfg):
+    _run_tx(cfg, length=256,
+            extra=["--tx-offset", str(4096 - 256)])
+
+
+def test_tx_invalid(cfg):
+    _run_tx(cfg, count=1, length=256,
+            extra=["--tx-offset", str(4096 - 256), "--invalid-tx",
+                   "--timeout-ms", "1000"],
+            peer_count=0, peer_extra=["--timeout-ms", "1000"])
+
+
+def test_tx_unaligned(cfg):
+    _run_tx(cfg, length=256,
+            extra=["--chunk-size", "3072", "--tx-offset", "128",
+                   "--unaligned"], support=Support.OPTIONAL)
+
+
+def test_tx_unaligned_end(cfg):
+    _run_tx(cfg, length=256,
+            extra=["--chunk-size", "3072", "--tx-offset",
+                   str(3072 - 256), "--unaligned"],
+            support=Support.OPTIONAL)
+
+
 def _setup(cfg):
     if getattr(cfg, "_xsk_setup_done", False):
         return
@@ -441,6 +553,18 @@ def main():
         ksft_run([
             test_rx_4k,
             test_tx_4k,
+            test_rx_2k,
+            test_rx_fill_mask,
+            test_rx_headroom,
+            test_rx_headroom_limit,
+            test_rx_single_boundary,
+            test_rx_unaligned,
+            test_rx_unaligned_3k,
+            test_rx_cross_page,
+            test_tx_offset,
+            test_tx_invalid,
+            test_tx_unaligned,
+            test_tx_unaligned_end,
         ], args=(cfg,))
     ksft_exit()
 
