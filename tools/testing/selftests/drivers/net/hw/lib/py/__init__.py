@@ -21,7 +21,7 @@ try:
     from net.lib.py import NetNS, NetNSEnter, NetdevSimDev, UserNetNS
     from net.lib.py import EthtoolFamily, NetdevFamily, NetshaperFamily, \
         NlError, RtnlFamily, DevlinkFamily, PSPFamily, Netlink
-    from net.lib.py import CmdExitFailure
+    from net.lib.py import CmdExitFailure, CmdInitFailure
     from net.lib.py import bkg, cmd, bpftool, bpftrace, defer, ethtool, \
         fd_read_timeout, ip, rand_port, rand_ports, wait_port_listen, \
         wait_file, tool
@@ -37,7 +37,7 @@ try:
     __all__ = ["NetNS", "NetNSEnter", "NetdevSimDev", "UserNetNS",
                "EthtoolFamily", "NetdevFamily", "NetshaperFamily",
                "NlError", "RtnlFamily", "DevlinkFamily", "PSPFamily", "Netlink",
-               "CmdExitFailure",
+               "CmdExitFailure", "CmdInitFailure",
                "bkg", "cmd", "bpftool", "bpftrace", "defer", "ethtool",
                "fd_read_timeout", "ip", "rand_port", "rand_ports",
                "wait_port_listen", "wait_file", "tool",
