@@ -181,6 +181,36 @@ Run the test::
   ok 3 ping.test_tcp
   # Totals: pass:2 fail:0 xfail:0 xpass:0 skip:1 error:0
 
+Manual AF_XDP peer
+~~~~~~~~~~~~~~~~~~
+
+``hw/xsk.py --manual`` supports setups where a control host can reach both
+endpoints, but the DUT cannot log in to the peer. Install the same ``hw/xsk``
+build on the peer, then create
+``tools/testing/selftests/drivers/net/hw/net.config`` with unquoted values::
+
+  NETIF=DUT_DATA_IFACE
+  LOCAL_V6=DUT_DATA_ADDR
+  REMOTE_V6=PEER_DATA_ADDR
+  XSK_PEER_IFNAME=PEER_DATA_IFACE
+  XSK_PEER_MAC=PEER_DATA_MAC
+  XSK_PEER_MTU=PEER_DATA_MTU
+  XSK_PEER_MAX_MTU=PEER_DATA_MAX_MTU
+  XSK_PEER_BIN=/tmp/xsk
+
+Use the IPv4 variables when IPv6 is unavailable. Run one case at a time,
+for example ``hw/xsk.py --manual -t test_rx_4k``, from a terminal. Run the
+printed command in a root shell on the peer. Manual mode does not copy files.
+The data link must permit the printed TCP gate connections.
+
+The test prompts for peer MTU changes when needed. Printed commands report
+the peer exit status. Transmit cases require ``ok`` after ``peer exit=0``.
+Shared-UMEM cases require two peer terminals. Rebind, live reconfiguration,
+and IRQ migration cases require an automated peer and are skipped.
+
+This configuration is specific to ``xsk.py --manual``. Other endpoint tests
+still require ``REMOTE_TYPE`` and ``REMOTE_ARGS``.
+
 Dependencies
 ~~~~~~~~~~~~
 

@@ -12,16 +12,21 @@ from enum import Enum, auto
 from pathlib import Path
 
 from lib.py import bkg, bpf_prog_map_ids, bpftool, cmd, defer
-from lib.py import ethtool, ip, ksft_exit, ksft_run, rand_port
+from lib.py import ethtool, ip, ksft_exit, ksft_pr, ksft_run, rand_port
 from lib.py import rand_ports, tc
 from lib.py import wait_port_listen
 from lib.py import CmdExitFailure, CmdInitFailure, EthtoolFamily
-from lib.py import KsftFailEx, KsftSkipEx
+from lib.py import KsftFailEx, KsftSkipEx, KsftXfailEx
 from lib.py import NetdevFamily
-from lib.py import NetDrvEpEnv
+from lib.py import NetDrvEnv, NetDrvEpEnv
 from lib.py import KsftNamedVariant, ksft_disruptive, ksft_variants
 
 
+MANUAL_ARG = "--manual"
+MANUAL_OK = "ok"
+KSFT_SKIP = 4
+MANUAL_GATE_TIMEOUT_MS = 300000
+MANUAL_PHASE_TIMEOUT = 12
 DEFAULT_COUNT = 256
 DEFAULT_LENGTH = 256
 DEFAULT_SEED = 1
@@ -68,6 +73,76 @@ class SharedMode(Enum):
 class PeerStart(Enum):
     NORMAL = auto()
     GATED = auto()
+
+
+def _take_manual_arg():
+    if MANUAL_ARG not in sys.argv:
+        return False
+
+    sys.argv.remove(MANUAL_ARG)
+    return True
+
+
+class ManualEnv(NetDrvEnv):
+    def __init__(self, src_path):
+        super().__init__(src_path, nsim_test=False)
+
+        self.addr_v = {"4": self.env.get("LOCAL_V4"),
+                       "6": self.env.get("LOCAL_V6")}
+        self.remote_addr_v = {"4": self.env.get("REMOTE_V4"),
+                              "6": self.env.get("REMOTE_V6")}
+        have_v6 = self.addr_v["6"] and self.remote_addr_v["6"]
+        self.addr_ipver = "6" if have_v6 else "4"
+        self.addr = self.addr_v[self.addr_ipver]
+        self.remote_addr = self.remote_addr_v[self.addr_ipver]
+        self.remote_ifname = self.env.get("XSK_PEER_IFNAME")
+        self.remote_mac = self.env.get("XSK_PEER_MAC")
+        self.remote_mtu = self.env.get("XSK_PEER_MTU")
+        self.remote_max_mtu = self.env.get("XSK_PEER_MAX_MTU")
+        self.peer_bin = self.env.get("XSK_PEER_BIN")
+
+        required = {
+            f"LOCAL_V{self.addr_ipver}": self.addr,
+            f"REMOTE_V{self.addr_ipver}": self.remote_addr,
+            "XSK_PEER_IFNAME": self.remote_ifname,
+            "XSK_PEER_MAC": self.remote_mac,
+            "XSK_PEER_MTU": self.remote_mtu,
+            "XSK_PEER_MAX_MTU": self.remote_max_mtu,
+            "XSK_PEER_BIN": self.peer_bin,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise KsftXfailEx("manual mode needs: " + ", ".join(missing))
+
+        try:
+            self.remote_mtu = int(self.remote_mtu)
+            self.remote_max_mtu = int(self.remote_max_mtu)
+        except ValueError as exc:
+            raise KsftXfailEx("peer MTU values must be integers") from exc
+        if self.remote_mtu <= 0 or self.remote_max_mtu <= 0:
+            raise KsftXfailEx("peer MTU values must be positive")
+
+
+def _is_manual(cfg):
+    return isinstance(cfg, ManualEnv)
+
+
+def _manual_skip(message):
+    print("TAP version 13", flush=True)
+    print(f"1..0 # SKIP {message}", flush=True)
+    raise SystemExit(KSFT_SKIP)
+
+
+def _manual_wait(message):
+    ksft_pr(message)
+    if not sys.stdin.readline():
+        raise KsftFailEx("manual input ended")
+
+
+def _manual_cmd(message, command):
+    ksft_pr(message)
+    # Keep the command copyable; stdout carries TAP output.
+    print(command, file=sys.stderr, flush=True)
 
 
 def _require_zc(cfg):
@@ -205,6 +280,17 @@ def _set_mtu(cfg, mtu):
                               RECONFIG_REJECTIONS)
         defer(ip, f"link set dev {cfg.ifname} mtu {local_mtu}")
 
+    if _is_manual(cfg):
+        if cfg.remote_max_mtu < mtu:
+            raise KsftSkipEx(f"peer maximum MTU is below {mtu}")
+        if cfg.remote_mtu < mtu:
+            _require_disruptive()
+            command = f"ip link set dev {cfg.remote_ifname} mtu {mtu}"
+            _manual_cmd("Run on the peer as root:", command)
+            _manual_wait("Press Enter when the MTU has been changed")
+            defer(_restore_manual_mtu, cfg, cfg.remote_mtu)
+        return
+
     remote_dev = ip(f"-d link show dev {cfg.remote_ifname}",
                     host=cfg.remote, json=True)[0]
     remote_mtu = remote_dev["mtu"]
@@ -220,9 +306,19 @@ def _set_mtu(cfg, mtu):
               host=cfg.remote)
 
 
+def _restore_manual_mtu(cfg, mtu):
+    command = f"ip link set dev {cfg.remote_ifname} mtu {mtu}"
+
+    _manual_cmd("Restore the peer MTU as root:", command)
+    _manual_wait("Press Enter when the MTU has been restored")
+
+
 def _max_mtu(cfg):
     local = cfg.dev.get("max_mtu", MAX_PACKET_SIZE - ETH_HEADER_LEN)
-    remote = cfg.remote_dev.get("max_mtu", local)
+    if _is_manual(cfg):
+        remote = cfg.remote_max_mtu
+    else:
+        remote = cfg.remote_dev.get("max_mtu", local)
 
     return min(local, remote)
 
@@ -370,6 +466,23 @@ def _run_peer(cfg, args):
     return cmd(shlex.join(args), host=cfg.remote, timeout=60)
 
 
+def _manual_peer(args, ready_port):
+    command = shlex.join(args + [
+        "--ready-port", str(ready_port),
+        "--ready-timeout-ms", str(MANUAL_GATE_TIMEOUT_MS),
+    ])
+    command += '; status=$?; echo "peer exit=$status"'
+
+    _manual_cmd("Run on the peer as root:", command)
+    _manual_wait("Press Enter after the peer prints ready")
+
+
+def _confirm_peer_rx():
+    ksft_pr(f"Type {MANUAL_OK} after the peer exits successfully")
+    if sys.stdin.readline().strip().lower() != MANUAL_OK:
+        raise KsftFailEx("peer result was not confirmed")
+
+
 def _release(cfg, target, port):
     family = socket.AF_INET6 if cfg.addr_ipver == "6" else socket.AF_INET
     address = (target, port)
@@ -386,6 +499,10 @@ def _release(cfg, target, port):
 
 def _release_peer(cfg, port):
     _release(cfg, cfg.remote_addr, port)
+
+
+def _release_local(cfg, port):
+    _release(cfg, cfg.addr, port)
 
 
 def _run_rx(cfg, *, count=DEFAULT_COUNT, length=DEFAULT_LENGTH,
@@ -414,6 +531,13 @@ def _run_rx(cfg, *, count=DEFAULT_COUNT, length=DEFAULT_LENGTH,
             peer += peer_extra
         else:
             peer += ["--interval-us", str(RX_INTERVAL_US)]
+
+        if _is_manual(cfg):
+            _manual_peer(peer, ready_port)
+            with bkg(shlex.join(dut), ksft_ready=True,
+                     exit_wait=True):
+                _release_peer(cfg, ready_port)
+            return
 
         if peer_start == PeerStart.GATED:
             peer += ["--ready-port", str(ready_port)]
@@ -457,6 +581,20 @@ def _run_tx(cfg, *, count=DEFAULT_COUNT, length=DEFAULT_LENGTH,
             dut += extra
         if peer_extra:
             peer += peer_extra
+
+        if _is_manual(cfg):
+            if not watch_silence:
+                peer += ["--start-gated"]
+            _manual_peer(peer, ready_port)
+            if not watch_silence:
+                _release_peer(cfg, ready_port)
+            try:
+                cmd(shlex.join(dut), timeout=60)
+            finally:
+                if watch_silence:
+                    _release_peer(cfg, ready_port)
+            _confirm_peer_rx()
+            return
 
         command = shlex.join(peer + ["--ready-port", str(ready_port)])
         with bkg(command, host=cfg.remote, exit_wait=True):
@@ -616,7 +754,7 @@ def test_rx_ring_full(cfg):
 
 
 def test_bind_before_attach(cfg):
-    port = rand_port()
+    port, ready_port = rand_ports(2)
 
     _require_zc(cfg)
     _set_base_mtu(cfg)
@@ -630,6 +768,13 @@ def test_bind_before_attach(cfg):
     peer += ["--interval-us", str(RX_INTERVAL_US)]
 
     try:
+        if _is_manual(cfg):
+            _manual_peer(peer, ready_port)
+            with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+                _attach_xdp(cfg, pin)
+                _release_peer(cfg, ready_port)
+            return
+
         with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
             _attach_xdp(cfg, pin)
             _run_peer(cfg, peer)
@@ -638,6 +783,9 @@ def test_bind_before_attach(cfg):
 
 
 def test_rebind(cfg):
+    if _is_manual(cfg):
+        raise KsftSkipEx("rebind recovery requires an automated peer")
+
     _require_zc(cfg)
     _set_base_mtu(cfg)
     _setup_queues(cfg, MIN_QUEUES)
@@ -659,6 +807,9 @@ def test_rebind(cfg):
 
 
 def _run_tx_change(cfg, change, restore):
+    if _is_manual(cfg):
+        raise KsftSkipEx("live reconfiguration requires an automated peer")
+
     port, ready_port = rand_ports(2)
 
     _require_zc(cfg)
@@ -755,6 +906,9 @@ def _queue_irq(cfg, queue):
 
 @ksft_disruptive
 def test_irq_move(cfg):
+    if _is_manual(cfg):
+        raise KsftSkipEx("IRQ migration requires an automated peer")
+
     port = rand_port()
 
     _require_zc(cfg)
@@ -802,7 +956,7 @@ def _run_shared(cfg, *, length=DEFAULT_LENGTH, frags=1, min_frags=1,
     _setup_queues(cfg, 3)
     _require_ntuple(cfg)
 
-    port, port2 = rand_ports(2)
+    port, port2, ready_port, ready_port2, phase_port = rand_ports(5)
     frame_count = 128
     if mode == SharedMode.STARVE:
         packet_count = 65
@@ -825,6 +979,10 @@ def _run_shared(cfg, *, length=DEFAULT_LENGTH, frags=1, min_frags=1,
     dut += ["--queue", "1", "--queue2", "2", "--port2", str(port2),
             "--map-id", str(map_id), "--frames", str(frame_count),
             "--ring-size", str(frame_count)]
+    if _is_manual(cfg):
+        dut += ["--ready-port", str(phase_port),
+                "--ready-timeout-ms",
+                str(MANUAL_PHASE_TIMEOUT * 1000)]
     if mode == SharedMode.STARVE:
         dut += ["--starve-after", "64", "--hold-ms", "100"]
     if frags > 1:
@@ -841,6 +999,20 @@ def _run_shared(cfg, *, length=DEFAULT_LENGTH, frags=1, min_frags=1,
         peer2 += pause
 
     try:
+        if _is_manual(cfg):
+            _manual_peer(peer, ready_port)
+            _manual_peer(peer2, ready_port2)
+            with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
+                _release_peer(cfg, ready_port)
+                try:
+                    wait_port_listen(phase_port,
+                                     deadline=MANUAL_PHASE_TIMEOUT)
+                except Exception as exc:
+                    raise KsftFailEx("shared UMEM phase timed out") from exc
+                _release_local(cfg, phase_port)
+                _release_peer(cfg, ready_port2)
+            return
+
         with bkg(shlex.join(dut), ksft_ready=True, exit_wait=True):
             _run_peer(cfg, peer)
             _run_peer(cfg, peer2)
@@ -985,6 +1157,16 @@ def _setup(cfg):
     cfg.netnl = NetdevFamily()
     cfg.bin_local = Path(__file__).with_name("xsk")
 
+    if _is_manual(cfg):
+        cfg.bin_remote = cfg.peer_bin
+        cfg.dut_mac = cfg.dev["address"]
+        cfg.peer_mac = cfg.remote_mac
+        cfg.rx_dmac = cfg.dut_mac
+        cfg.tx_dmac = _direct_mac(cfg.remote_addr, cfg.ifname,
+                                  cfg.peer_mac)
+        cfg._xsk_setup_done = True
+        return
+
     cfg.dut_mac = cfg.dev["address"]
     cfg.peer_mac = cfg.remote_dev["address"]
     cfg.rx_dmac = _direct_mac(cfg.addr, cfg.remote_ifname, cfg.dut_mac,
@@ -995,7 +1177,16 @@ def _setup(cfg):
 
 
 def main():
-    env = NetDrvEpEnv(__file__)
+    manual = _take_manual_arg()
+    if manual and not sys.stdin.isatty():
+        _manual_skip("manual mode requires a terminal")
+
+    try:
+        env = ManualEnv(__file__) if manual else NetDrvEpEnv(__file__)
+    except KsftXfailEx as exc:
+        if not manual:
+            raise
+        _manual_skip(exc)
 
     with env as cfg:
         ksft_run([

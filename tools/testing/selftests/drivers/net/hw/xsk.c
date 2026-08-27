@@ -106,6 +106,11 @@ enum tx_meta_scope {
 	TX_META_HEAD,
 };
 
+enum ready_mode {
+	READY_NOTIFY,
+	READY_SILENT,
+};
+
 struct test_hdr {
 	__be32 magic;
 	__be32 seed;
@@ -155,6 +160,7 @@ struct config {
 	unsigned char dst_mac[ETH_ALEN];
 	const char *ifname;
 	enum role role;
+	__u32 ready_timeout_ms;
 	__u32 timeout_ms;
 	__u32 packet_size;
 	__u32 frame_count;
@@ -193,6 +199,7 @@ struct config {
 	bool tx_timestamp;
 	bool launch_time;
 	bool tx_full;
+	bool start_gated;
 };
 
 static int fail(const char *fmt, ...)
@@ -303,9 +310,11 @@ static void usage(const char *prog)
 		"      --tx-checksum --sw-checksum\n"
 		"      --tx-timestamp --launch-time\n"
 		"      --queue2 N --port2 N\n"
-		"      --ready-port N --timeout-ms N --interval-us N\n"
+		"      --ready-port N --ready-timeout-ms N\n"
+		"      --timeout-ms N --interval-us N\n"
 		"      --pause-after N --pause-ms N\n"
 		"      --starve-after N --hold-ms N\n"
+		"      --start-gated\n"
 		"      --seed N\n",
 		prog);
 }
@@ -335,6 +344,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		OPT_RX_RING_SIZE,
 		OPT_REFILL_BATCH,
 		OPT_READY_PORT,
+		OPT_READY_TIMEOUT_MS,
 		OPT_TIMEOUT_MS,
 		OPT_INTERVAL_US,
 		OPT_PAUSE_AFTER,
@@ -349,6 +359,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		OPT_LAUNCH_TIME,
 		OPT_PORT2,
 		OPT_TX_FULL,
+		OPT_START_GATED,
 	};
 	static const struct option opts[] = {
 		{ "interface", required_argument, NULL, 'i' },
@@ -381,6 +392,8 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		{ "rx-ring-size", required_argument, NULL, OPT_RX_RING_SIZE },
 		{ "refill-batch", required_argument, NULL, OPT_REFILL_BATCH },
 		{ "ready-port", required_argument, NULL, OPT_READY_PORT },
+		{ "ready-timeout-ms", required_argument, NULL,
+		  OPT_READY_TIMEOUT_MS },
 		{ "timeout-ms", required_argument, NULL, OPT_TIMEOUT_MS },
 		{ "interval-us", required_argument, NULL, OPT_INTERVAL_US },
 		{ "pause-after", required_argument, NULL, OPT_PAUSE_AFTER },
@@ -395,6 +408,7 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 		{ "launch-time", no_argument, NULL, OPT_LAUNCH_TIME },
 		{ "port2", required_argument, NULL, OPT_PORT2 },
 		{ "tx-full", no_argument, NULL, OPT_TX_FULL },
+		{ "start-gated", no_argument, NULL, OPT_START_GATED },
 		{},
 	};
 	const char *src_ip = NULL;
@@ -520,6 +534,10 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 			if (parse_u16(optarg, &cfg->ready_port))
 				return -1;
 			break;
+		case OPT_READY_TIMEOUT_MS:
+			if (parse_u32(optarg, &cfg->ready_timeout_ms))
+				return -1;
+			break;
 		case OPT_TIMEOUT_MS:
 			if (parse_u32(optarg, &cfg->timeout_ms))
 				return -1;
@@ -571,6 +589,9 @@ static int parse_args(int argc, char **argv, struct config *cfg)
 			break;
 		case OPT_TX_FULL:
 			cfg->tx_full = true;
+			break;
+		case OPT_START_GATED:
+			cfg->start_gated = true;
 			break;
 		default:
 			return -1;
@@ -884,7 +905,7 @@ static int ready_accept(int listen_fd, __u32 timeout_ms)
 	return 0;
 }
 
-static int ready_wait(const struct config *cfg)
+static int ready_wait(const struct config *cfg, enum ready_mode mode)
 {
 	int listen_fd;
 	int err;
@@ -893,8 +914,9 @@ static int ready_wait(const struct config *cfg)
 	if (listen_fd < 0)
 		return listen_fd;
 
-	ksft_ready();
-	err = ready_accept(listen_fd, cfg->timeout_ms);
+	if (mode == READY_NOTIFY)
+		ksft_ready();
+	err = ready_accept(listen_fd, cfg->ready_timeout_ms);
 	close(listen_fd);
 	return err;
 }
@@ -924,7 +946,7 @@ static int peer_tx(const struct config *cfg)
 		return fail("packet allocation failed");
 	}
 	if (cfg->ready_port) {
-		int err = ready_wait(cfg);
+		int err = ready_wait(cfg, READY_NOTIFY);
 
 		if (err) {
 			free(packet);
@@ -990,6 +1012,14 @@ static int peer_rx(const struct config *cfg)
 	}
 
 	ksft_ready();
+	if (cfg->start_gated) {
+		err = ready_accept(ready_fd, cfg->ready_timeout_ms);
+		if (err) {
+			err = fail("start signal: %s", strerror(-err));
+			goto out;
+		}
+		deadline = now_ms() + cfg->timeout_ms;
+	}
 	while (expected < cfg->count || !cfg->count) {
 		struct pollfd pfd[] = {
 			{ .fd = fd, .events = POLLIN },
@@ -2503,6 +2533,11 @@ static int shared(const struct config *cfg)
 	deadline = now_ms() + cfg->timeout_ms;
 	err = shared_recv(&owner_cfg, &owner, 0, split, deadline, packet,
 			  expected);
+	if (!err && cfg->ready_port) {
+		err = ready_wait(cfg, READY_SILENT);
+		if (err)
+			err = fail("phase wait: %s", strerror(-err));
+	}
 	if (!err) {
 		deadline = now_ms() + cfg->timeout_ms;
 		err = shared_recv(&second_cfg, &second, split,
@@ -2528,6 +2563,7 @@ out:
 int main(int argc, char **argv)
 {
 	struct config cfg = {
+		.ready_timeout_ms = DEFAULT_TIMEOUT_MS,
 		.timeout_ms = DEFAULT_TIMEOUT_MS,
 		.packet_size = DEFAULT_PACKET_SIZE,
 		.frame_count = DEFAULT_FRAME_COUNT,
@@ -2562,6 +2598,7 @@ int main(int argc, char **argv)
 	     cfg.count != cfg.ring_size + 1 ||
 	     cfg.packet_size > cfg.chunk_size - tx_data_off(&cfg))) ||
 	    (cfg.role == ROLE_PEER_RX && !cfg.count && !cfg.ready_port) ||
+	    (cfg.start_gated && !cfg.ready_port) ||
 	    (cfg.cross_page && (!cfg.unaligned ||
 	     cfg.packet_size / 2 + cfg.headroom + XDP_PACKET_HEADROOM >=
 	     page_size()))) {
