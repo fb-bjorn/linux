@@ -35,6 +35,9 @@ XSK_FEATURE_UNSUPPORTED = 4
 ETH_HEADER_LEN = 14
 # Keep these in step with xp_assign_dev() AF_XDP pool geometry.
 XDP_PACKET_HEADROOM = 256
+SG_CHUNK_SIZE = 4096
+SG_RX_LENGTH = SG_CHUNK_SIZE + 1
+MAX_HELPER_SEGS = 64
 XSK_FRAME_ALIGN = 128
 XSK_MTU_OVERHEAD = 26
 UNSUPPORTED_ERRNOS = {errno.EINVAL, errno.EOPNOTSUPP}
@@ -565,6 +568,70 @@ def test_rx_ring_full(cfg):
             peer_start=PeerStart.GATED)
 
 
+@ksft_disruptive
+def test_rx_sg(cfg):
+    _require_zc(cfg)
+    if cfg.zc_max_segs < 2:
+        raise KsftSkipEx("device does not advertise multi-buffer zero-copy")
+    if cfg.zc_max_segs > MAX_HELPER_SEGS:
+        raise KsftSkipEx(f"segment limit {cfg.zc_max_segs} is too large")
+
+    length = SG_RX_LENGTH
+    mtu = length - ETH_HEADER_LEN
+    if mtu > _max_mtu(cfg):
+        raise KsftSkipEx(f"test needs MTU {mtu}")
+
+    _set_mtu(cfg, mtu)
+    _run_rx(cfg, length=length,
+            extra=["--sg", "--frags", str(cfg.zc_max_segs),
+                   "--min-frags", "2"],
+            mtu_mode=MtuMode.CONFIGURED)
+
+
+@ksft_disruptive
+def test_tx_sg(cfg):
+    _require_zc(cfg)
+    if cfg.zc_max_segs < 2:
+        raise KsftSkipEx("device does not advertise multi-buffer zero-copy")
+    if cfg.zc_max_segs > MAX_HELPER_SEGS:
+        raise KsftSkipEx(f"segment limit {cfg.zc_max_segs} is too large")
+
+    for segs in sorted({2, cfg.zc_max_segs}):
+        _run_tx(cfg, count=16, extra=["--sg", "--frags", str(segs)])
+
+
+@ksft_disruptive
+def test_rx_sg_required(cfg):
+    _require_zc(cfg)
+    if cfg.zc_max_segs < 2:
+        raise KsftSkipEx("device does not advertise multi-buffer zero-copy")
+
+    length = SG_RX_LENGTH
+    mtu = length - ETH_HEADER_LEN
+    if mtu > _max_mtu(cfg):
+        raise KsftSkipEx(f"test needs MTU {mtu}")
+
+    _set_mtu(cfg, mtu)
+    _setup_queues(cfg, MIN_QUEUES)
+    _probe(cfg, expect_errno=errno.EINVAL)
+
+
+@ksft_disruptive
+def test_tx_sg_limit(cfg):
+    _require_zc(cfg)
+    if cfg.zc_max_segs < 2:
+        raise KsftSkipEx("device does not advertise multi-buffer zero-copy")
+
+    segs = cfg.zc_max_segs + 1
+    if segs > MAX_HELPER_SEGS:
+        raise KsftSkipEx(f"segment limit {cfg.zc_max_segs} is too large")
+    _set_base_mtu(cfg)
+
+    _run_tx(cfg, count=1, length=DEFAULT_LENGTH,
+            extra=["--sg", "--frags", str(segs), "--split-submit"],
+            peer_count=0, peer_extra=["--timeout-ms", "1000"])
+
+
 def _setup(cfg):
     if getattr(cfg, "_xsk_setup_done", False):
         return
@@ -606,6 +673,10 @@ def main():
             test_tx_ring_full,
             test_rx_refill,
             test_rx_ring_full,
+            test_rx_sg,
+            test_tx_sg,
+            test_rx_sg_required,
+            test_tx_sg_limit,
         ], args=(cfg,))
     ksft_exit()
 
