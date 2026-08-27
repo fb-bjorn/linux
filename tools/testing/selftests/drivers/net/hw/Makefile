@@ -15,6 +15,7 @@ endif
 
 TEST_GEN_FILES := \
 	$(COND_GEN_FILES) \
+	xsk \
 # end of TEST_GEN_FILES
 
 TEST_PROGS = \
@@ -93,3 +94,5 @@ include ../../../net/bpf.mk
 ifeq ($(HAS_IOURING_ZCRX),y)
 $(OUTPUT)/iou-zcrx: LDLIBS += -luring
 endif
+
+$(OUTPUT)/xsk: CFLAGS += $(KHDR_INCLUDES)

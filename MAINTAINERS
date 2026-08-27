@@ -29515,6 +29515,8 @@ F:	include/uapi/linux/if_xdp.h
 F:	include/uapi/linux/xdp_diag.h
 F:	net/xdp/
 F:	tools/testing/selftests/bpf/*xsk*
+F:	tools/testing/selftests/drivers/net/hw/xsk.bpf.c
+F:	tools/testing/selftests/drivers/net/hw/xsk.c
 
 XEN BLOCK SUBSYSTEM
 M:	Roger Pau Monné <roger@xenproject.org>
