@@ -110,6 +110,12 @@ void xsk_clear_tx_need_wakeup(struct xsk_buff_pool *pool)
 }
 EXPORT_SYMBOL(xsk_clear_tx_need_wakeup);
 
+bool xsk_tx_need_wakeup(struct xsk_buff_pool *pool)
+{
+	return pool->cached_need_wakeup & XDP_WAKEUP_TX;
+}
+EXPORT_SYMBOL(xsk_tx_need_wakeup);
+
 bool xsk_uses_need_wakeup(struct xsk_buff_pool *pool)
 {
 	return pool->uses_need_wakeup;
@@ -1567,10 +1573,16 @@ static int xsk_recvmsg(struct socket *sock, struct msghdr *m, size_t len, int fl
 static __poll_t xsk_poll(struct file *file, struct socket *sock,
 			     struct poll_table_struct *wait)
 {
-	__poll_t mask = 0;
-	struct sock *sk = sock->sk;
-	struct xdp_sock *xs = xdp_sk(sk);
 	struct xsk_buff_pool *pool;
+	struct xdp_sock *xs;
+	struct sock *sk;
+	__poll_t events;
+	__poll_t mask = 0;
+	u8 wakeup;
+
+	sk = sock->sk;
+	xs = xdp_sk(sk);
+	events = poll_requested_events(wait);
 
 	sock_poll_wait(file, sock, wait);
 
@@ -1580,9 +1592,16 @@ static __poll_t xsk_poll(struct file *file, struct socket *sock,
 
 	pool = xs->pool;
 
-	if (pool->cached_need_wakeup) {
+	/* Only wake the direction requested by poll(). */
+	wakeup = pool->cached_need_wakeup;
+	if (!xs->rx || !(events & (EPOLLIN | EPOLLRDNORM)))
+		wakeup &= ~XDP_WAKEUP_RX;
+	if (!xs->tx || !(events & (EPOLLOUT | EPOLLWRNORM)))
+		wakeup &= ~XDP_WAKEUP_TX;
+
+	if (wakeup) {
 		if (xs->zc)
-			xsk_wakeup(xs, pool->cached_need_wakeup);
+			xsk_wakeup(xs, wakeup);
 		else if (xs->tx)
 			/* Poll needs to drive Tx also in copy mode */
 			xsk_generic_xmit(sk);
