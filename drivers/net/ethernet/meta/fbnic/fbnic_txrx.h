@@ -15,6 +15,7 @@
 #include "fbnic_csr.h"
 
 struct fbnic_net;
+struct xsk_buff_pool;
 
 /* Guarantee we have space needed for storing the buffer
  * To store the buffer we need:
@@ -35,6 +36,7 @@ struct fbnic_net;
  *	+ 4 descriptors for payload
  */
 #define FBNIC_MAX_RX_PKT_DESC	7
+#define FBNIC_MAX_RX_DATA_DESC	(FBNIC_MAX_RX_PKT_DESC - 2)
 #define FBNIC_RX_DESC_MIN	roundup_pow_of_two(FBNIC_MAX_RX_PKT_DESC * 2)
 
 #define FBNIC_MAX_TXQS			128u
@@ -71,6 +73,7 @@ struct fbnic_net;
 #define FBNIC_RING_F_DISABLED		BIT(0)
 #define FBNIC_RING_F_CTX		BIT(1)
 #define FBNIC_RING_F_STATS		BIT(2)	/* Ring's stats may be used */
+#define FBNIC_RING_F_XDP		BIT(3)
 
 #define FBNIC_HDS_THRESH_MAX \
 	(4096 - FBNIC_RX_HROOM - FBNIC_RX_TROOM - FBNIC_RX_PAD)
@@ -119,11 +122,26 @@ struct fbnic_rx_buf {
 	long pagecnt_bias;
 };
 
+enum fbnic_xdp_tx_buf_type {
+	FBNIC_XDP_TX_BUF_NONE	= 0,
+	FBNIC_XDP_TX_BUF_NETMEM,
+	FBNIC_XDP_TX_BUF_XSK,
+};
+
+struct fbnic_xdp_tx_buf {
+	union {
+		struct xsk_buff_pool *xsk_pool;
+		netmem_ref netmem;
+	};
+	u8 type;
+};
+
 struct fbnic_ring {
 	/* Pointer to buffer specific info */
 	union {
 		struct fbnic_pkt_buff *pkt;	/* RCQ */
 		struct fbnic_rx_buf *rx_buf;	/* BDQ */
+		struct fbnic_xdp_tx_buf *xdp_buf; /* TWQ1 */
 		void **tx_buf;			/* TWQ */
 		void *buffer;			/* Generic pointer */
 	};
@@ -162,6 +180,7 @@ struct fbnic_ring {
 struct fbnic_q_triad {
 	struct fbnic_ring sub0, sub1, cmpl;
 	struct xdp_rxq_info xdp_rxq;
+	struct xsk_buff_pool *xsk_pool;
 	u16 rx_hroom;
 };
 
@@ -174,6 +193,7 @@ struct fbnic_napi_vector {
 	u16 v_idx;
 	u8 txt_count;
 	u8 rxt_count;
+	u8 xsk_tx_start;
 
 	struct fbnic_q_triad qt[];
 };
