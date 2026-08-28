@@ -5,6 +5,7 @@
 #include <linux/ipv6.h>
 #include <linux/types.h>
 #include <net/netdev_queues.h>
+#include <net/netdev_rx_queue.h>
 #ifdef CONFIG_XDP_SOCKETS
 #include <net/xdp_sock_drv.h>
 #endif
@@ -697,6 +698,29 @@ static int fbnic_bpf(struct net_device *netdev, struct netdev_bpf *bpf)
 	}
 }
 
+#ifdef CONFIG_XDP_SOCKETS
+static int fbnic_xsk_wakeup(struct net_device *netdev, u32 queue_id, u32 flags)
+{
+	struct fbnic_net *fbn = netdev_priv(netdev);
+	struct napi_struct *napi;
+
+	if (queue_id >= fbn->num_rx_queues)
+		return -EINVAL;
+	if (!netif_running(netdev))
+		return -ENETDOWN;
+	if (!xsk_get_pool_from_qid(netdev, queue_id))
+		return -EINVAL;
+
+	napi = __netif_get_rx_queue(netdev, queue_id)->napi;
+	if (WARN_ON_ONCE(!napi))
+		return -EINVAL;
+
+	napi_schedule(napi);
+
+	return 0;
+}
+#endif
+
 static const struct net_device_ops fbnic_netdev_ops = {
 	.ndo_open		= fbnic_open,
 	.ndo_stop		= fbnic_stop,
@@ -708,6 +732,9 @@ static const struct net_device_ops fbnic_netdev_ops = {
 	.ndo_set_rx_mode_async	= fbnic_set_rx_mode,
 	.ndo_get_stats64	= fbnic_get_stats64,
 	.ndo_bpf		= fbnic_bpf,
+#ifdef CONFIG_XDP_SOCKETS
+	.ndo_xsk_wakeup		= fbnic_xsk_wakeup,
+#endif
 	.ndo_hwtstamp_get	= fbnic_hwtstamp_get,
 	.ndo_hwtstamp_set	= fbnic_hwtstamp_set,
 };
@@ -960,6 +987,12 @@ struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 	netdev->features |= NETIF_F_NTUPLE;
 
 	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_RX_SG;
+#ifdef CONFIG_XDP_SOCKETS
+	if (PAGE_SIZE == FBNIC_BD_FRAG_SIZE) {
+		netdev->xdp_features |= NETDEV_XDP_ACT_XSK;
+		netdev->xdp_zc_max_segs = FBNIC_MAX_RX_DATA_DESC;
+	}
+#endif
 
 	netdev->min_mtu = IPV6_MIN_MTU;
 	netdev->max_mtu = FBNIC_MAX_JUMBO_FRAME_SIZE - ETH_HLEN;
