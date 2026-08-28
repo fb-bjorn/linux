@@ -20,8 +20,16 @@ BPF_SELFTESTS_ARCH = "x86_64" # for now the only suported arch for bpf selftests
 # have been validated on: 15 runs across v7.1-fb, v6.16-fb and v6.13-fb, all
 # x86_64. Other arches keep the previous behaviour of building a selftests
 # kernel and running nothing, rather than being switched on untested.
+#
+# mm is deliberately listed on this branch only, unlike cgroup and cachestat
+# which are shared with build_machinery/master. It needs numactl-devel at build
+# time (ksm_tests, migration and rmap link -lnuma), which only the appliance
+# v7.1-fb pins carries, so on older branches it does not compile and is dropped
+# from the bundle entirely. Its runner gates on the kernel version and exits
+# green below 7.1, so adding it to build_machinery/master would be safe but
+# would boot a 16 GiB VM on every older branch's diffs only to skip.
 SELFTESTS_ARCH = "x86_64"
-SELFTEST_SUITES = ["cgroup", "cachestat"]
+SELFTEST_SUITES = ["cgroup", "cachestat", "mm"]
 
 # Values of the deprecated `selftests` flag that mean "not set". Mirrors
 # NO_SELFTESTS in the workflow's flags.sky, which cannot be loaded from here.
