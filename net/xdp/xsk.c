@@ -257,19 +257,71 @@ err:
 	return err;
 }
 
-static int xsk_rcv_pp_zc(struct xdp_sock *xs, struct xdp_buff *xdp, u32 len)
+static void xsk_rcv_pp_zc_desc(struct xdp_sock *xs, netmem_ref netmem,
+			       void *data, u32 len, u32 flags)
 {
-	netmem_ref netmem = xdp_buff_get_netmem(xdp);
-	int err;
+	__xskq_prod_reserve_desc(xs->rx, data - xs->pool->addrs, len, flags);
+	xsk_buff_netmem_release(netmem);
+}
 
-	err = xskq_prod_reserve_desc(xs->rx,
-				     xdp->data - xs->pool->addrs, len, 0);
-	if (err) {
-		xs->rx_queue_full++;
-		return err;
+static int xsk_rcv_pp_zc(struct xdp_sock *xs, struct xdp_buff *xdp)
+{
+	struct skb_shared_info *sinfo;
+	netmem_ref netmem;
+	u32 num_desc;
+	u32 flags;
+	u32 len;
+	u32 i, j;
+
+	if (likely(!xdp_buff_has_frags(xdp))) {
+		netmem = xdp_buff_get_netmem(xdp);
+		len = xdp->data_end - xdp->data;
+		if (xskq_prod_reserve_desc(xs->rx,
+					   xdp->data - xs->pool->addrs,
+					   len, 0)) {
+			xs->rx_queue_full++;
+			return -ENOBUFS;
+		}
+
+		xsk_buff_netmem_release(netmem);
+		return 0;
 	}
 
-	xsk_buff_netmem_release(netmem);
+	sinfo = xdp_get_shared_info_from_buff(xdp);
+	netmem = xdp_buff_get_netmem(xdp);
+	for (i = 0; i < sinfo->nr_frags; i++) {
+		netmem_ref frag = skb_frag_netmem(&sinfo->frags[i]);
+
+		if (!xp_netmem_is_from_pool(frag, xs->pool) || frag == netmem)
+			return -EINVAL;
+
+		for (j = 0; j < i; j++)
+			if (frag == skb_frag_netmem(&sinfo->frags[j]))
+				return -EINVAL;
+	}
+
+	num_desc = sinfo->nr_frags + 1;
+	if (xskq_prod_nb_free(xs->rx, num_desc) < num_desc) {
+		xs->rx_queue_full++;
+		return -ENOBUFS;
+	}
+
+	len = xdp->data_end - xdp->data;
+	flags = XDP_PKT_CONTD;
+	xsk_rcv_pp_zc_desc(xs, netmem, xdp->data, len, flags);
+
+	for (i = 0; i < sinfo->nr_frags; i++) {
+		const skb_frag_t *frag = &sinfo->frags[i];
+		void *data = xdp_frag_address(frag);
+
+		if (i == sinfo->nr_frags - 1)
+			flags = 0;
+
+		netmem = skb_frag_netmem(frag);
+		xsk_rcv_pp_zc_desc(xs, netmem, data, skb_frag_size(frag),
+				   flags);
+	}
+
 	return 0;
 }
 
@@ -295,7 +347,7 @@ static u32 xsk_copy_xdp(void *to, void **from, u32 to_len,
 			return copied;
 
 		if (*from_len == copy_len) {
-			*from = skb_frag_address(*frag);
+			*from = xdp_frag_address(*frag);
 			*from_len = skb_frag_size((*frag)++);
 		} else {
 			*from += copy_len;
@@ -505,10 +557,8 @@ static int xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 	}
 	if (xdp->rxq->mem.type == MEM_TYPE_PAGE_POOL &&
 	    xs->pool->page_pool &&
-	    xdp->rxq->mem.id == xs->pool->page_pool->xdp_mem_id) {
-		len = xdp->data_end - xdp->data;
-		return xsk_rcv_pp_zc(xs, xdp, len);
-	}
+	    xdp->rxq->mem.id == xs->pool->page_pool->xdp_mem_id)
+		return xsk_rcv_pp_zc(xs, xdp);
 
 	err = __xsk_rcv(xs, xdp, len);
 	if (!err)

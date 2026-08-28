@@ -25,6 +25,18 @@ SEC("xdp.frags") int xsk_def_prog(struct xdp_md *xdp)
 	return bpf_redirect_map(&xsk, 0, XDP_DROP);
 }
 
+SEC("xdp.frags") int xsk_xdp_load_bytes(struct xdp_md *xdp)
+{
+	__u32 offset = xdp->data_end - xdp->data;
+	__u8 byte;
+
+	if (bpf_xdp_get_buff_len(xdp) > offset &&
+	    bpf_xdp_load_bytes(xdp, offset, &byte, sizeof(byte)))
+		return XDP_DROP;
+
+	return bpf_redirect_map(&xsk, 0, XDP_DROP);
+}
+
 SEC("xdp.frags") int xsk_xdp_drop(struct xdp_md *xdp)
 {
 	static unsigned int drop_idx;

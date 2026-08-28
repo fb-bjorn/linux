@@ -2089,6 +2089,12 @@ int testapp_single_pkt(struct test_spec *test)
 
 int testapp_send_receive_mb(struct test_spec *test)
 {
+	struct xsk_xdp_progs *skel_rx = test->ifobj_rx->xdp_progs;
+	struct xsk_xdp_progs *skel_tx = test->ifobj_tx->xdp_progs;
+
+	test_spec_set_xdp_prog(test, skel_rx->progs.xsk_xdp_load_bytes,
+			       skel_tx->progs.xsk_xdp_load_bytes,
+			       skel_rx->maps.xsk, skel_tx->maps.xsk);
 	test->mtu = MAX_ETH_JUMBO_SIZE;
 	if (pkt_stream_replace(test, DEFAULT_PKT_CNT, MAX_ETH_JUMBO_SIZE))
 		return TEST_FAILURE;

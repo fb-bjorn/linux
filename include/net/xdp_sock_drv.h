@@ -41,6 +41,11 @@ void xsk_clear_rx_need_wakeup(struct xsk_buff_pool *pool);
 void xsk_clear_tx_need_wakeup(struct xsk_buff_pool *pool);
 bool xsk_uses_need_wakeup(struct xsk_buff_pool *pool);
 
+static inline bool xsk_pool_uses_sg(struct xsk_buff_pool *pool)
+{
+	return pool->umem->flags & XDP_UMEM_SG_FLAG;
+}
+
 static inline u32 xsk_pool_get_headroom(struct xsk_buff_pool *pool)
 {
 	return XDP_PACKET_HEADROOM + pool->headroom;
@@ -421,6 +426,11 @@ static inline void xsk_clear_tx_need_wakeup(struct xsk_buff_pool *pool)
 }
 
 static inline bool xsk_uses_need_wakeup(struct xsk_buff_pool *pool)
+{
+	return false;
+}
+
+static inline bool xsk_pool_uses_sg(struct xsk_buff_pool *pool)
 {
 	return false;
 }

@@ -148,6 +148,13 @@ static inline struct xsk_pp_info *xp_netmem_to_pp(netmem_ref netmem)
 	return container_of(net_iov_owner(niov), struct xsk_pp_info, area);
 }
 
+static inline bool xp_netmem_is_from_pool(netmem_ref netmem,
+					  const struct xsk_buff_pool *pool)
+{
+	return xp_netmem_is_xsk(netmem) &&
+	       xp_netmem_to_pp(netmem)->pool == pool;
+}
+
 static inline void *xp_netmem_get_frame(netmem_ref netmem)
 {
 	struct xsk_pp_info *provider = xp_netmem_to_pp(netmem);
