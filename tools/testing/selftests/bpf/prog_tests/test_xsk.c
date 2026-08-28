@@ -758,7 +758,8 @@ static void pkt_dump(void *pkt, u32 len, bool eth_header)
 	ksft_print_msg("\n---------------------------------------\n");
 }
 
-static bool is_offset_correct(struct xsk_umem_info *umem, struct pkt *pkt, u64 addr)
+static bool is_offset_correct(struct xsk_umem_info *umem, struct pkt *pkt,
+			      u64 addr)
 {
 	u32 headroom = umem->unaligned_mode ? 0 : umem->frame_headroom;
 	u32 offset = addr % umem->frame_size, expected_offset;
@@ -818,16 +819,16 @@ static int is_adjust_tail_supported(struct xsk_xdp_progs *skel_rx, bool *support
 	return 0;
 }
 
-static bool is_frag_valid(struct xsk_umem_info *umem, u64 addr, u32 len, u32 expected_pkt_nb,
-			  u32 bytes_processed)
+static bool is_frag_valid(struct xsk_umem_info *umem, u64 addr, u32 len,
+			  u32 expected_pkt_nb, u32 bytes_processed)
 {
-	u32 seqnum, pkt_nb, *pkt_data, words_to_end, expected_seqnum;
-	void *data = xsk_umem__get_data(umem->buffer, addr);
+	void *data;
 	u64 umem_sz = umem_size(umem);
+	u32 expected_seqnum, first, last, pkt_nb, seqnum, word;
 
 	addr -= umem->base_addr;
 
-	if (addr >= umem_sz || addr + len > umem_sz) {
+	if (addr >= umem_sz || len > umem_sz - addr) {
 		ksft_print_msg("Frag invalid addr: %llx len: %u\n",
 			       (unsigned long long)addr, len);
 		return false;
@@ -838,17 +839,22 @@ static bool is_frag_valid(struct xsk_umem_info *umem, u64 addr, u32 len, u32 exp
 		return false;
 	}
 
-	pkt_data = data;
-	if (!bytes_processed) {
-		pkt_data += PKT_HDR_SIZE / sizeof(*pkt_data);
-		len -= PKT_HDR_SIZE;
-	} else {
-		bytes_processed -= PKT_HDR_SIZE;
-	}
+	data = xsk_umem__get_data(umem->buffer, addr);
+	if (bytes_processed + len <= PKT_HDR_SIZE)
+		return true;
 
-	expected_seqnum = bytes_processed / sizeof(*pkt_data);
-	seqnum = ntohl(*pkt_data) & 0xffff;
-	pkt_nb = ntohl(*pkt_data) >> 16;
+	first = max_t(u32, bytes_processed, PKT_HDR_SIZE) - PKT_HDR_SIZE;
+	first = ALIGN(first, sizeof(word)) + PKT_HDR_SIZE;
+	if (first + sizeof(word) > bytes_processed + len)
+		return true;
+
+	last = bytes_processed + len - PKT_HDR_SIZE - sizeof(word);
+	last = ALIGN_DOWN(last, sizeof(word)) + PKT_HDR_SIZE;
+
+	memcpy(&word, data + first - bytes_processed, sizeof(word));
+	expected_seqnum = (first - PKT_HDR_SIZE) / sizeof(word);
+	seqnum = ntohl(word) & 0xffff;
+	pkt_nb = ntohl(word) >> 16;
 
 	if (expected_pkt_nb != pkt_nb) {
 		ksft_print_msg("[%s] expected pkt_nb [%u], got pkt_nb [%u]\n",
@@ -861,10 +867,15 @@ static bool is_frag_valid(struct xsk_umem_info *umem, u64 addr, u32 len, u32 exp
 		goto error;
 	}
 
-	words_to_end = len / sizeof(*pkt_data) - 1;
-	pkt_data += words_to_end;
-	seqnum = ntohl(*pkt_data) & 0xffff;
-	expected_seqnum += words_to_end;
+	memcpy(&word, data + last - bytes_processed, sizeof(word));
+	expected_seqnum = (last - PKT_HDR_SIZE) / sizeof(word);
+	seqnum = ntohl(word) & 0xffff;
+	pkt_nb = ntohl(word) >> 16;
+	if (expected_pkt_nb != pkt_nb) {
+		ksft_print_msg("[%s] expected pkt_nb [%u], got pkt_nb [%u]\n",
+			       __func__, expected_pkt_nb, pkt_nb);
+		goto error;
+	}
 	if (expected_seqnum != seqnum) {
 		ksft_print_msg("[%s] expected seqnum at end [%u], got seqnum [%u]\n",
 			       __func__, expected_seqnum, seqnum);
@@ -1051,7 +1062,8 @@ static int __receive_pkts(struct test_spec *test, struct xsk_socket_info *xsk)
 			      addr, desc->len, desc->options, pkt->pkt_nb, pkt->valid);
 
 		if (!is_frag_valid(umem, addr, desc->len, pkt->pkt_nb, pkt_len) ||
-		    !is_offset_correct(umem, pkt, addr) || (ifobj->use_metadata &&
+		    (!nb_frags && !is_offset_correct(umem, pkt, addr)) ||
+		    (ifobj->use_metadata &&
 		    !is_metadata_correct(pkt, umem->buffer, addr)))
 			return TEST_FAILURE;
 
@@ -1066,8 +1078,7 @@ static int __receive_pkts(struct test_spec *test, struct xsk_socket_info *xsk)
 			continue;
 
 		/* The complete packet has been received */
-		if (!is_pkt_valid(pkt, umem->buffer, first_addr, pkt_len) ||
-		    !is_offset_correct(umem, pkt, addr))
+		if (!is_pkt_valid(pkt, umem->buffer, first_addr, pkt_len))
 			return TEST_FAILURE;
 
 		pkt_stream->nb_rx_pkts++;
@@ -2083,6 +2094,13 @@ int testapp_send_receive_mb(struct test_spec *test)
 		return TEST_FAILURE;
 
 	return testapp_validate_traffic(test);
+}
+
+int testapp_mb_headroom(struct test_spec *test)
+{
+	test->ifobj_rx->xsk->umem->frame_headroom = UMEM_HEADROOM_TEST_SIZE;
+
+	return testapp_send_receive_mb(test);
 }
 
 int testapp_invalid_desc_mb(struct test_spec *test)
