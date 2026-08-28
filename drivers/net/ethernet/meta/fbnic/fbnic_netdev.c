@@ -5,6 +5,9 @@
 #include <linux/ipv6.h>
 #include <linux/types.h>
 #include <net/netdev_queues.h>
+#ifdef CONFIG_XDP_SOCKETS
+#include <net/xdp_sock_drv.h>
+#endif
 
 #include "fbnic.h"
 #include "fbnic_netdev.h"
@@ -276,13 +279,16 @@ static int fbnic_set_mac(struct net_device *netdev, void *p)
 static int fbnic_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct fbnic_net *fbn = netdev_priv(dev);
+	struct netlink_ext_ack extack = {};
+	int err;
 
-	if (fbnic_check_split_frames(fbn->xdp_prog, new_mtu, fbn->hds_thresh)) {
-		dev_err(&dev->dev,
-			"MTU %d is larger than HDS threshold %d in XDP mode\n",
-			new_mtu, fbn->hds_thresh);
+	err = fbnic_xdp_validate(fbn, fbn->xdp_prog, new_mtu,
+				 fbn->hds_thresh, &extack);
+	if (err) {
+		if (extack._msg)
+			netdev_err(dev, "%s\n", extack._msg);
 
-		return -EINVAL;
+		return err;
 	}
 
 	WRITE_ONCE(dev->mtu, new_mtu);
@@ -522,8 +528,8 @@ static void fbnic_get_stats64(struct net_device *dev,
 	}
 }
 
-bool fbnic_check_split_frames(struct bpf_prog *prog, unsigned int mtu,
-			      u32 hds_thresh)
+static bool fbnic_xdp_needs_frags(struct bpf_prog *prog, unsigned int mtu,
+				  u32 hds_thresh)
 {
 	if (!prog)
 		return false;
@@ -534,26 +540,161 @@ bool fbnic_check_split_frames(struct bpf_prog *prog, unsigned int mtu,
 	return mtu + ETH_HLEN > hds_thresh;
 }
 
-static int fbnic_bpf(struct net_device *netdev, struct netdev_bpf *bpf)
+#ifdef CONFIG_XDP_SOCKETS
+u32 fbnic_xsk_hds_thresh(struct xsk_buff_pool *pool, u32 hds_thresh)
 {
-	struct bpf_prog *prog = bpf->prog, *prev_prog;
-	struct fbnic_net *fbn = netdev_priv(netdev);
+	u32 max_hds;
 
-	if (bpf->command != XDP_SETUP_PROG)
-		return -EINVAL;
+	max_hds = FBNIC_BD_FRAG_SIZE - xsk_pool_get_headroom(pool) -
+		  FBNIC_RX_TROOM - FBNIC_RX_PAD;
 
-	if (fbnic_check_split_frames(prog, netdev->mtu,
-				     fbn->hds_thresh)) {
-		NL_SET_ERR_MSG_MOD(bpf->extack,
-				   "MTU too high, or HDS threshold is too low for single buffer XDP");
+	return min(max_t(u32, hds_thresh, FBNIC_XSK_HDS_THRESH), max_hds);
+}
+
+static bool fbnic_xsk_headroom_valid(struct xsk_buff_pool *pool)
+{
+	u32 max_hroom, hroom;
+
+	hroom = xsk_pool_get_headroom(pool);
+	/* Header starts are rounded up to the hardware alignment. */
+	max_hroom = ALIGN(FIELD_MAX(FBNIC_QUEUE_RDE_CTL0_MIN_HROOM_MASK),
+			  FBNIC_RX_ALIGN);
+
+	return hroom <= max_hroom && IS_ALIGNED(hroom, FBNIC_RX_ALIGN);
+}
+
+static int fbnic_xsk_validate_frames(struct xsk_buff_pool *pool,
+				     struct bpf_prog *prog,
+				     unsigned int mtu, u32 hds_thresh,
+				     struct netlink_ext_ack *extack)
+{
+	u32 xsk_hds_thresh = fbnic_xsk_hds_thresh(pool, hds_thresh);
+
+	if (mtu + ETH_HLEN <= xsk_hds_thresh)
+		return 0;
+
+	if (!xsk_pool_uses_sg(pool)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy socket requires XDP_USE_SG");
 		return -EOPNOTSUPP;
 	}
 
-	prev_prog = xchg(&fbn->xdp_prog, prog);
+	if (fbnic_xdp_needs_frags(prog, mtu, xsk_hds_thresh)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy socket requires XDP frags");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+#endif
+
+int fbnic_xdp_validate(struct fbnic_net *fbn, struct bpf_prog *prog,
+		       unsigned int mtu, u32 hds_thresh,
+		       struct netlink_ext_ack *extack)
+{
+#ifdef CONFIG_XDP_SOCKETS
+	struct net_device *netdev = fbn->netdev;
+	struct xsk_buff_pool *pool;
+	unsigned int qid;
+	int err;
+#endif
+
+	if (fbnic_xdp_needs_frags(prog, mtu, hds_thresh)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "MTU and HDS threshold require XDP frags");
+		return -EOPNOTSUPP;
+	}
+
+#ifdef CONFIG_XDP_SOCKETS
+	for (qid = 0; qid < fbn->num_rx_queues; qid++) {
+		pool = xsk_get_pool_from_qid(netdev, qid);
+		if (!netif_rxq_mp_match(netdev, qid, pool))
+			continue;
+
+		err = fbnic_xsk_validate_frames(pool, prog, mtu, hds_thresh,
+						extack);
+		if (err)
+			return err;
+	}
+#endif
+
+	return 0;
+}
+
+#ifdef CONFIG_XDP_SOCKETS
+static int fbnic_xsk_setup_pool(struct net_device *netdev,
+				struct xsk_buff_pool *pool, u16 queue_id,
+				struct netlink_ext_ack *extack)
+{
+	struct fbnic_net *fbn = netdev_priv(netdev);
+	int err;
+
+	if (queue_id >= fbn->num_rx_queues)
+		return -EINVAL;
+
+	if (!pool)
+		return xsk_pool_setup_page_pool(netdev, NULL, queue_id, extack);
+
+	if (!xsk_pool_get_rx_frag_step(pool)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy requires aligned UMEM");
+		return -EOPNOTSUPP;
+	}
+
+	if (!fbnic_xsk_headroom_valid(pool)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy headroom is not supported");
+		return -EOPNOTSUPP;
+	}
+
+	if (xsk_pool_get_chunk_size(pool) != FBNIC_BD_FRAG_SIZE) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy requires 4K UMEM chunks");
+		return -EOPNOTSUPP;
+	}
+
+	err = fbnic_xsk_validate_frames(pool, fbn->xdp_prog, netdev->mtu,
+					fbn->hds_thresh, extack);
+	if (err)
+		return err;
+
+	return xsk_pool_setup_page_pool(netdev, pool, queue_id, extack);
+}
+#endif
+
+static int fbnic_xdp_setup_prog(struct net_device *netdev,
+				struct netdev_bpf *bpf)
+{
+	struct fbnic_net *fbn = netdev_priv(netdev);
+	struct bpf_prog *prev_prog;
+	int err;
+
+	err = fbnic_xdp_validate(fbn, bpf->prog, netdev->mtu,
+				 fbn->hds_thresh, bpf->extack);
+	if (err)
+		return err;
+
+	prev_prog = xchg(&fbn->xdp_prog, bpf->prog);
 	if (prev_prog)
 		bpf_prog_put(prev_prog);
 
 	return 0;
+}
+
+static int fbnic_bpf(struct net_device *netdev, struct netdev_bpf *bpf)
+{
+	switch (bpf->command) {
+	case XDP_SETUP_PROG:
+		return fbnic_xdp_setup_prog(netdev, bpf);
+#ifdef CONFIG_XDP_SOCKETS
+	case XDP_SETUP_XSK_POOL:
+		return fbnic_xsk_setup_pool(netdev, bpf->xsk.pool,
+					    bpf->xsk.queue_id, bpf->extack);
+#endif
+	default:
+		return -EINVAL;
+	}
 }
 
 static const struct net_device_ops fbnic_netdev_ops = {

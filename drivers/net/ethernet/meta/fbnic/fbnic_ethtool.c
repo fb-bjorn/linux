@@ -6,6 +6,7 @@
 #include <linux/netdevice.h>
 #include <linux/pci.h>
 #include <net/ipv6.h>
+#include <net/netdev_queues.h>
 
 #include "fbnic.h"
 #include "fbnic_netdev.h"
@@ -361,12 +362,10 @@ fbnic_set_ringparam(struct net_device *netdev, struct ethtool_ringparam *ring,
 	 * splitting. If the new HDS threshold can cause splitting, we should
 	 * only allow if the attached XDP program can handle frags.
 	 */
-	if (fbnic_check_split_frames(fbn->xdp_prog, netdev->mtu,
-				     kernel_ring->hds_thresh)) {
-		NL_SET_ERR_MSG_MOD(extack,
-				   "Use higher HDS threshold or multi-buf capable program");
-		return -EINVAL;
-	}
+	err = fbnic_xdp_validate(fbn, fbn->xdp_prog, netdev->mtu,
+				 kernel_ring->hds_thresh, extack);
+	if (err)
+		return err;
 
 	if (!netif_running(netdev)) {
 		fbnic_set_rings(fbn, ring, kernel_ring);
@@ -1602,10 +1601,23 @@ static void fbnic_set_queues(struct fbnic_net *fbn, struct ethtool_channels *ch,
 			    max_napis);
 }
 
+static bool fbnic_channels_exclude_mp(struct net_device *netdev,
+				      unsigned int num_rx)
+{
+	unsigned int qid;
+
+	for (qid = num_rx; qid < netdev->real_num_rx_queues; qid++)
+		if (netif_rxq_has_mp(netdev, qid))
+			return true;
+
+	return false;
+}
+
 static int fbnic_set_channels(struct net_device *netdev,
 			      struct ethtool_channels *ch)
 {
 	struct fbnic_net *fbn = netdev_priv(netdev);
+	unsigned int num_rx = ch->rx_count + ch->combined_count;
 	unsigned int max_napis, standalone;
 	struct fbnic_dev *fbd = fbn->fbd;
 	struct fbnic_net *clone;
@@ -1624,6 +1636,8 @@ static int fbnic_set_channels(struct net_device *netdev,
 	    ch->tx_count + ch->combined_count > fbd->max_num_queues ||
 	    ch->other_count != FBNIC_NON_NAPI_VECTORS)
 		return -EINVAL;
+	if (fbnic_channels_exclude_mp(netdev, num_rx))
+		return -EBUSY;
 
 	if (!netif_running(netdev)) {
 		fbnic_set_queues(fbn, ch, max_napis);
