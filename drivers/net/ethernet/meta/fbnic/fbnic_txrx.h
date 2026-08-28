@@ -31,6 +31,7 @@ struct fbnic_net;
  *	+ 4 descriptors for payload
  */
 #define FBNIC_MAX_RX_PKT_DESC	7
+#define FBNIC_MAX_RX_DATA_DESC	(FBNIC_MAX_RX_PKT_DESC - 2)
 #define FBNIC_RX_DESC_MIN	roundup_pow_of_two(FBNIC_MAX_RX_PKT_DESC * 2)
 
 #define FBNIC_MAX_TXQS			128u
@@ -51,9 +52,11 @@ struct fbnic_net;
 
 #define FBNIC_RX_TROOM \
 	SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
-#define FBNIC_RX_HROOM_PAD		128
+#define FBNIC_RX_ALIGN			128
+#define FBNIC_RX_HROOM_PAD		FBNIC_RX_ALIGN
 #define FBNIC_RX_HROOM \
-	(ALIGN(FBNIC_RX_TROOM + FBNIC_RX_HROOM_PAD, 128) - FBNIC_RX_TROOM)
+	(ALIGN(FBNIC_RX_TROOM + FBNIC_RX_HROOM_PAD, FBNIC_RX_ALIGN) - \
+	 FBNIC_RX_TROOM)
 #define FBNIC_RX_PAD			0
 #define FBNIC_RX_PAYLD_OFFSET		0
 #define FBNIC_RX_PAYLD_PG_CL		0
@@ -66,6 +69,7 @@ struct fbnic_net;
 	(4096 - FBNIC_RX_HROOM - FBNIC_RX_TROOM - FBNIC_RX_PAD)
 #define FBNIC_HDS_THRESH_DEFAULT \
 	(1536 - FBNIC_RX_PAD)
+#define FBNIC_XSK_HDS_THRESH		3072
 #define FBNIC_HDR_BYTES_MIN		256
 
 struct fbnic_pkt_buff {
@@ -145,6 +149,7 @@ struct fbnic_ring {
 struct fbnic_q_triad {
 	struct fbnic_ring sub0, sub1, cmpl;
 	struct xdp_rxq_info xdp_rxq;
+	u16 rx_hroom;
 };
 
 struct fbnic_napi_vector {

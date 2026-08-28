@@ -114,6 +114,10 @@ int fbnic_phylink_create(struct net_device *netdev);
 void fbnic_phylink_destroy(struct net_device *netdev);
 int fbnic_phylink_init(struct net_device *netdev);
 void fbnic_phylink_pmd_training_complete_notify(struct net_device *netdev);
-bool fbnic_check_split_frames(struct bpf_prog *prog,
-			      unsigned int mtu, u32 hds_threshold);
+int fbnic_xdp_validate(struct fbnic_net *fbn, struct bpf_prog *prog,
+		       unsigned int mtu, u32 hds_thresh,
+		       struct netlink_ext_ack *extack);
+#ifdef CONFIG_XDP_SOCKETS
+u32 fbnic_xsk_hds_thresh(struct xsk_buff_pool *pool, u32 hds_thresh);
+#endif
 #endif /* _FBNIC_NETDEV_H_ */
