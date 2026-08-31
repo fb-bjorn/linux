@@ -9,7 +9,10 @@
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  * Copyright (c) 2024 Andrea Righi <arighi@nvidia.com>
  */
-#include "ext_idle.h"
+#include "internal.h"
+#include "cid.h"
+#include "idle.h"
+#include "sub.h"
 
 /* Enable/disable built-in idle CPU selection policy */
 static DEFINE_STATIC_KEY_FALSE(scx_builtin_idle_enabled);
@@ -79,7 +82,6 @@ static bool scx_idle_test_and_clear_cpu(int cpu)
 	int node = scx_cpu_node_if_enabled(cpu);
 	struct cpumask *idle_cpus = idle_cpumask(node)->cpu;
 
-#ifdef CONFIG_SCHED_SMT
 	/*
 	 * SMT mask should be cleared whether we can claim @cpu or not. The SMT
 	 * cluster is not wholly idle either way. This also prevents
@@ -104,7 +106,6 @@ static bool scx_idle_test_and_clear_cpu(int cpu)
 		else if (cpumask_test_cpu(cpu, idle_smts))
 			__cpumask_clear_cpu(cpu, idle_smts);
 	}
-#endif
 
 	return cpumask_test_and_clear_cpu(cpu, idle_cpus);
 }
@@ -554,8 +555,10 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		    cpu_rq(cpu)->scx.local_dsq.nr == 0 &&
 		    (!(flags & SCX_PICK_IDLE_IN_NODE) || (waker_node == node)) &&
 		    !cpumask_empty(idle_cpumask(waker_node)->cpu)) {
-			if (cpumask_test_cpu(cpu, allowed))
+			if (cpumask_test_cpu(cpu, allowed)) {
+				scx_idle_test_and_clear_cpu(cpu);
 				goto out_unlock;
+			}
 		}
 	}
 
@@ -622,7 +625,6 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		goto out_unlock;
 	}
 
-#ifdef CONFIG_SCHED_SMT
 	/*
 	 * Use @prev_cpu's sibling if it's idle.
 	 */
@@ -634,7 +636,6 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 				goto out_unlock;
 		}
 	}
-#endif
 
 	/*
 	 * Search for any idle CPU in the same LLC domain.
@@ -714,7 +715,6 @@ static void update_builtin_idle(int cpu, bool idle)
 
 	assign_cpu(cpu, idle_cpus, idle);
 
-#ifdef CONFIG_SCHED_SMT
 	if (sched_smt_active()) {
 		const struct cpumask *smt = cpu_smt_mask(cpu);
 		struct cpumask *idle_smts = idle_cpumask(node)->smt;
@@ -731,7 +731,55 @@ static void update_builtin_idle(int cpu, bool idle)
 			cpumask_andnot(idle_smts, idle_smts, smt);
 		}
 	}
+}
+
+/*
+ * Notify schedulers of an idle transition on @cpu's cid, delivering to every
+ * sched that holds %SCX_CAP_BASE on the cid (the root holds every cap). A real
+ * transition (@do_notify) reaches all holders. A forced one (@root_renotify for
+ * the root, a sub-sched's idle_renotify marker for a sub) reaches only the owed
+ * scheds.
+ */
+static void scx_idle_notify(struct rq *rq, bool idle, bool do_notify, bool root_renotify)
+{
+	s32 cpu = cpu_of(rq);
+	s32 cid = scx_cpu_arg(cpu);
+	struct scx_sched *root = scx_root_protected_live();
+	struct scx_sched *pos;
+
+	lockdep_assert_rq_held(rq);
+
+	/* with no sub-sched, only the root can be owed a notification */
+	if (!scx_has_subs()) {
+		if ((do_notify || root_renotify) &&
+		    SCX_HAS_OP(root, update_idle) && !scx_bypassing(root, cpu))
+			SCX_CALL_OP(root, update_idle, rq, cid, idle);
+		return;
+	}
+
+	pos = scx_next_descendant_pre(NULL, root);
+	while (pos) {
+		bool forced = false;
+
+		if (unlikely(scx_missing_caps(pos, cpu, SCX_CAP_BASE))) {
+			pos = scx_skip_subtree_pre(pos, root);
+			continue;
+		}
+
+		if (!pos->level) {
+			forced = root_renotify;
+		}
+#ifdef CONFIG_EXT_SUB_SCHED
+		else if (per_cpu_ptr(pos->pcpu, cpu)->idle_renotify) {
+			per_cpu_ptr(pos->pcpu, cpu)->idle_renotify = false;
+			forced = true;
+		}
 #endif
+		if ((do_notify || forced) && SCX_HAS_OP(pos, update_idle) &&
+		    !scx_bypassing(pos, cpu))
+			SCX_CALL_OP(pos, update_idle, rq, cid, idle);
+		pos = scx_next_descendant_pre(pos, root);
+	}
 }
 
 /*
@@ -752,44 +800,39 @@ static void update_builtin_idle(int cpu, bool idle)
  */
 void __scx_update_idle(struct rq *rq, bool idle, bool do_notify)
 {
-	struct scx_sched *sch = scx_root;
 	int cpu = cpu_of(rq);
 
 	lockdep_assert_rq_held(rq);
 
 	/*
-	 * Update the idle masks:
-	 * - for real idle transitions (do_notify == true)
-	 * - for idle-to-idle transitions (indicated by the previous task
-	 *   being the idle thread, managed by pick_task_idle())
-	 *
-	 * Skip updating idle masks if the previous task is not the idle
-	 * thread, since set_next_task_idle() has already handled it when
-	 * transitioning from a task to the idle thread (calling this
-	 * function with do_notify == true).
-	 *
-	 * In this way we can avoid updating the idle masks twice,
-	 * unnecessarily.
+	 * pick_task_idle() calls here only on an idle-to-idle re-pick and the
+	 * transitions call with @do_notify, so every reaching call updates the
+	 * masks.
 	 */
 	if (static_branch_likely(&scx_builtin_idle_enabled))
-		if (do_notify || is_idle_task(rq->curr))
-			update_builtin_idle(cpu, idle);
+		update_builtin_idle(cpu, idle);
 
 	/*
-	 * Trigger ops.update_idle() only when transitioning from a task to
-	 * the idle thread and vice versa.
+	 * ops.update_idle() fires on real idle transitions, indicated by
+	 * @do_notify and managed by put_prev_task_idle()/set_next_task_idle().
+	 * An idle pick also fires it to flush a forced notify owed to a sched
+	 * that missed transitions while bypassed or on a cid it just gained.
+	 * unbypass_renotify_idle() and scx_process_sync_ecaps() arm the per-rq
+	 * gates, and scx_idle_notify() targets the owed scheds.
 	 *
-	 * Idle transitions are indicated by do_notify being set to true,
-	 * managed by put_prev_task_idle()/set_next_task_idle().
-	 *
-	 * This must come after builtin idle update so that BPF schedulers can
-	 * create interlocking between ops.update_idle() and ops.enqueue() -
+	 * This must come after the builtin idle update so that BPF schedulers
+	 * can create interlocking between ops.update_idle() and ops.enqueue() -
 	 * either enqueue() sees the idle bit or update_idle() sees the task
 	 * that enqueue() queued.
 	 */
-	if (SCX_HAS_OP(sch, update_idle) && do_notify &&
-	    !scx_bypassing(sch, cpu_of(rq)))
-		SCX_CALL_OP(sch, update_idle, rq, cpu_of(rq), idle);
+	if (do_notify ||
+	    (idle && (rq->scx.flags &
+		      (SCX_RQ_SUB_IDLE_RENOTIFY | SCX_RQ_ROOT_IDLE_RENOTIFY)))) {
+		bool root_renotify = rq->scx.flags & SCX_RQ_ROOT_IDLE_RENOTIFY;
+
+		rq->scx.flags &= ~(SCX_RQ_SUB_IDLE_RENOTIFY | SCX_RQ_ROOT_IDLE_RENOTIFY);
+		scx_idle_notify(rq, idle, do_notify, root_renotify);
+	}
 }
 
 static void reset_idle_masks(struct sched_ext_ops *ops)
@@ -797,20 +840,20 @@ static void reset_idle_masks(struct sched_ext_ops *ops)
 	int node;
 
 	/*
-	 * Consider all online cpus idle. Should converge to the actual state
-	 * quickly.
+	 * Start with all CPUs marked busy. The idle masks are populated when
+	 * bypass is lifted and each idle CPU is forced through an idle re-pick.
+	 * This may temporarily omit idle CPUs but never advertises a busy CPU as
+	 * idle.
 	 */
 	if (!(ops->flags & SCX_OPS_BUILTIN_IDLE_PER_NODE)) {
-		cpumask_copy(idle_cpumask(NUMA_NO_NODE)->cpu, cpu_online_mask);
-		cpumask_copy(idle_cpumask(NUMA_NO_NODE)->smt, cpu_online_mask);
+		cpumask_clear(idle_cpumask(NUMA_NO_NODE)->cpu);
+		cpumask_clear(idle_cpumask(NUMA_NO_NODE)->smt);
 		return;
 	}
 
 	for_each_node(node) {
-		const struct cpumask *node_mask = cpumask_of_node(node);
-
-		cpumask_and(idle_cpumask(node)->cpu, cpu_online_mask, node_mask);
-		cpumask_and(idle_cpumask(node)->smt, cpu_online_mask, node_mask);
+		cpumask_clear(idle_cpumask(node)->cpu);
+		cpumask_clear(idle_cpumask(node)->smt);
 	}
 }
 
@@ -917,7 +960,7 @@ static s32 select_cpu_from_kfunc(struct scx_sched *sch, struct task_struct *p,
 	bool we_locked = false;
 	s32 cpu;
 
-	if (!ops_cpu_valid(sch, prev_cpu, NULL))
+	if (!scx_cpu_valid(sch, prev_cpu, NULL))
 		return -EINVAL;
 
 	if (!check_builtin_idle_enabled(sch))
@@ -990,7 +1033,7 @@ __bpf_kfunc s32 scx_bpf_cpu_node(s32 cpu, const struct bpf_prog_aux *aux)
 	guard(rcu)();
 
 	sch = scx_prog_sched(aux);
-	if (unlikely(!sch) || !ops_cpu_valid(sch, cpu, NULL))
+	if (unlikely(!sch) || !scx_cpu_valid(sch, cpu, NULL))
 		return NUMA_NO_NODE;
 	return cpu_to_node(cpu);
 }
@@ -1272,7 +1315,7 @@ __bpf_kfunc bool scx_bpf_test_and_clear_cpu_idle(s32 cpu, const struct bpf_prog_
 	if (!check_builtin_idle_enabled(sch))
 		return false;
 
-	if (!ops_cpu_valid(sch, cpu, NULL))
+	if (!scx_cpu_valid(sch, cpu, NULL))
 		return false;
 
 	return scx_idle_test_and_clear_cpu(cpu);
@@ -1320,7 +1363,7 @@ __bpf_kfunc s32 scx_bpf_pick_idle_cpu_node(const struct cpumask *cpus_allowed,
 /**
  * scx_bpf_pick_idle_cpu - Pick and claim an idle cpu
  * @cpus_allowed: Allowed cpumask
- * @flags: %SCX_PICK_IDLE_CPU_* flags
+ * @flags: %SCX_PICK_IDLE_* flags
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
  * Pick and claim an idle cpu in @cpus_allowed. Returns the picked idle cpu
@@ -1367,7 +1410,7 @@ __bpf_kfunc s32 scx_bpf_pick_idle_cpu(const struct cpumask *cpus_allowed,
  *			       or pick any CPU from @node
  * @cpus_allowed: Allowed cpumask
  * @node: target NUMA node
- * @flags: %SCX_PICK_IDLE_CPU_* flags
+ * @flags: %SCX_PICK_IDLE_* flags
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
  * Pick and claim an idle cpu in @cpus_allowed. If none is available, pick any
@@ -1418,7 +1461,7 @@ __bpf_kfunc s32 scx_bpf_pick_any_cpu_node(const struct cpumask *cpus_allowed,
 /**
  * scx_bpf_pick_any_cpu - Pick and claim an idle cpu if available or pick any CPU
  * @cpus_allowed: Allowed cpumask
- * @flags: %SCX_PICK_IDLE_CPU_* flags
+ * @flags: %SCX_PICK_IDLE_* flags
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
  * Pick and claim an idle cpu in @cpus_allowed. If none is available, pick any
@@ -1510,13 +1553,9 @@ static const struct btf_kfunc_id_set scx_kfunc_set_select_cpu = {
 
 int scx_idle_init(void)
 {
-	int ret;
-
-	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_idle) ||
-	      register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &scx_kfunc_set_idle) ||
-	      register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &scx_kfunc_set_idle) ||
-	      register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_select_cpu) ||
-	      register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &scx_kfunc_set_select_cpu);
-
-	return ret;
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_idle) ?:
+	       register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &scx_kfunc_set_idle) ?:
+	       register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &scx_kfunc_set_idle) ?:
+	       register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_select_cpu) ?:
+	       register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &scx_kfunc_set_select_cpu);
 }
