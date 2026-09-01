@@ -144,7 +144,7 @@ EXPORT_SYMBOL(xp_fill_cb);
 
 static void xp_disable_drv_zc(struct xsk_buff_pool *pool)
 {
-	struct netdev_bpf bpf;
+	struct netdev_bpf bpf = {};
 	int err;
 
 	ASSERT_RTNL();
@@ -168,7 +168,7 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 	u32 segs = netdev->xdp_zc_max_segs;
 	bool mbuf = flags & XDP_USE_SG;
 	bool force_zc, force_copy;
-	struct netdev_bpf bpf;
+	struct netdev_bpf bpf = {};
 	u32 frame_size;
 	int err = 0;
 
