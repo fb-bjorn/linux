@@ -891,7 +891,7 @@ struct bnxt_sw_tx_bd {
 	};
 	DEFINE_DMA_UNMAP_ADDR(mapping);
 	DEFINE_DMA_UNMAP_LEN(len);
-	struct page		*page;
+	netmem_ref		netmem;
 	u8			is_ts_pkt;
 	u8			is_push;
 	u8			is_sw_gso;
@@ -908,7 +908,10 @@ struct bnxt_sw_tx_bd {
 #define BNXT_SW_GSO_LAST	2
 
 struct bnxt_sw_rx_bd {
-	void			*data;
+	union {
+		void			*data;
+		netmem_ref		netmem;
+	};
 	u8			*data_ptr;
 	dma_addr_t		mapping;
 	unsigned int		offset;
@@ -990,6 +993,7 @@ struct bnxt_tx_ring_info {
 	u16			tx_prod;
 	u16			tx_cons;
 	u16			tx_hw_cons;
+	u16			xdp_tx_pending;
 	u16			txq_index;
 	u8			tx_napi_idx;
 	u8			kick_pending;
@@ -1123,7 +1127,14 @@ struct bnxt_rx_ring_info {
 	unsigned long		*rx_agg_bmap;
 	u16			rx_agg_bmap_size;
 	u32			rx_page_size;
+	u32			rx_buf_use_size;
+	u32			xdp_frame_size;
+	u16			rx_offset;
+	u16			rx_dma_offset;
+	u16			xdp_headroom;
 	bool                    need_head_pool;
+	bool			xsk_rx_starved;
+	struct xsk_buff_pool	*xsk_pool;
 
 	dma_addr_t		rx_desc_mapping[MAX_RX_PAGES];
 	dma_addr_t		rx_agg_desc_mapping[MAX_RX_AGG_PAGES];
@@ -2971,6 +2982,8 @@ extern const u16 bnxt_lhint_arr[];
 int bnxt_alloc_rx_data(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 		       u16 prod, gfp_t gfp);
 void bnxt_reuse_rx_data(struct bnxt_rx_ring_info *rxr, u16 cons, void *data);
+void bnxt_reuse_rx_netmem(struct bnxt_rx_ring_info *rxr, u16 cons,
+			  netmem_ref netmem);
 u32 bnxt_fw_health_readl(struct bnxt *bp, int reg_idx);
 bool bnxt_bs_trace_avail(struct bnxt *bp, u16 type);
 void bnxt_set_tpa_flags(struct bnxt *bp);

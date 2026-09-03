@@ -953,6 +953,19 @@ static void bnxt_get_channels(struct net_device *dev,
 	}
 }
 
+static bool bnxt_channels_exclude_mp(struct net_device *dev,
+				     unsigned int rx_count)
+{
+	unsigned int queue_id;
+
+	for (queue_id = rx_count; queue_id < dev->real_num_rx_queues;
+	     queue_id++)
+		if (netif_rxq_has_mp(dev, queue_id))
+			return true;
+
+	return false;
+}
+
 static int bnxt_set_channels(struct net_device *dev,
 			     struct ethtool_channels *channel)
 {
@@ -985,6 +998,9 @@ static int bnxt_set_channels(struct net_device *dev,
 
 	req_tx_rings = sh ? channel->combined_count : channel->tx_count;
 	req_rx_rings = sh ? channel->combined_count : channel->rx_count;
+	if (bnxt_channels_exclude_mp(dev, req_rx_rings))
+		return -EBUSY;
+
 	if (bp->tx_nr_rings_xdp) {
 		if (!sh) {
 			netdev_err(dev, "Only combined mode supported when XDP is enabled.\n");
