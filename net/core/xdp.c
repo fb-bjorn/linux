@@ -623,7 +623,7 @@ err:
 	return false;
 }
 
-struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
+struct xdp_frame *xdp_copy_zc_to_xdp_frame(struct xdp_buff *xdp)
 {
 	unsigned int metasize, totsize;
 	void *addr, *data_to_copy;
@@ -663,10 +663,24 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 		}
 	}
 
+	return xdpf;
+}
+
+void xdp_release_zc_buff(struct xdp_buff *xdp)
+{
 	if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL)
 		xsk_buff_free(xdp);
 	else
 		xdp_return_buff(xdp);
+}
+
+struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
+{
+	struct xdp_frame *xdpf;
+
+	xdpf = xdp_copy_zc_to_xdp_frame(xdp);
+	if (xdpf)
+		xdp_release_zc_buff(xdp);
 
 	return xdpf;
 }

@@ -4685,12 +4685,27 @@ int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
 {
 	struct bpf_redirect_info *ri = bpf_net_ctx_get_ri();
 	enum bpf_map_type map_type = ri->map_type;
+	struct xdp_frame *xdpf;
+	int err;
 
 	if (map_type == BPF_MAP_TYPE_XSKMAP)
 		return __xdp_do_redirect_xsk(ri, dev, xdp, xdp_prog);
 
-	return __xdp_do_redirect_frame(ri, dev, xdp_convert_buff_to_frame(xdp),
-				       xdp_prog);
+	if (xdp->rxq->mem.type != MEM_TYPE_XSK_BUFF_POOL && !xdp->netmem)
+		return __xdp_do_redirect_frame(ri, dev,
+					       xdp_convert_buff_to_frame(xdp),
+					       xdp_prog);
+
+	xdpf = xdp_copy_zc_to_xdp_frame(xdp);
+	err = __xdp_do_redirect_frame(ri, dev, xdpf, xdp_prog);
+	if (err) {
+		if (xdpf)
+			xdp_return_frame_rx_napi(xdpf);
+		return err;
+	}
+
+	xdp_release_zc_buff(xdp);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(xdp_do_redirect);
 
