@@ -83,6 +83,20 @@ static void test_xsk(const struct test_spec *test_to_run, enum test_mode mode)
 		ifobj_tx->hw_ring_size_supp = true;
 		ifobj_tx->set_ring.default_tx = ifobj_tx->ring.tx_pending;
 		ifobj_tx->set_ring.default_rx = ifobj_tx->ring.rx_pending;
+		ifobj_tx->set_ring.default_rx_mini =
+			ifobj_tx->ring.rx_mini_pending;
+		ifobj_tx->set_ring.default_rx_jumbo =
+			ifobj_tx->ring.rx_jumbo_pending;
+	}
+	ret = get_hw_ring_size(ifobj_rx->ifname, &ifobj_rx->ring);
+	if (!ret) {
+		ifobj_rx->hw_ring_size_supp = true;
+		ifobj_rx->set_ring.default_tx = ifobj_rx->ring.tx_pending;
+		ifobj_rx->set_ring.default_rx = ifobj_rx->ring.rx_pending;
+		ifobj_rx->set_ring.default_rx_mini =
+			ifobj_rx->ring.rx_mini_pending;
+		ifobj_rx->set_ring.default_rx_jumbo =
+			ifobj_rx->ring.rx_jumbo_pending;
 	}
 
 	cache_line_size = read_procfs_val(SMP_CACHE_BYTES_PATH);
@@ -108,7 +122,9 @@ static void test_xsk(const struct test_spec *test_to_run, enum test_mode mode)
 	if (!ASSERT_OK(init_iface(ifobj_tx, worker_testapp_validate_tx), "init TX"))
 		goto delete_rx;
 
-	test_init(&test, ifobj_tx, ifobj_rx, 0, &tests[0]);
+	if (!ASSERT_OK(test_init(&test, ifobj_tx, ifobj_rx, 0, &tests[0]),
+		       "Reset ring sizes"))
+		goto delete_rx;
 
 	test.tx_pkt_stream_default = pkt_stream_generate(DEFAULT_PKT_CNT, MIN_PKT_SIZE);
 	if (!ASSERT_OK_PTR(test.tx_pkt_stream_default, "TX pkt generation"))
@@ -118,15 +134,18 @@ static void test_xsk(const struct test_spec *test_to_run, enum test_mode mode)
 		goto delete_rx;
 
 
-	test_init(&test, ifobj_tx, ifobj_rx, mode, test_to_run);
+	if (!ASSERT_OK(test_init(&test, ifobj_tx, ifobj_rx, mode,
+				 test_to_run), "Reset ring sizes"))
+		goto delete_streams;
 	ret = test.test_func(&test);
 	if (ret != TEST_SKIP)
 		ASSERT_OK(ret, "Run test");
 	pkt_stream_restore_default(&test);
 
-	if (ifobj_tx->hw_ring_size_supp)
-		hw_ring_size_reset(ifobj_tx);
+	ASSERT_OK(hw_ring_sizes_reset(ifobj_tx, ifobj_rx),
+		  "Restore ring sizes");
 
+delete_streams:
 	pkt_stream_delete(test.tx_pkt_stream_default);
 	pkt_stream_delete(test.rx_pkt_stream_default);
 	xsk_xdp_progs__destroy(ifobj_tx->xdp_progs);
@@ -167,4 +186,3 @@ void test_ns_xsk_drv(void)
 
 	delete_veth();
 }
-

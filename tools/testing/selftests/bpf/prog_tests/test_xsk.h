@@ -117,9 +117,13 @@ struct xsk_umem_info {
 struct set_hw_ring {
 	u32 default_tx;
 	u32 default_rx;
+	u32 default_rx_mini;
+	u32 default_rx_jumbo;
 };
 
 int hw_ring_size_reset(struct ifobject *ifobj);
+int hw_ring_sizes_reset(struct ifobject *ifobj_tx,
+			struct ifobject *ifobj_rx);
 
 struct ifobject {
 	char ifname[MAX_INTERFACE_NAME_CHARS];
@@ -228,9 +232,9 @@ static inline char *mode_string(struct test_spec *test)
 	}
 }
 
-void test_init(struct test_spec *test, struct ifobject *ifobj_tx,
-	       struct ifobject *ifobj_rx, enum test_mode mode,
-	       const struct test_spec *test_to_run);
+int test_init(struct test_spec *test, struct ifobject *ifobj_tx,
+	      struct ifobject *ifobj_rx, enum test_mode mode,
+	      const struct test_spec *test_to_run);
 
 int testapp_adjust_tail_grow(struct test_spec *test);
 int testapp_adjust_tail_grow_mb(struct test_spec *test);

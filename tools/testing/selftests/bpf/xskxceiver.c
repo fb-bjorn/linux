@@ -337,8 +337,8 @@ int main(int argc, char **argv)
 {
 	const size_t total_tests = ARRAY_SIZE(tests) + ARRAY_SIZE(ci_skip_tests);
 	u32 cache_line_size, max_frags, umem_tailroom;
-	struct pkt_stream *rx_pkt_stream_default;
-	struct pkt_stream *tx_pkt_stream_default;
+	struct pkt_stream *rx_pkt_stream_default = NULL;
+	struct pkt_stream *tx_pkt_stream_default = NULL;
 	struct ifobject *ifobj_tx, *ifobj_rx;
 	u32 i, j, failed_tests = 0, nb_tests;
 	int modes = TEST_MODE_SKB + 1;
@@ -408,6 +408,24 @@ int main(int argc, char **argv)
 		ifobj_tx->hw_ring_size_supp = true;
 		ifobj_tx->set_ring.default_tx = ifobj_tx->ring.tx_pending;
 		ifobj_tx->set_ring.default_rx = ifobj_tx->ring.rx_pending;
+		ifobj_tx->set_ring.default_rx_mini =
+			ifobj_tx->ring.rx_mini_pending;
+		ifobj_tx->set_ring.default_rx_jumbo =
+			ifobj_tx->ring.rx_jumbo_pending;
+		if (hw_ring_size_reset(ifobj_tx))
+			ifobj_tx->hw_ring_size_supp = false;
+	}
+	ret = get_hw_ring_size(ifobj_rx->ifname, &ifobj_rx->ring);
+	if (!ret) {
+		ifobj_rx->hw_ring_size_supp = true;
+		ifobj_rx->set_ring.default_tx = ifobj_rx->ring.tx_pending;
+		ifobj_rx->set_ring.default_rx = ifobj_rx->ring.rx_pending;
+		ifobj_rx->set_ring.default_rx_mini =
+			ifobj_rx->ring.rx_mini_pending;
+		ifobj_rx->set_ring.default_rx_jumbo =
+			ifobj_rx->ring.rx_jumbo_pending;
+		if (hw_ring_size_reset(ifobj_rx))
+			ifobj_rx->hw_ring_size_supp = false;
 	}
 
 	if (init_iface(ifobj_rx, worker_testapp_validate_rx) ||
@@ -416,7 +434,13 @@ int main(int argc, char **argv)
 		ksft_exit_xfail();
 	}
 
-	test_init(&test, ifobj_tx, ifobj_rx, 0, &tests[0]);
+	ret = test_init(&test, ifobj_tx, ifobj_rx, 0, &tests[0]);
+	if (ret) {
+		ksft_print_msg("Failed to restore HW ring sizes: %s\n",
+			       strerror(-ret));
+		failed_tests++;
+		goto cleanup;
+	}
 	tx_pkt_stream_default = pkt_stream_generate(DEFAULT_PKT_CNT, MIN_PKT_SIZE);
 	rx_pkt_stream_default = pkt_stream_generate(DEFAULT_PKT_CNT, MIN_PKT_SIZE);
 	if (!tx_pkt_stream_default || !rx_pkt_stream_default)
@@ -448,14 +472,22 @@ int main(int argc, char **argv)
 			continue;
 
 		for (j = 0; j < total_tests; j++) {
+			const struct test_spec *spec;
+
 			if (opt_run_test != RUN_ALL_TESTS && j != opt_run_test)
 				continue;
 
 			if (j < ARRAY_SIZE(tests))
-				test_init(&test, ifobj_tx, ifobj_rx, i, &tests[j]);
+				spec = &tests[j];
 			else
-				test_init(&test, ifobj_tx, ifobj_rx, i,
-					  &ci_skip_tests[j - ARRAY_SIZE(tests)]);
+				spec = &ci_skip_tests[j - ARRAY_SIZE(tests)];
+			ret = test_init(&test, ifobj_tx, ifobj_rx, i, spec);
+			if (ret) {
+				ksft_test_result_fail("FAIL: ring reset: %s\n",
+						      strerror(-ret));
+				failed_tests++;
+				goto cleanup;
+			}
 			run_pkt_test(&test);
 			usleep(USLEEP_MAX);
 
@@ -464,11 +496,18 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (ifobj_tx->hw_ring_size_supp)
-		hw_ring_size_reset(ifobj_tx);
+cleanup:
+	ret = hw_ring_sizes_reset(ifobj_tx, ifobj_rx);
+	if (ret) {
+		ksft_print_msg("Failed to restore HW ring sizes: %s\n",
+			       strerror(-ret));
+		failed_tests++;
+	}
 
-	pkt_stream_delete(tx_pkt_stream_default);
-	pkt_stream_delete(rx_pkt_stream_default);
+	if (tx_pkt_stream_default)
+		pkt_stream_delete(tx_pkt_stream_default);
+	if (rx_pkt_stream_default)
+		pkt_stream_delete(rx_pkt_stream_default);
 	xsk_unload_xdp_programs(ifobj_tx);
 	xsk_unload_xdp_programs(ifobj_rx);
 	ifobject_delete(ifobj_tx);
