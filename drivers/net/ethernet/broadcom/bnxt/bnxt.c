@@ -3286,6 +3286,8 @@ static bool __bnxt_poll_work_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 
 	if (budget && bnapi->rx_ring && !bnapi->in_reset)
 		complete = bnxt_xsk_rx_refill(bp, bnapi->rx_ring);
+	if (budget)
+		bnxt_xsk_poll(bp, bnapi);
 
 	return complete;
 }
@@ -12205,6 +12207,29 @@ static void bnxt_free_irq(struct bnxt *bp)
 #endif
 }
 
+static void bnxt_update_xsk_features(struct bnxt *bp)
+{
+	xdp_features_t features = bp->dev->xdp_features;
+
+	features &= ~NETDEV_XDP_ACT_XSK_ZEROCOPY;
+	bp->dev->xdp_zc_max_segs = 0;
+	if (bp->tph_mode && IS_ENABLED(CONFIG_XDP_SOCKETS) &&
+	    bnxt_xsk_page_size_ok() && BNXT_SUPPORTS_QUEUE_API(bp)) {
+		features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
+		bp->dev->xdp_zc_max_segs = BNXT_XSK_MAX_SEGS;
+	}
+	xdp_set_features_flag_locked(bp->dev, features);
+}
+
+static bool bnxt_xsk_tph_capable(struct bnxt *bp)
+{
+	if (pcie_enable_tph(bp->pdev, PCI_TPH_ST_IV_MODE))
+		return false;
+
+	pcie_disable_tph(bp->pdev);
+	return true;
+}
+
 static int bnxt_request_irq(struct bnxt *bp)
 {
 	const int numa_node = dev_to_node(&bp->pdev->dev);
@@ -12227,6 +12252,7 @@ static int bnxt_request_irq(struct bnxt *bp)
 		rc = pcie_enable_tph(bp->pdev, PCI_TPH_ST_IV_MODE);
 		if (!rc)
 			bp->tph_mode = PCI_TPH_ST_IV_MODE;
+		bnxt_update_xsk_features(bp);
 	}
 
 	for (i = 0, j = 0; i < bp->cp_nr_rings; i++) {
@@ -17520,6 +17546,12 @@ static int bnxt_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	dev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
 			    NETDEV_XDP_ACT_RX_SG;
+	if (IS_ENABLED(CONFIG_XDP_SOCKETS) && bnxt_xsk_page_size_ok() &&
+	    BNXT_SUPPORTS_QUEUE_API(bp) && bnxt_xsk_tph_capable(bp)) {
+		dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
+		dev->xdp_zc_max_segs = BNXT_XSK_MAX_SEGS;
+	}
+
 #ifdef CONFIG_BNXT_SRIOV
 	init_waitqueue_head(&bp->sriov_cfg_wait);
 #endif

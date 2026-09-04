@@ -888,6 +888,7 @@ struct bnxt_sw_tx_bd {
 	union {
 		struct sk_buff		*skb;
 		struct xdp_frame	*xdpf;
+		struct xsk_buff_pool	*xsk_pool;
 	};
 	DEFINE_DMA_UNMAP_ADDR(mapping);
 	DEFINE_DMA_UNMAP_LEN(len);

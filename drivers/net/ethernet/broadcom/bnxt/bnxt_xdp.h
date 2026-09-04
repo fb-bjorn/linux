@@ -15,6 +15,7 @@
 
 DECLARE_STATIC_KEY_FALSE(bnxt_xdp_locking_key);
 
+#define BNXT_XSK_TX_BUDGET	64
 #define BNXT_XSK_MAX_SEGS	min_t(u32, MAX_SKB_FRAGS + 1, TX_MAX_BD_CNT)
 #define BNXT_XDP_TAILROOM	SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 
@@ -22,6 +23,7 @@ enum bnxt_xdp_tx_action {
 	BNXT_XDP_TX_NONE,
 	BNXT_XDP_TX,
 	BNXT_XDP_REDIRECT,
+	BNXT_XDP_TX_XSK,
 };
 
 struct bnxt_xdp_buff {
@@ -56,6 +58,7 @@ struct sk_buff *bnxt_xdp_build_skb(struct bnxt *bp, struct sk_buff *skb,
 int bnxt_xdp_rx_hash(const struct xdp_md *ctx, u32 *hash,
 		     enum xdp_rss_hash_type *rss_type);
 
+void bnxt_xsk_poll(struct bnxt *bp, struct bnxt_napi *bnapi);
 int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags);
 bool bnxt_xsk_active(struct bnxt *bp);
 void bnxt_free_xdp_tx_ring(struct bnxt *bp,
