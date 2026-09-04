@@ -2256,6 +2256,7 @@ int testapp_xdp_shared_umem(struct test_spec *test)
 int testapp_poll_txq_tmout(struct test_spec *test)
 {
 	bool shared_umem = test->ifobj_tx->shared_umem;
+	u32 frame_size = test->ifobj_tx->xsk->umem->frame_size;
 	int ret;
 
 	test->poll_tmout = true;
@@ -2266,9 +2267,8 @@ int testapp_poll_txq_tmout(struct test_spec *test)
 	 */
 	test->ifobj_tx->shared_umem = false;
 	test->ifobj_tx->use_poll = true;
-	/* create invalid frame by set umem frame_size and pkt length equal to 2048 */
-	test->ifobj_tx->xsk->umem->frame_size = 2048;
-	if (pkt_stream_replace(test, 2 * DEFAULT_PKT_CNT, 2048)) {
+	/* Keep full-frame TX traffic while the completion queue fills. */
+	if (pkt_stream_replace(test, 2 * DEFAULT_PKT_CNT, frame_size)) {
 		test->ifobj_tx->shared_umem = shared_umem;
 		return TEST_FAILURE;
 	}
