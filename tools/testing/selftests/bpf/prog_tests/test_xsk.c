@@ -1610,6 +1610,12 @@ static int thread_common_ops(struct test_spec *test, struct ifobject *ifobject)
 	ret = xsk_configure_umem(ifobject, umem, bufs, umem_sz);
 	if (ret)
 		return ret;
+	if (ifobject->rx_on) {
+		ret = xsk_populate_fill_ring(umem, ifobject->xsk->pkt_stream,
+					     ifobject->use_fill_ring);
+		if (ret)
+			return ret;
+	}
 
 	ret = xsk_configure(test, ifobject, umem, false);
 	if (ret)
@@ -1619,11 +1625,6 @@ static int thread_common_ops(struct test_spec *test, struct ifobject *ifobject)
 
 	if (!ifobject->rx_on)
 		return 0;
-
-	ret = xsk_populate_fill_ring(umem, ifobject->xsk->pkt_stream,
-				     ifobject->use_fill_ring);
-	if (ret)
-		return ret;
 
 	for (i = 0; i < test->nb_sockets; i++) {
 		ret = xsk_update_xskmap(ifobject->xskmap, ifobject->xsk_arr[i].xsk, i);
@@ -1679,6 +1680,8 @@ void *worker_testapp_validate_rx(void *arg)
 			ksft_print_msg("Error: Failed to update xskmap, error %s\n",
 				       strerror(-err));
 	}
+	if (!err)
+		err = kick_rx(ifobject->xsk);
 
 	if (test->use_barrier)
 		pthread_barrier_wait(&barr);
