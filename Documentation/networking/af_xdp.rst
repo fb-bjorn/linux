@@ -425,11 +425,12 @@ UMEM area that is 128K and a chunk size of 2K, this means that you
 will be able to hold a maximum of 128K / 2K = 64 packets in your UMEM
 area and that your largest packet size can be 2K.
 
-There is also an option to set the headroom of each single buffer in
-the UMEM. If you set this to N bytes, it means that the packet will
-start N bytes into the buffer leaving the first N bytes for the
-application to use. The final option is the flags field, but it will
-be dealt with in separate sections for each UMEM flag.
+There is also an option to set the headroom of each single-buffer packet
+and the first buffer of each multi-buffer packet in the UMEM. If you set
+this to N bytes, it means that the packet will start N bytes into the
+buffer leaving the first N bytes for the application to use. The final
+option is the flags field, but it will be dealt with in separate sections
+for each UMEM flag.
 
 SO_BINDTODEVICE setsockopt
 --------------------------
@@ -546,6 +547,11 @@ means that this is the last buffer of the packet. AF_XDP guarantees
 that only a complete packet (all frames in the packet) is sent to the
 application. If there is not enough space in the AF_XDP Rx ring, all
 frames of the packet will be dropped.
+
+The first descriptor starts after the configured UMEM headroom and
+``XDP_PACKET_HEADROOM``. Continuation descriptors contain the actual data
+offset reported by the driver and do not guarantee headroom. Applications
+must use each descriptor's ``addr`` when accessing its data.
 
 If application reads a batch of descriptors, using for example the libxdp
 interfaces, it is not guaranteed that the batch will end with a full

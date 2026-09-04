@@ -2,6 +2,7 @@
 /* Copyright (c) 2022 Intel */
 
 #include <linux/bpf.h>
+#include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -21,6 +22,18 @@ int count = 0;
 
 SEC("xdp.frags") int xsk_def_prog(struct xdp_md *xdp)
 {
+	return bpf_redirect_map(&xsk, 0, XDP_DROP);
+}
+
+SEC("xdp.frags") int xsk_xdp_load_bytes(struct xdp_md *xdp)
+{
+	__u32 offset = xdp->data_end - xdp->data;
+	__u8 byte;
+
+	if (bpf_xdp_get_buff_len(xdp) > offset &&
+	    bpf_xdp_load_bytes(xdp, offset, &byte, sizeof(byte)))
+		return XDP_DROP;
+
 	return bpf_redirect_map(&xsk, 0, XDP_DROP);
 }
 
@@ -103,18 +116,17 @@ SEC("xdp.frags") int xsk_xdp_adjust_tail(struct xdp_md *xdp)
 		return XDP_DROP;
 
 	if (curr_buff_len > buff_len) {
-		__u32 *pkt_data = (void *)(long)xdp->data;
-		__u32 len, words_to_end, seq_num;
+		__u32 len, pkt_nb, words_to_end, seq_num;
 
 		len = curr_buff_len - PKT_HDR_ALIGN;
-		words_to_end = len / sizeof(*pkt_data) - 1;
-		seq_num = words_to_end;
+		words_to_end = len / sizeof(seq_num) - 1;
+		if (bpf_xdp_load_bytes(xdp, PKT_HDR_ALIGN, &pkt_nb,
+				       sizeof(pkt_nb)))
+			return XDP_DROP;
+		pkt_nb = bpf_ntohl(pkt_nb) & 0xffff0000;
 
-		/* Convert sequence number to network byte order. Store this in the last 4 bytes of
-		 * the packet. Use 'adjust_value' to determine the position at the end of the
-		 * packet for storing the sequence number.
-		 */
-		seq_num = __constant_htonl(words_to_end);
+		/* Preserve the packet number in the new final payload word. */
+		seq_num = bpf_htonl(pkt_nb | words_to_end);
 		bpf_xdp_store_bytes(xdp, curr_buff_len - sizeof(seq_num), &seq_num,
 				    sizeof(seq_num));
 	}

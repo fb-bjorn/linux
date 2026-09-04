@@ -20,6 +20,8 @@ struct net_device;
 struct xsk_queue;
 struct xdp_buff;
 
+#define XSK_PP_RELEASE_BATCH 16
+
 struct xdp_umem {
 	void *addrs;
 	u64 size;
@@ -53,6 +55,8 @@ struct xdp_sock {
 	struct xdp_umem *umem;
 	struct list_head flush_node;
 	struct xsk_buff_pool *pool;
+	u32 pp_release_cnt;
+	netmem_ref pp_release[XSK_PP_RELEASE_BATCH];
 	u16 queue_id;
 	bool zc;
 	bool sg;

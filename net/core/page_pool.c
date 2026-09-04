@@ -1070,6 +1070,11 @@ netmem_ref page_pool_alloc_frag_netmem(struct page_pool *pool,
 	unsigned int max_size = PAGE_SIZE << pool->p.order;
 	netmem_ref netmem = pool->frag_page;
 
+	if (static_branch_unlikely(&page_pool_mem_providers) &&
+	    WARN_ON_ONCE(pool->mp_ops &&
+			 !(pool->mp_ops->capabilities &
+			   MEM_PROVIDER_CAP_PAGE_FRAG)))
+		return 0;
 	if (WARN_ON(size > max_size))
 		return 0;
 
@@ -1341,16 +1346,57 @@ bool net_mp_niov_set_dma_addr(struct net_iov *niov, dma_addr_t addr)
 }
 
 /* Associate a niov with a page pool. Should follow with a matching
- * net_mp_niov_clear_page_pool()
+ * net_mp_niov_clear_page_pool().
  */
 void net_mp_niov_set_page_pool(struct page_pool *pool, struct net_iov *niov)
 {
 	netmem_ref netmem = net_iov_to_netmem(niov);
 
 	page_pool_set_pp_info(pool, netmem);
-
 	pool->pages_state_hold_cnt++;
 	trace_page_pool_state_hold(pool, netmem, pool->pages_state_hold_cnt);
+}
+
+void net_mp_set_pool_bulk(struct page_pool *pool, netmem_ref *netmems,
+			  u32 count)
+{
+	struct net_iov *niov;
+	u32 i;
+
+	if (trace_page_pool_state_hold_enabled()) {
+		for (i = 0; i < count; i++) {
+			niov = netmem_to_net_iov(netmems[i]);
+			net_mp_niov_set_page_pool(pool, niov);
+		}
+		return;
+	}
+
+	for (i = 0; i < count; i++)
+		page_pool_set_pp_info(pool, netmems[i]);
+	pool->pages_state_hold_cnt += count;
+}
+
+/* Release page_pool ownership but retain the association for reuse. */
+void net_mp_niov_release_page_pool(struct net_iov *niov)
+{
+	struct page_pool *pool;
+	netmem_ref netmem;
+	int count;
+
+	netmem = net_iov_to_netmem(niov);
+	pool = netmem_get_pp(netmem);
+
+	if (WARN_ON_ONCE(!pool))
+		return;
+
+	count = atomic_inc_return_relaxed(&pool->pages_state_release_cnt);
+	trace_page_pool_state_release(pool, netmem, count);
+}
+
+/* Release a batch when per-netmem tracing is disabled. */
+void net_mp_page_pool_release_bulk(struct page_pool *pool, u32 count)
+{
+	atomic_add(count, &pool->pages_state_release_cnt);
 }
 
 /* Disassociate a niov from a page pool. Should only be used in the

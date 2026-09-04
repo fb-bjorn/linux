@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 
+#include <linux/bitmap.h>
 #include <linux/netdevice.h>
 #include <net/netdev_lock.h>
+#include <net/netdev_queues.h>
+#include <net/netdev_rx_queue.h>
+#include <net/page_pool/helpers.h>
+#include <net/page_pool/memory_provider.h>
 #include <net/xsk_buff_pool.h>
 #include <net/xdp_sock.h>
 #include <net/xdp_sock_drv.h>
@@ -11,6 +16,24 @@
 #include "xsk.h"
 
 #define ETH_PAD_LEN (ETH_HLEN + 2 * VLAN_HLEN  + ETH_FCS_LEN)
+#define XSK_PAGE_POOL_DMA_ATTR	(DMA_ATTR_WEAK_ORDERING | \
+				 DMA_ATTR_SKIP_CPU_SYNC)
+#define XSK_POOL_RELEASE_RETRY	HZ
+
+/* Keep page_pool descriptors independent from direct-driver XSK buffers. */
+struct xsk_pp {
+	struct xsk_pp_info info;
+	struct xsk_queue *fq;
+	struct device *dev;
+	u64 chunk_mask;
+	u64 addrs_cnt;
+	unsigned long *in_use;
+	/* Protects the reuse stack and ownership bitmap. */
+	spinlock_t lock;
+	u32 reuse_cnt;
+	bool dma_need_sync;
+	u32 reuse[];
+};
 
 void xp_add_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs)
 {
@@ -142,23 +165,20 @@ void xp_fill_cb(struct xsk_buff_pool *pool, struct xsk_cb_desc *desc)
 }
 EXPORT_SYMBOL(xp_fill_cb);
 
-static void xp_disable_drv_zc(struct xsk_buff_pool *pool)
+static int xp_disable_drv_zc(struct xsk_buff_pool *pool)
 {
-	struct netdev_bpf bpf;
-	int err;
+	struct netdev_bpf bpf = {};
 
 	ASSERT_RTNL();
 
-	if (pool->umem->zc) {
-		bpf.command = XDP_SETUP_XSK_POOL;
-		bpf.xsk.pool = NULL;
-		bpf.xsk.queue_id = pool->queue_id;
+	if (!pool->umem->zc)
+		return 0;
 
-		err = pool->netdev->netdev_ops->ndo_bpf(pool->netdev, &bpf);
+	bpf.command = XDP_SETUP_XSK_POOL;
+	bpf.xsk.pool = NULL;
+	bpf.xsk.queue_id = pool->queue_id;
 
-		if (err)
-			WARN(1, "Failed to disable zero-copy!\n");
-	}
+	return pool->netdev->netdev_ops->ndo_bpf(pool->netdev, &bpf);
 }
 
 int xp_assign_dev(struct xsk_buff_pool *pool,
@@ -168,7 +188,7 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 	u32 segs = netdev->xdp_zc_max_segs;
 	bool mbuf = flags & XDP_USE_SG;
 	bool force_zc, force_copy;
-	struct netdev_bpf bpf;
+	struct netdev_bpf bpf = {};
 	u32 frame_size;
 	int err = 0;
 
@@ -235,7 +255,7 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 		goto err_unreg_pool;
 	}
 
-	if (dev_get_min_mp_channel_count(netdev)) {
+	if (netif_mp_unsupported(netdev, MEM_PROVIDER_CAP_XDP)) {
 		err = -EBUSY;
 		goto err_unreg_pool;
 	}
@@ -259,7 +279,7 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 	return 0;
 
 err_unreg_xsk:
-	xp_disable_drv_zc(pool);
+	WARN_ON_ONCE(xp_disable_drv_zc(pool));
 err_unreg_pool:
 	if (!force_zc)
 		err = 0; /* fallback to copy mode */
@@ -287,29 +307,46 @@ int xp_assign_dev_shared(struct xsk_buff_pool *pool, struct xdp_sock *umem_xs,
 	return xp_assign_dev(pool, dev, queue_id, flags);
 }
 
-void xp_clear_dev(struct xsk_buff_pool *pool)
+int xp_clear_dev(struct xsk_buff_pool *pool)
 {
 	struct net_device *netdev = pool->netdev;
+	int err;
 
-	if (!pool->netdev)
-		return;
+	if (!netdev)
+		return 0;
 
 	netdev_lock_ops(netdev);
-	xp_disable_drv_zc(pool);
+	err = xp_disable_drv_zc(pool);
+	if (err)
+		goto unlock;
+
 	xsk_clear_pool_at_qid(pool->netdev, pool->queue_id);
 	pool->netdev = NULL;
+unlock:
 	netdev_unlock_ops(netdev);
+	if (err)
+		return err;
+
 	dev_put(netdev);
+	return 0;
 }
 
 static void xp_release_deferred(struct work_struct *work)
 {
-	struct xsk_buff_pool *pool = container_of(work, struct xsk_buff_pool,
-						  work);
+	struct xsk_buff_pool *pool;
+	int err;
+
+	pool = container_of(to_delayed_work(work), struct xsk_buff_pool, work);
 
 	rtnl_lock();
-	xp_clear_dev(pool);
+	err = xp_clear_dev(pool);
 	rtnl_unlock();
+	if (err) {
+		WARN_ON_ONCE(err);
+		/* Retry while the queue still owns the pool. */
+		schedule_delayed_work(&pool->work, XSK_POOL_RELEASE_RETRY);
+		return;
+	}
 
 	if (pool->fq) {
 		xskq_destroy(pool->fq);
@@ -336,8 +373,8 @@ bool xp_put_pool(struct xsk_buff_pool *pool)
 		return false;
 
 	if (refcount_dec_and_test(&pool->users)) {
-		INIT_WORK(&pool->work, xp_release_deferred);
-		schedule_work(&pool->work);
+		INIT_DELAYED_WORK(&pool->work, xp_release_deferred);
+		schedule_delayed_work(&pool->work, 0);
 		return true;
 	}
 
@@ -511,6 +548,350 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 }
 EXPORT_SYMBOL(xp_dma_map);
 
+static void xp_pp_free(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider = pool->pp;
+
+	if (!provider)
+		return;
+
+	kvfree(provider->in_use);
+	kvfree(provider->info.area.niovs);
+	kvfree(provider);
+	pool->pp = NULL;
+}
+
+static struct xsk_pp *xp_pp_create(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider;
+	struct net_iov *niov;
+	dma_addr_t dma;
+	u64 addr;
+	u32 i;
+
+	provider = kvzalloc_flex(*provider, reuse, pool->heads_cnt);
+	if (!provider)
+		return ERR_PTR(-ENOMEM);
+
+	provider->info.area.niovs =
+		kvzalloc_objs(*provider->info.area.niovs, pool->heads_cnt);
+	if (!provider->info.area.niovs) {
+		kvfree(provider);
+		return ERR_PTR(-ENOMEM);
+	}
+	provider->in_use = kvcalloc(BITS_TO_LONGS(pool->heads_cnt),
+				    sizeof(*provider->in_use), GFP_KERNEL);
+	if (!provider->in_use) {
+		kvfree(provider->info.area.niovs);
+		kvfree(provider);
+		return ERR_PTR(-ENOMEM);
+	}
+
+	provider->info.pool = pool;
+	provider->fq = pool->fq;
+	provider->dev = pool->dev;
+	provider->info.area.num_niovs = pool->heads_cnt;
+	provider->info.area.base_virtual = (unsigned long)pool->addrs;
+	provider->info.addrs = pool->addrs;
+	provider->chunk_mask = pool->chunk_mask;
+	provider->addrs_cnt = pool->addrs_cnt;
+	provider->info.chunk_shift = pool->chunk_shift;
+	provider->dma_need_sync = dma_dev_need_sync(pool->dev);
+	spin_lock_init(&provider->lock);
+
+	for (i = 0; i < provider->info.area.num_niovs; i++) {
+		niov = &provider->info.area.niovs[i];
+		addr = (u64)i << provider->info.chunk_shift;
+		dma = (pool->dma_pages[addr >> PAGE_SHIFT] &
+		       ~XSK_NEXT_PG_CONTIG_MASK) + (addr & ~PAGE_MASK);
+
+		net_iov_init(niov, &provider->info.area, NET_IOV_XSK);
+		if (net_mp_niov_set_dma_addr(niov, dma))
+			goto err_free_niovs;
+	}
+
+	pool->pp = provider;
+	return provider;
+
+err_free_niovs:
+	kvfree(provider->in_use);
+	kvfree(provider->info.area.niovs);
+	kvfree(provider);
+	return ERR_PTR(-ERANGE);
+}
+
+static int xp_pp_init(struct page_pool *pp)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+
+	if (!provider || !pool->dma_pages)
+		return -EINVAL;
+	if (pp->p.order)
+		return -E2BIG;
+
+	return 0;
+}
+
+static void xp_pp_destroy(struct page_pool *pp)
+{
+}
+
+static netmem_ref xp_pp_prepare_netmem(struct page_pool *pp,
+				       struct xsk_pp *provider,
+				       struct net_iov *niov)
+{
+	netmem_ref netmem = net_iov_to_netmem(niov);
+	dma_addr_t dma = netmem_get_dma_addr(netmem);
+
+	if (provider->dma_need_sync)
+		dma_sync_single_range_for_device(provider->dev, dma,
+						 pp->p.offset, pp->p.max_len,
+						 pp->p.dma_dir);
+
+	return netmem;
+}
+
+static unsigned int
+xp_pp_alloc_reused(struct page_pool *pp, struct xsk_pp *provider,
+		   netmem_ref *netmems, unsigned int max)
+{
+	struct net_iov *niov;
+	unsigned int allocated;
+	unsigned int i;
+	u32 idx;
+
+	spin_lock_bh(&provider->lock);
+	allocated = min(max, provider->reuse_cnt);
+	for (i = 0; i < allocated; i++) {
+		idx = provider->reuse[--provider->reuse_cnt];
+		niov = &provider->info.area.niovs[idx];
+		netmems[i] = net_iov_to_netmem(niov);
+	}
+	spin_unlock_bh(&provider->lock);
+
+	for (i = 0; i < allocated; i++) {
+		niov = netmem_to_net_iov(netmems[i]);
+		netmems[i] = xp_pp_prepare_netmem(pp, provider, niov);
+	}
+
+	return allocated;
+}
+
+static unsigned int
+xp_pp_alloc_fq(struct page_pool *pp, struct xsk_pp *provider,
+	       netmem_ref *netmems, unsigned int max)
+{
+	struct xsk_queue *fq = provider->fq;
+	struct net_iov *niov;
+	u64 addr;
+	unsigned int allocated = 0;
+	u32 cached_cons, entries;
+	u32 idx;
+	u32 i;
+
+	spin_lock_bh(&provider->lock);
+	if (!fq)
+		goto unlock;
+
+	entries = xskq_cons_nb_entries(fq, max);
+	if (!entries) {
+		fq->queue_empty_descs++;
+		goto unlock;
+	}
+
+	cached_cons = fq->cached_cons;
+	for (i = 0; i < entries; i++) {
+		__xskq_cons_read_addr_unchecked(fq, cached_cons++, &addr);
+		addr &= provider->chunk_mask;
+		if (unlikely(addr >= provider->addrs_cnt)) {
+			fq->invalid_descs++;
+			continue;
+		}
+
+		idx = addr >> provider->info.chunk_shift;
+		if (__test_and_set_bit(idx, provider->in_use)) {
+			fq->invalid_descs++;
+			continue;
+		}
+		niov = &provider->info.area.niovs[idx];
+		netmems[allocated++] = net_iov_to_netmem(niov);
+	}
+
+	xskq_cons_release_n(fq, entries);
+	__xskq_cons_release(fq);
+	spin_unlock_bh(&provider->lock);
+
+	for (i = 0; i < allocated; i++) {
+		niov = netmem_to_net_iov(netmems[i]);
+		netmems[i] = xp_pp_prepare_netmem(pp, provider, niov);
+	}
+
+	return allocated;
+
+unlock:
+	spin_unlock_bh(&provider->lock);
+	return 0;
+}
+
+static netmem_ref xp_pp_alloc_netmems(struct page_pool *pp, gfp_t gfp)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	netmem_ref *netmems = pp->alloc.cache;
+	unsigned int allocated;
+
+	if (WARN_ON_ONCE(pp->alloc.count))
+		return 0;
+
+	allocated = xp_pp_alloc_reused(pp, provider, netmems,
+				       PP_ALLOC_CACHE_REFILL);
+	if (allocated < PP_ALLOC_CACHE_REFILL)
+		allocated += xp_pp_alloc_fq(pp, provider, netmems + allocated,
+					    PP_ALLOC_CACHE_REFILL - allocated);
+
+	if (!allocated)
+		return 0;
+
+	net_mp_set_pool_bulk(pp, netmems, allocated);
+
+	allocated--;
+	pp->alloc.count = allocated;
+	return netmems[allocated];
+}
+
+static bool xp_pp_release_netmem(struct page_pool *pp, netmem_ref netmem)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+	u32 idx = net_iov_idx(niov);
+
+	net_mp_niov_clear_page_pool(niov);
+
+	spin_lock_bh(&provider->lock);
+	if (WARN_ON_ONCE(!test_bit(idx, provider->in_use)) ||
+	    WARN_ON_ONCE(provider->reuse_cnt >= provider->info.area.num_niovs))
+		goto unlock;
+	provider->reuse[provider->reuse_cnt++] = idx;
+
+unlock:
+	spin_unlock_bh(&provider->lock);
+
+	return false;
+}
+
+void xp_pp_release_to_user_bulk(netmem_ref *netmems, u32 count)
+{
+	struct xsk_pp_info *info = xp_netmem_to_pp(netmems[0]);
+	struct xsk_pp *provider = container_of(info, struct xsk_pp, info);
+	u32 i;
+
+	spin_lock_bh(&provider->lock);
+	for (i = 0; i < count; i++) {
+		u32 idx = net_iov_idx(netmem_to_net_iov(netmems[i]));
+
+		WARN_ON_ONCE(!__test_and_clear_bit(idx, provider->in_use));
+	}
+	spin_unlock_bh(&provider->lock);
+}
+
+static int xp_pp_nl_fill(void *mp_priv, struct sk_buff *rsp,
+			 struct netdev_rx_queue *rxq)
+{
+	return 0;
+}
+
+static void xp_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq)
+{
+	struct xsk_buff_pool *pool = mp_priv;
+	struct net_device *netdev = pool->netdev;
+
+	if (WARN_ON_ONCE(!netdev))
+		goto free_provider;
+
+	/* Device unregister supersedes a failed deferred queue close. */
+	xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+	xsk_clear_pool_at_qid(netdev, pool->queue_id);
+	pool->netdev = NULL;
+	dev_put(netdev);
+
+free_provider:
+	xp_pp_free(pool);
+
+	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+}
+
+static const struct memory_provider_ops xsk_pp_ops = {
+	.init			= xp_pp_init,
+	.destroy		= xp_pp_destroy,
+	.alloc_netmems		= xp_pp_alloc_netmems,
+	.release_netmem		= xp_pp_release_netmem,
+	.nl_fill		= xp_pp_nl_fill,
+	.uninstall		= xp_pp_uninstall,
+	.capabilities		= MEM_PROVIDER_CAP_XDP | MEM_PROVIDER_CAP_HDS,
+};
+
+int xsk_pool_setup_page_pool(struct net_device *dev, struct xsk_buff_pool *pool,
+			     u16 queue_id, struct netlink_ext_ack *extack)
+{
+	struct xsk_pp *provider;
+	struct pp_memory_provider_params mp = {
+		.mp_ops = &xsk_pp_ops,
+	};
+	int err;
+
+	ASSERT_RTNL();
+
+	if (!pool) {
+		pool = xsk_get_pool_from_qid(dev, queue_id);
+		if (!pool)
+			return -EINVAL;
+
+		mp.mp_priv = pool;
+		err = netif_mp_close_rxq_xsk(dev, queue_id, &mp);
+		if (err)
+			return err;
+
+		xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+		xp_pp_free(pool);
+		return 0;
+	}
+	if (pool->unaligned)
+		return -EOPNOTSUPP;
+	/* Each provider object represents one complete UMEM chunk. */
+	if (pool->chunk_size != PAGE_SIZE) {
+		NL_SET_ERR_MSG(extack,
+			       "page pool UMEM requires page-sized chunks");
+		return -EOPNOTSUPP;
+	}
+
+	err = xsk_pool_dma_map(pool, dev->dev.parent, XSK_PAGE_POOL_DMA_ATTR);
+	if (err)
+		return err;
+
+	provider = xp_pp_create(pool);
+	if (IS_ERR(provider)) {
+		err = PTR_ERR(provider);
+		goto err_unmap;
+	}
+
+	mp.mp_priv = pool;
+	mp.rx_page_size = pool->chunk_size;
+	err = netif_mp_open_rxq_xsk(dev, queue_id, &mp, extack);
+	if (err)
+		goto err_free_provider;
+
+	return 0;
+
+err_free_provider:
+	xp_pp_free(pool);
+err_unmap:
+	xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+	return err;
+}
+EXPORT_SYMBOL_GPL(xsk_pool_setup_page_pool);
+
 static bool xp_addr_crosses_non_contig_pg(struct xsk_buff_pool *pool,
 					  u64 addr)
 {
@@ -580,20 +961,28 @@ static struct xdp_buff_xsk *__xp_alloc(struct xsk_buff_pool *pool)
 	return xskb;
 }
 
+static struct xdp_buff_xsk *xp_alloc_xskb(struct xsk_buff_pool *pool)
+{
+	struct xdp_buff_xsk *xskb;
+
+	if (!pool->free_list_cnt)
+		return __xp_alloc(pool);
+
+	pool->free_list_cnt--;
+	xskb = list_first_entry(&pool->free_list, struct xdp_buff_xsk,
+				list_node);
+	list_del_init(&xskb->list_node);
+
+	return xskb;
+}
+
 struct xdp_buff *xp_alloc(struct xsk_buff_pool *pool)
 {
 	struct xdp_buff_xsk *xskb;
 
-	if (!pool->free_list_cnt) {
-		xskb = __xp_alloc(pool);
-		if (!xskb)
-			return NULL;
-	} else {
-		pool->free_list_cnt--;
-		xskb = list_first_entry(&pool->free_list, struct xdp_buff_xsk,
-					list_node);
-		list_del_init(&xskb->list_node);
-	}
+	xskb = xp_alloc_xskb(pool);
+	if (!xskb)
+		return NULL;
 
 	xskb->xdp.data = xskb->xdp.data_hard_start + XDP_PACKET_HEADROOM;
 	xskb->xdp.data_meta = xskb->xdp.data;

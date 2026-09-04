@@ -263,7 +263,8 @@ ethnl_set_rings(struct ethnl_req_info *req_info, struct genl_info *info)
 			NL_SET_ERR_MSG(info->extack,
 				       "can't disable tcp-data-split while device has memory provider enabled");
 			return -EINVAL;
-		} else if (kernel_ringparam.hds_thresh) {
+		} else if (kernel_ringparam.hds_thresh &&
+			   netif_mp_unsupported(dev, MEM_PROVIDER_CAP_HDS)) {
 			NL_SET_ERR_MSG(info->extack,
 				       "can't set non-zero hds_thresh while device is memory provider enabled");
 			return -EINVAL;
