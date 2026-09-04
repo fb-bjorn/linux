@@ -125,7 +125,7 @@ static u64 umem_alloc_buffer(struct xsk_umem_info *umem)
 
 static void umem_reset_alloc(struct xsk_umem_info *umem)
 {
-	umem->next_buffer = 0;
+	umem->next_buffer = umem->base_addr;
 }
 
 static int enable_busy_poll(struct xsk_socket_info *xsk)
