@@ -2110,11 +2110,32 @@ int testapp_stats_rx_full(struct test_spec *test)
 	return testapp_validate_traffic(test);
 }
 
+static int wait_for_fill_consumption(struct xsk_umem_info *umem)
+{
+	u32 idx;
+	int i, ret;
+
+	for (i = 0; i < SOCK_RECONF_CTR; i++) {
+		ret = xsk_ring_prod__reserve(&umem->fq, 1, &idx);
+		if (ret == 1) {
+			xsk_ring_prod__cancel(&umem->fq, 1);
+			return TEST_PASS;
+		}
+		usleep(USLEEP_MAX);
+	}
+
+	ksft_print_msg("Fill queue was not consumed\n");
+	return TEST_FAILURE;
+}
+
 int testapp_stats_fill_empty(struct test_spec *test)
 {
+	struct xsk_umem_info *umem = test->ifobj_rx->xsk->umem;
 	struct pkt_stream *tmp;
+	int ret;
 
-	tmp = pkt_stream_generate(DEFAULT_UMEM_BUFFERS + DEFAULT_UMEM_BUFFERS / 2, MIN_PKT_SIZE);
+	tmp = pkt_stream_generate(DEFAULT_UMEM_BUFFERS +
+				  DEFAULT_UMEM_BUFFERS / 2, MIN_PKT_SIZE);
 	if (!tmp)
 		return TEST_FAILURE;
 	test->ifobj_tx->xsk->pkt_stream = tmp;
@@ -2124,9 +2145,43 @@ int testapp_stats_fill_empty(struct test_spec *test)
 		return TEST_FAILURE;
 	test->ifobj_rx->xsk->pkt_stream = tmp;
 
+	test->ifobj_rx->bind_flags &= ~XDP_USE_NEED_WAKEUP;
+	test->ifobj_tx->use_poll = true;
+	umem->fill_size = DEFAULT_UMEM_BUFFERS;
 	test->ifobj_rx->use_fill_ring = false;
 	test->ifobj_rx->validation_func = validate_fill_empty;
+	test->total_steps = 2;
+	ret = testapp_validate_traffic(test);
+	if (ret)
+		return ret;
+
+	/* Wait until the driver observes an empty fill queue. */
+	usleep(USLEEP_MAX);
+	pkt_stream_reset(test->ifobj_rx->xsk->pkt_stream);
+	ret = xsk_populate_fill_ring(umem, test->ifobj_rx->xsk->pkt_stream,
+				     true);
+	if (ret)
+		goto out;
+
+	/* ZC drivers must consume buffers without a syscall kick. */
+	if (test->mode == TEST_MODE_ZC && wait_for_fill_consumption(umem)) {
+		ret = TEST_FAILURE;
+		goto out;
+	}
+
+	test->ifobj_tx->xsk->pkt_stream->nb_pkts = DEFAULT_BATCH_SIZE;
+	test->ifobj_tx->xsk->pkt_stream->nb_valid_entries = DEFAULT_BATCH_SIZE;
+	test->ifobj_rx->xsk->pkt_stream->nb_pkts = DEFAULT_BATCH_SIZE;
+	test->ifobj_rx->xsk->pkt_stream->nb_valid_entries = DEFAULT_BATCH_SIZE;
+	test->ifobj_rx->use_fill_ring = true;
+	test->ifobj_rx->validation_func = NULL;
 	return testapp_validate_traffic(test);
+
+out:
+	clean_sockets(test, test->ifobj_rx);
+	clean_sockets(test, test->ifobj_tx);
+	clean_umem(test, test->ifobj_rx, test->ifobj_tx);
+	return ret;
 }
 
 int testapp_send_receive_unaligned(struct test_spec *test)
