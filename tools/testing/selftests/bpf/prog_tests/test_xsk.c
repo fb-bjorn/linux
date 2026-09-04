@@ -1171,20 +1171,30 @@ static int receive_pkts(struct test_spec *test)
 	return TEST_PASS;
 }
 
-static int __send_pkts(struct ifobject *ifobject, struct xsk_socket_info *xsk,
-		       bool test_timeout)
+static int __send_pkts(struct test_spec *test, struct ifobject *ifobject,
+		       struct xsk_socket_info *xsk)
 {
 	u32 i, idx = 0, valid_pkts = 0, valid_frags = 0, buffer_len;
 	struct xsk_umem_info *umem = ifobject->xsk_arr[0].umem_real;
 	struct pkt_stream *pkt_stream = xsk->pkt_stream;
 	bool use_poll = ifobject->use_poll;
+	u32 reclaim_thresh;
 	struct pollfd fds = { };
+	bool reclaim;
 	int ret;
 
 	buffer_len = pkt_get_buffer_len(umem, pkt_stream->max_pkt_len);
+	if (test->set_ring)
+		reclaim_thresh = 1;
+	else
+		reclaim_thresh = (umem_size(umem) -
+				  xsk->batch_size * buffer_len) / buffer_len;
+
 	/* pkts_in_flight might be negative if many invalid packets are sent */
-	if (pkts_in_flight >= (int)((umem_size(umem) - xsk->batch_size * buffer_len) /
-	    buffer_len) && !test_timeout) {
+	pthread_mutex_lock(&pacing_mutex);
+	reclaim = pkts_in_flight >= (int)reclaim_thresh;
+	pthread_mutex_unlock(&pacing_mutex);
+	if (reclaim && !test->poll_tmout) {
 		ret = kick_tx(xsk);
 		if (ret)
 			return TEST_FAILURE;
@@ -1197,7 +1207,7 @@ static int __send_pkts(struct ifobject *ifobject, struct xsk_socket_info *xsk,
 	while (xsk_ring_prod__reserve(&xsk->tx, xsk->batch_size, &idx) < xsk->batch_size) {
 		if (use_poll) {
 			ret = poll(&fds, 1, POLL_TMOUT);
-			if (test_timeout) {
+			if (test->poll_tmout) {
 				if (ret < 0) {
 					ksft_print_msg("ERROR: [%s] Poll error %d\n",
 						       __func__, errno);
@@ -1276,7 +1286,7 @@ static int __send_pkts(struct ifobject *ifobject, struct xsk_socket_info *xsk,
 	if (use_poll) {
 		ret = poll(&fds, 1, POLL_TMOUT);
 		if (ret <= 0) {
-			if (ret == 0 && test_timeout)
+			if (ret == 0 && test->poll_tmout)
 				return TEST_PASS;
 
 			ksft_print_msg("ERROR: [%s] Poll error %d\n", __func__, ret);
@@ -1284,7 +1294,7 @@ static int __send_pkts(struct ifobject *ifobject, struct xsk_socket_info *xsk,
 		}
 	}
 
-	if (!test_timeout) {
+	if (!test->poll_tmout) {
 		if (complete_pkts(xsk, i))
 			return TEST_FAILURE;
 
@@ -1341,7 +1351,8 @@ static int send_pkts(struct test_spec *test, struct ifobject *ifobject)
 				__set_bit(i, bitmap);
 				continue;
 			}
-			ret = __send_pkts(ifobject, &ifobject->xsk_arr[i], test->poll_tmout);
+			ret = __send_pkts(test, ifobject,
+					  &ifobject->xsk_arr[i]);
 			if (ret != TEST_CONTINUE)
 				return ret;
 
