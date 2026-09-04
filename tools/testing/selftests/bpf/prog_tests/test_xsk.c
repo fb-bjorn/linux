@@ -15,6 +15,8 @@
 
 #include "network_helpers.h"
 #include "test_xsk.h"
+
+#define ICE_RX_DESC_GRANULARITY	8
 #include "xsk_xdp_common.h"
 #include "xsk_xdp_progs.skel.h"
 
@@ -173,13 +175,13 @@ int xsk_configure_socket(struct xsk_socket_info *xsk, struct xsk_umem_info *umem
 	return xsk_socket__create(&xsk->xsk, ifobject->ifindex, 0, umem->umem, rxr, txr, &cfg);
 }
 
-static int set_ring_size(struct ifobject *ifobj)
+static int set_ring(char *ifname, struct ethtool_ringparam *ring)
 {
-	int ret;
 	u32 ctr = 0;
+	int ret;
 
 	while (ctr++ < SOCK_RECONF_CTR) {
-		ret = set_hw_ring_size(ifobj->ifname, &ifobj->ring);
+		ret = set_hw_ring_size(ifname, ring);
 		if (!ret)
 			break;
 
@@ -193,11 +195,62 @@ static int set_ring_size(struct ifobject *ifobj)
 	return ret;
 }
 
+static int set_ring_sizes(struct ifobject *ifobj_tx,
+			  struct ifobject *ifobj_rx)
+{
+	struct ethtool_ringparam ring;
+
+	if (ifobj_tx->ifindex != ifobj_rx->ifindex)
+		return set_ring(ifobj_tx->ifname, &ifobj_tx->ring) ||
+		       set_ring(ifobj_rx->ifname, &ifobj_rx->ring);
+
+	ring = ifobj_tx->ring;
+	ring.rx_pending = ifobj_rx->ring.rx_pending;
+	ring.rx_mini_pending = ifobj_rx->ring.rx_mini_pending;
+	ring.rx_jumbo_pending = ifobj_rx->ring.rx_jumbo_pending;
+
+	return set_ring(ifobj_tx->ifname, &ring);
+}
+
 int hw_ring_size_reset(struct ifobject *ifobj)
 {
 	ifobj->ring.tx_pending = ifobj->set_ring.default_tx;
 	ifobj->ring.rx_pending = ifobj->set_ring.default_rx;
-	return set_ring_size(ifobj);
+	ifobj->ring.rx_mini_pending = ifobj->set_ring.default_rx_mini;
+	ifobj->ring.rx_jumbo_pending = ifobj->set_ring.default_rx_jumbo;
+	return set_ring(ifobj->ifname, &ifobj->ring);
+}
+
+static void set_rx_ring_pending(struct ethtool_ringparam *ring, u32 pending)
+{
+	ring->rx_pending = pending;
+	if (ring->rx_mini_pending)
+		ring->rx_mini_pending = min(pending,
+					    ring->rx_mini_max_pending);
+	if (ring->rx_jumbo_pending)
+		ring->rx_jumbo_pending = min(pending,
+					     ring->rx_jumbo_max_pending);
+}
+
+static void set_rx_ring_max(struct ethtool_ringparam *ring)
+{
+	ring->rx_pending = ring->rx_max_pending;
+	if (ring->rx_mini_pending)
+		ring->rx_mini_pending = ring->rx_mini_max_pending;
+	if (ring->rx_jumbo_pending)
+		ring->rx_jumbo_pending = ring->rx_jumbo_max_pending;
+}
+
+static u32 rx_ring_max_pending(const struct ethtool_ringparam *ring)
+{
+	u32 pending = ring->rx_max_pending;
+
+	if (ring->rx_mini_pending)
+		pending = min(pending, ring->rx_mini_max_pending);
+	if (ring->rx_jumbo_pending)
+		pending = min(pending, ring->rx_jumbo_max_pending);
+
+	return pending;
 }
 
 static void __test_spec_init(struct test_spec *test, struct ifobject *ifobj_tx,
@@ -252,6 +305,8 @@ static void __test_spec_init(struct test_spec *test, struct ifobject *ifobj_tx,
 
 	if (ifobj_tx->hw_ring_size_supp)
 		hw_ring_size_reset(ifobj_tx);
+	if (ifobj_rx->hw_ring_size_supp)
+		hw_ring_size_reset(ifobj_rx);
 
 	test->ifobj_tx = ifobj_tx;
 	test->ifobj_rx = ifobj_rx;
@@ -1903,14 +1958,15 @@ static int testapp_validate_traffic(struct test_spec *test)
 	}
 
 	if (test->set_ring) {
-		if (ifobj_tx->hw_ring_size_supp) {
-			if (set_ring_size(ifobj_tx)) {
-				ksft_print_msg("Failed to change HW ring size.\n");
-				return TEST_FAILURE;
-			}
-		} else {
+		if (!ifobj_tx->hw_ring_size_supp ||
+		    !ifobj_rx->hw_ring_size_supp) {
 			ksft_print_msg("Changing HW ring size not supported.\n");
 			return TEST_SKIP;
+		}
+
+		if (set_ring_sizes(ifobj_tx, ifobj_rx)) {
+			ksft_print_msg("Failed to change HW ring size.\n");
+			return TEST_FAILURE;
 		}
 	}
 
@@ -2506,7 +2562,7 @@ int testapp_hw_sw_min_ring_size(struct test_spec *test)
 	test->set_ring = true;
 	test->total_steps = 2;
 	test->ifobj_tx->ring.tx_pending = DEFAULT_BATCH_SIZE;
-	test->ifobj_tx->ring.rx_pending = DEFAULT_BATCH_SIZE * 2;
+	set_rx_ring_pending(&test->ifobj_rx->ring, DEFAULT_BATCH_SIZE * 2);
 	test->ifobj_tx->xsk->batch_size = 1;
 	test->ifobj_rx->xsk->batch_size = 1;
 	ret = testapp_validate_traffic(test);
@@ -2522,15 +2578,17 @@ int testapp_hw_sw_min_ring_size(struct test_spec *test)
 int testapp_hw_sw_max_ring_size(struct test_spec *test)
 {
 	u32 max_descs = XSK_RING_PROD__DEFAULT_NUM_DESCS * 4;
+	u32 batch_size;
 	int ret;
 
 	test->set_ring = true;
 	test->total_steps = 2;
 	test->ifobj_tx->ring.tx_pending = test->ifobj_tx->ring.tx_max_pending;
-	test->ifobj_tx->ring.rx_pending  = test->ifobj_tx->ring.rx_max_pending;
+	set_rx_ring_max(&test->ifobj_rx->ring);
+	test->ifobj_tx->xsk->umem->num_frames = max_descs;
+	test->ifobj_tx->xsk->umem->comp_size = max_descs;
 	test->ifobj_rx->xsk->umem->num_frames = max_descs;
 	test->ifobj_rx->xsk->umem->fill_size = max_descs;
-	test->ifobj_rx->xsk->umem->comp_size = max_descs;
 	test->ifobj_tx->xsk->batch_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
 	test->ifobj_rx->xsk->batch_size = XSK_RING_PROD__DEFAULT_NUM_DESCS;
 
@@ -2538,11 +2596,15 @@ int testapp_hw_sw_max_ring_size(struct test_spec *test)
 	if (ret)
 		return ret;
 
-	/* Set batch_size to 8152 for testing, as the ice HW ignores the 3 lowest bits when
-	 * updating the Rx HW tail register.
+	/* The ice HW ignores the 3 lowest Rx tail bits. Keep the batch within
+	 * both the hardware and AF_XDP software rings.
 	 */
-	test->ifobj_tx->xsk->batch_size = test->ifobj_tx->ring.tx_max_pending - 8;
-	test->ifobj_rx->xsk->batch_size = test->ifobj_tx->ring.tx_max_pending - 8;
+	batch_size = min(test->ifobj_tx->ring.tx_max_pending,
+			 min(rx_ring_max_pending(&test->ifobj_rx->ring),
+			     max_descs)) -
+		     ICE_RX_DESC_GRANULARITY;
+	test->ifobj_tx->xsk->batch_size = batch_size;
+	test->ifobj_rx->xsk->batch_size = batch_size;
 	if (pkt_stream_replace(test, max_descs, MIN_PKT_SIZE)) {
 		clean_sockets(test, test->ifobj_tx);
 		clean_sockets(test, test->ifobj_rx);

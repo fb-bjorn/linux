@@ -117,6 +117,8 @@ struct xsk_umem_info {
 struct set_hw_ring {
 	u32 default_tx;
 	u32 default_rx;
+	u32 default_rx_mini;
+	u32 default_rx_jumbo;
 };
 
 int hw_ring_size_reset(struct ifobject *ifobj);

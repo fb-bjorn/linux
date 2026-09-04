@@ -406,6 +406,20 @@ int main(int argc, char **argv)
 		ifobj_tx->hw_ring_size_supp = true;
 		ifobj_tx->set_ring.default_tx = ifobj_tx->ring.tx_pending;
 		ifobj_tx->set_ring.default_rx = ifobj_tx->ring.rx_pending;
+		ifobj_tx->set_ring.default_rx_mini =
+			ifobj_tx->ring.rx_mini_pending;
+		ifobj_tx->set_ring.default_rx_jumbo =
+			ifobj_tx->ring.rx_jumbo_pending;
+	}
+	ret = get_hw_ring_size(ifobj_rx->ifname, &ifobj_rx->ring);
+	if (!ret) {
+		ifobj_rx->hw_ring_size_supp = true;
+		ifobj_rx->set_ring.default_tx = ifobj_rx->ring.tx_pending;
+		ifobj_rx->set_ring.default_rx = ifobj_rx->ring.rx_pending;
+		ifobj_rx->set_ring.default_rx_mini =
+			ifobj_rx->ring.rx_mini_pending;
+		ifobj_rx->set_ring.default_rx_jumbo =
+			ifobj_rx->ring.rx_jumbo_pending;
 	}
 
 	if (init_iface(ifobj_rx, worker_testapp_validate_rx) ||
@@ -464,6 +478,8 @@ int main(int argc, char **argv)
 
 	if (ifobj_tx->hw_ring_size_supp)
 		hw_ring_size_reset(ifobj_tx);
+	if (ifobj_rx->hw_ring_size_supp)
+		hw_ring_size_reset(ifobj_rx);
 
 	pkt_stream_delete(tx_pkt_stream_default);
 	pkt_stream_delete(rx_pkt_stream_default);
