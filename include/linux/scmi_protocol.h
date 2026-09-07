@@ -2,16 +2,21 @@
 /*
  * SCMI Message Protocol driver header
  *
- * Copyright (C) 2018-2021 ARM Ltd.
+ * Copyright (C) 2018-2026 ARM Ltd.
  */
 
 #ifndef _LINUX_SCMI_PROTOCOL_H
 #define _LINUX_SCMI_PROTOCOL_H
 
 #include <linux/bitfield.h>
+#include <linux/bitops.h>
 #include <linux/device.h>
 #include <linux/notifier.h>
 #include <linux/types.h>
+#include <linux/wait.h>
+
+#include <uapi/linux/limits.h>
+#include <uapi/linux/scmi.h>
 
 #define SCMI_MAX_STR_SIZE		64
 #define SCMI_SHORT_NAME_MAX_SIZE	16
@@ -820,6 +825,180 @@ struct scmi_pinctrl_proto_ops {
 	int (*pin_free)(const struct scmi_protocol_handle *ph, u32 pin);
 };
 
+enum scmi_telemetry_de_type {
+	SCMI_TLM_DE_TYPE_USPECIFIED,
+	SCMI_TLM_DE_TYPE_ACCUMUL_IDLE_RESIDENCY,
+	SCMI_TLM_DE_TYPE_ACCUMUL_IDLE_COUNTS,
+	SCMI_TLM_DE_TYPE_ACCUMUL_OTHERS,
+	SCMI_TLM_DE_TYPE_INSTA_IDLE_STATE,
+	SCMI_TLM_DE_TYPE_INSTA_OTHERS,
+	SCMI_TLM_DE_TYPE_AVERAGE,
+	SCMI_TLM_DE_TYPE_STATUS,
+	SCMI_TLM_DE_TYPE_RESERVED_START,
+	SCMI_TLM_DE_TYPE_RESERVED_END = 0xef,
+	SCMI_TLM_DE_TYPE_OEM_START = 0xf0,
+	SCMI_TLM_DE_TYPE_OEM_END = 0xff,
+};
+
+enum scmi_telemetry_compo_type {
+	SCMI_TLM_COMPO_TYPE_USPECIFIED,
+	SCMI_TLM_COMPO_TYPE_CPU,
+	SCMI_TLM_COMPO_TYPE_CLUSTER,
+	SCMI_TLM_COMPO_TYPE_GPU,
+	SCMI_TLM_COMPO_TYPE_NPU,
+	SCMI_TLM_COMPO_TYPE_INTERCONNECT,
+	SCMI_TLM_COMPO_TYPE_MEM_CNTRL,
+	SCMI_TLM_COMPO_TYPE_L1_CACHE,
+	SCMI_TLM_COMPO_TYPE_L2_CACHE,
+	SCMI_TLM_COMPO_TYPE_L3_CACHE,
+	SCMI_TLM_COMPO_TYPE_LL_CACHE,
+	SCMI_TLM_COMPO_TYPE_SYS_CACHE,
+	SCMI_TLM_COMPO_TYPE_DISP_CNTRL,
+	SCMI_TLM_COMPO_TYPE_IPU,
+	SCMI_TLM_COMPO_TYPE_CHIPLET,
+	SCMI_TLM_COMPO_TYPE_PACKAGE,
+	SCMI_TLM_COMPO_TYPE_SOC,
+	SCMI_TLM_COMPO_TYPE_SYSTEM,
+	SCMI_TLM_COMPO_TYPE_SMCU,
+	SCMI_TLM_COMPO_TYPE_ACCEL,
+	SCMI_TLM_COMPO_TYPE_BATTERY,
+	SCMI_TLM_COMPO_TYPE_CHARGER,
+	SCMI_TLM_COMPO_TYPE_PMIC,
+	SCMI_TLM_COMPO_TYPE_BOARD,
+	SCMI_TLM_COMPO_TYPE_MEMORY,
+	SCMI_TLM_COMPO_TYPE_PERIPH,
+	SCMI_TLM_COMPO_TYPE_PERIPH_SUBC,
+	SCMI_TLM_COMPO_TYPE_LID,
+	SCMI_TLM_COMPO_TYPE_DISPLAY,
+	SCMI_TLM_COMPO_TYPE_RESERVED_START = 0x1d,
+	SCMI_TLM_COMPO_TYPE_RESERVED_END = 0xdf,
+	SCMI_TLM_COMPO_TYPE_OEM_START = 0xe0,
+	SCMI_TLM_COMPO_TYPE_OEM_END = 0xff,
+};
+
+#define	SCMI_TLM_GET_UPDATE_INTERVAL_SECS(x)				\
+	(le32_get_bits((x), GENMASK(20, 5)))
+#define SCMI_TLM_GET_UPDATE_INTERVAL_EXP(x)		(sign_extend32((x), 4))
+
+#define SCMI_TLM_GET_UPDATE_INTERVAL(x)		(FIELD_GET(GENMASK(20, 0), (x)))
+#define SCMI_TLM_BUILD_UPDATE_INTERVAL(s, e)				    \
+	(FIELD_PREP(GENMASK(20, 5), (s)) | FIELD_PREP(GENMASK(4, 0), (e)))
+
+enum scmi_telemetry_collection {
+	SCMI_TLM_ONDEMAND,
+	SCMI_TLM_NOTIFICATION,
+	SCMI_TLM_SINGLE_READ,
+};
+
+#define SCMI_TLM_GENERATION_INVALID	0U
+#define SCMI_TLM_GRP_INVALID		0xFFFFFFFF
+struct scmi_telemetry_group {
+	bool enabled;
+	bool tstamp_enabled;
+	unsigned int *des;
+	char *des_str;
+	struct scmi_tlm_grp_info *info;
+	unsigned int active_update_interval;
+	struct scmi_tlm_intervals *intervals;
+	enum scmi_telemetry_collection current_mode;
+};
+
+struct scmi_telemetry_de {
+	bool tstamp_support;
+	bool fc_support;
+	bool name_support;
+	struct scmi_tlm_de_info *info;
+	struct scmi_telemetry_group *grp;
+	bool enabled;
+	bool tstamp_enabled;
+};
+
+struct scmi_telemetry_res_info {
+	bool fully_enumerated;
+	unsigned int num_des;
+	struct scmi_telemetry_de **des;
+	struct scmi_tlm_de_info *dei_store;
+	unsigned int num_groups;
+	struct scmi_telemetry_group *grps;
+	struct scmi_tlm_grp_info *grps_store;
+};
+
+struct scmi_telemetry_info {
+	bool single_read_support;
+	bool continuos_update_support;
+	bool per_group_config_support;
+	bool reset_support;
+	bool fc_support;
+	struct scmi_tlm_base_info base;
+	unsigned int active_update_interval;
+	struct scmi_tlm_intervals *intervals;
+	bool enabled;
+	bool notif_enabled;
+	enum scmi_telemetry_collection current_mode;
+	atomic_t generation;
+};
+
+struct scmi_telemetry_de_sample {
+	u32 id;
+	u64 tstamp;
+	u64 val;
+};
+
+/**
+ * struct scmi_telemetry_proto_ops - represents the various operations provided
+ *	by SCMI Telemetry Protocol
+ *
+ * @info_get: get the general Telemetry information.
+ * @de_lookup: get a specific DE descriptor from the DE id.
+ * @res_get: get a reference to the Telemetry resources descriptor.
+ * @state_get: retrieve the specific DE or GROUP state, if NULL returns the
+ *	       cumulative state of all DEs.
+ * @state_set: enable/disable the specific DE or GROUP with or without timestamps.
+ * @all_disable: disable ALL DEs or GROUPs.
+ * @collection_configure: choose a sampling rate and enable SHMTI/FC sampling
+ *			  for on demand collection via @de_data_read or async
+ *			  notificatioins for all the enabled DEs.
+ * @de_data_read: on-demand read of a single DE and related optional timestamp:
+ *		  the value will be retrieved at the proper SHMTI offset OR
+ *		  from the dedicated FC area (if supported by that DE).
+ * @des_bulk_read: on-demand read of all the currently enabled DEs, or just
+ *		   the ones belonging to a specific group when provided.
+ * @des_sample_get: on-demand read of all the currently enabled DEs, or just
+ *		    the ones belonging to a specific group when provided.
+ *		    This causes an immediate update platform-side of all the
+ *		    enabled DEs.
+ * @reset: reset configuration and telemetry data.
+ * @event_wq_get: get a reference to the event waitqueue for this instance.
+ */
+struct scmi_telemetry_proto_ops {
+	const struct scmi_telemetry_info __must_check *(*info_get)
+		(const struct scmi_protocol_handle *ph);
+	const struct scmi_telemetry_de __must_check *(*de_lookup)
+		(const struct scmi_protocol_handle *ph, u32 id);
+	const struct scmi_telemetry_res_info __must_check *(*res_get)
+		(const struct scmi_protocol_handle *ph);
+	int (*state_get)(const struct scmi_protocol_handle *ph,
+			 u32 *id, bool *enabled, bool *tstamp_enabled);
+	int (*state_set)(const struct scmi_protocol_handle *ph,
+			 bool is_group, u32 id, bool *enable, bool *tstamp);
+	int (*all_disable)(const struct scmi_protocol_handle *ph, bool group);
+	int (*collection_configure)(const struct scmi_protocol_handle *ph,
+				    unsigned int res_id, bool grp_ignore,
+				    bool *enable,
+				    unsigned int *update_interval_ms,
+				    enum scmi_telemetry_collection *mode);
+	int __must_check (*de_data_read)(const struct scmi_protocol_handle *ph,
+					 struct scmi_telemetry_de_sample *sample);
+	int __must_check (*des_bulk_read)(const struct scmi_protocol_handle *ph,
+					  int grp_id, int *num_samples,
+					  struct scmi_telemetry_de_sample *samples);
+	int __must_check (*des_sample_get)(const struct scmi_protocol_handle *ph,
+					   int grp_id, int *num_samples,
+					   struct scmi_telemetry_de_sample *samples);
+	int (*reset)(const struct scmi_protocol_handle *ph);
+	struct wait_queue_head *(*event_wq_get)(const struct scmi_protocol_handle *ph);
+};
+
 /**
  * struct scmi_notify_ops  - represents notifications' operations provided by
  * SCMI core
@@ -897,6 +1076,12 @@ struct scmi_notify_ops {
  *			 never sleep and act accordingly.
  *			 An optional atomic threshold value could be returned
  *			 where configured.
+ * @debugfs_entry_get: method to get, and possibly create, a debugfs dentry
+ *		       rooted under the top debugfs directory for the SCMI
+ *		       instance referred by handle.
+ * @debugfs_entry_put: method to put, and possibly destroy, a debugfs dentry
+ *		       rooted under the top debugfs directory for the SCMI
+ *		       instance referred by handle.
  * @notify_ops: pointer to set of notifications related operations
  */
 struct scmi_handle {
@@ -911,7 +1096,11 @@ struct scmi_handle {
 	void (*devm_protocol_put)(struct scmi_device *sdev, u8 proto);
 	bool (*is_transport_atomic)(const struct scmi_handle *handle,
 				    unsigned int *atomic_threshold);
-
+	struct dentry __must_check *
+		(*debugfs_entry_get)(const struct scmi_handle *handle,
+				     const char *name);
+	void (*debugfs_entry_put)(const struct scmi_handle *handle,
+				  struct dentry *dentry);
 	const struct scmi_notify_ops *notify_ops;
 };
 
@@ -926,6 +1115,7 @@ enum scmi_std_protocol {
 	SCMI_PROTOCOL_VOLTAGE = 0x17,
 	SCMI_PROTOCOL_POWERCAP = 0x18,
 	SCMI_PROTOCOL_PINCTRL = 0x19,
+	SCMI_PROTOCOL_TELEMETRY = 0x1b,
 };
 
 enum scmi_system_events {
@@ -1024,6 +1214,7 @@ enum scmi_notification_events {
 	SCMI_EVENT_SYSTEM_POWER_STATE_NOTIFIER = 0x0,
 	SCMI_EVENT_POWERCAP_CAP_CHANGED = 0x0,
 	SCMI_EVENT_POWERCAP_MEASUREMENTS_CHANGED = 0x1,
+	SCMI_EVENT_TELEMETRY_UPDATE = 0x0,
 };
 
 struct scmi_power_state_changed_report {
@@ -1110,5 +1301,13 @@ struct scmi_powercap_meas_changed_report {
 	unsigned int	agent_id;
 	unsigned int	domain_id;
 	unsigned int	power;
+};
+
+struct scmi_telemetry_update_report {
+	ktime_t		timestamp;
+	unsigned int	agent_id;
+	int		status;
+	unsigned int	num_dwords;
+	unsigned int	dwords[];
 };
 #endif /* _LINUX_SCMI_PROTOCOL_H */
