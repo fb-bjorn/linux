@@ -127,8 +127,7 @@ def klp():
                 echo "source; split it so the tooling half can come from the overlay." >&2
                 exit 1
             done
-            export hotfix=`cat $(location :hotfix)`
-            cat `HOME=/dev/null git rev-parse --show-toplevel`/facebook/9999-Dummy-patch-to-bump-hotfix-version.patch.template | envsubst > $OUT/9999-Dummy-patch-to-bump-hotfix-version.patch
+            cp `HOME=/dev/null git rev-parse --show-toplevel`/facebook/9999-Dummy-patch-to-bump-hotfix-version.patch.template $OUT/9999-Dummy-patch-to-bump-hotfix-version.patch
         """,
         out="patches",
         cacheable=False,
