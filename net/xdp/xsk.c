@@ -1440,10 +1440,23 @@ static int xsk_recvmsg(struct socket *sock, struct msghdr *m, size_t len, int fl
 	return ret;
 }
 
+static bool xsk_tx_has_descs(struct xsk_buff_pool *pool)
+{
+	struct xdp_sock *xs;
+
+	list_for_each_entry_rcu(xs, &pool->xsk_tx_list, tx_list)
+		if (xskq_cons_present_entries(xs->tx))
+			return true;
+
+	return false;
+}
+
 static __poll_t xsk_poll(struct file *file, struct socket *sock,
 			     struct poll_table_struct *wait)
 {
+	bool busy_poll = false;
 	__poll_t mask = 0;
+	u8 wakeup;
 	struct sock *sk = sock->sk;
 	struct xdp_sock *xs = xdp_sk(sk);
 	struct xsk_buff_pool *pool;
@@ -1456,12 +1469,35 @@ static __poll_t xsk_poll(struct file *file, struct socket *sock,
 
 	pool = xs->pool;
 
-	if (pool->cached_need_wakeup) {
-		if (xs->zc)
-			xsk_wakeup(xs, pool->cached_need_wakeup);
-		else if (xs->tx)
-			/* Poll needs to drive Tx also in copy mode */
+	/* Preferred busy poll drives RX NAPI from poll(2) or epoll_wait(2).
+	 * Scheduling RX here would move the next iteration to softirq context.
+	 * Record a busy loop already requested by sock_poll(), or run one here
+	 * for poll implementations which do not request it. TX may use another
+	 * NAPI, so suppress only the RX wakeup.
+	 */
+	if (xs->zc && xsk_no_wakeup(sk) && sk_can_busy_loop(sk)) {
+		busy_poll = true;
+		if (!(poll_requested_events(wait) & POLL_BUSY_LOOP))
+			sk_busy_loop(sk, 1);
+	}
+
+	wakeup = pool->cached_need_wakeup;
+	if (wakeup) {
+		if (xs->zc) {
+			if (busy_poll)
+				wakeup &= ~XDP_WAKEUP_RX;
+			/* After busy-polling RX, schedule NAPI for TX only if a
+			 * socket has descriptors. Keep the wakeup bit set so a
+			 * later submission still kicks.
+			 */
+			if (busy_poll && !xsk_tx_has_descs(pool))
+				wakeup &= ~XDP_WAKEUP_TX;
+			if (wakeup)
+				xsk_wakeup(xs, wakeup);
+		} else if (xs->tx) {
+			/* Busy-looping NAPI cannot drive copy-mode Tx. */
 			xsk_generic_xmit(sk);
+		}
 	}
 
 	if (xs->rx && !xskq_prod_is_empty(xs->rx))
