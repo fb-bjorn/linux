@@ -77,6 +77,9 @@
 # Run test suite in a specific mode only [skb,drv,zc]
 #   sudo ./test_xsk.sh -m MODE
 #
+# Allow device-selected offsets for zero-copy continuation fragments
+#   sudo ./test_xsk.sh -f
+#
 # List available tests
 #   ./test_xsk.sh -l
 #
@@ -89,10 +92,12 @@
 . xsk_prereqs.sh
 
 ETH=""
+sg_frag_offset=0
 
-while getopts "vi:dm:lt:h" flag
+while getopts "fvi:dm:lt:h" flag
 do
 	case "${flag}" in
+		f) sg_frag_offset=1;;
 		v) verbose=1;;
 		d) debug=1;;
 		i) ETH=${OPTARG};;
@@ -177,6 +182,10 @@ fi
 
 if [[ $verbose -eq 1 ]]; then
 	ARGS+="-v "
+fi
+
+if [[ $sg_frag_offset -eq 1 ]]; then
+	ARGS+="-f "
 fi
 
 if [ -n "$MODE" ]; then

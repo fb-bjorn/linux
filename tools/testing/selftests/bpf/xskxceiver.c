@@ -117,9 +117,10 @@ static void __exit_with_error(int error, const char *file, const char *func, int
 
 #define exit_with_error(error) __exit_with_error(error, __FILE__, __func__, __LINE__)
 
-static bool ifobj_zc_avail(struct ifobject *ifobject)
+static bool ifobj_zc_avail(struct ifobject *ifobject, u32 frame_size,
+			   bool unaligned)
 {
-	size_t umem_sz = DEFAULT_UMEM_BUFFERS * XSK_UMEM__DEFAULT_FRAME_SIZE;
+	size_t umem_sz = DEFAULT_UMEM_BUFFERS * frame_size;
 	int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 	struct xsk_socket_info *xsk;
 	struct xsk_umem_info *umem;
@@ -127,19 +128,22 @@ static bool ifobj_zc_avail(struct ifobject *ifobject)
 	void *bufs;
 	int ret;
 
+	if (unaligned)
+		mmap_flags |= MAP_HUGETLB | MAP_HUGE_2MB;
 	bufs = mmap(NULL, umem_sz, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
 	if (bufs == MAP_FAILED)
-		exit_with_error(errno);
+		return false;
 
 	umem = calloc(1, sizeof(struct xsk_umem_info));
 	if (!umem) {
 		munmap(bufs, umem_sz);
 		exit_with_error(ENOMEM);
 	}
-	umem->frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE;
+	umem->frame_size = frame_size;
+	umem->unaligned_mode = unaligned;
 	ret = xsk_configure_umem(ifobject, umem, bufs, umem_sz);
 	if (ret)
-		exit_with_error(-ret);
+		goto out;
 
 	xsk = calloc(1, sizeof(struct xsk_socket_info));
 	if (!xsk)
@@ -151,18 +155,22 @@ static bool ifobj_zc_avail(struct ifobject *ifobject)
 	if (!ret)
 		zc_avail = true;
 
-	xsk_socket__delete(xsk->xsk);
+	if (xsk->xsk)
+		xsk_socket__delete(xsk->xsk);
 	free(xsk);
 out:
-	munmap(umem->buffer, umem_sz);
-	xsk_umem__delete(umem->umem);
+	if (umem->umem)
+		xsk_umem__delete(umem->umem);
 	free(umem);
+	munmap(bufs, umem_sz);
+	usleep(USLEEP_MAX);
 	return zc_avail;
 }
 
 static struct option long_options[] = {
 	{"interface", required_argument, 0, 'i'},
 	{"busy-poll", no_argument, 0, 'b'},
+	{"sg-frag-offset", no_argument, 0, 'f'},
 	{"verbose", no_argument, 0, 'v'},
 	{"mode", required_argument, 0, 'm'},
 	{"list", no_argument, 0, 'l'},
@@ -179,6 +187,7 @@ static void print_usage(char **argv)
 		"  -i, --interface      Use interface\n"
 		"  -v, --verbose        Verbose output\n"
 		"  -b, --busy-poll      Enable busy poll\n"
+		"  -f, --sg-frag-offset Allow arbitrary zero-copy SG continuation offsets\n"
 		"  -m, --mode           Run only mode skb, drv, or zc\n"
 		"  -l, --list           List all available tests\n"
 		"  -t, --test           Run a specific test. Enter number from -l option.\n"
@@ -205,7 +214,8 @@ static void parse_command_line(struct ifobject *ifobj_tx, struct ifobject *ifobj
 	opterr = 0;
 
 	for (;;) {
-		c = getopt_long(argc, argv, "i:vbm:lt:", long_options, &option_index);
+		c = getopt_long(argc, argv, "i:vbfm:lt:", long_options,
+				&option_index);
 		if (c == -1)
 			break;
 
@@ -233,6 +243,10 @@ static void parse_command_line(struct ifobject *ifobj_tx, struct ifobject *ifobj
 		case 'b':
 			ifobj_tx->busy_poll = true;
 			ifobj_rx->busy_poll = true;
+			break;
+		case 'f':
+			ifobj_tx->sg_frag_offset = true;
+			ifobj_rx->sg_frag_offset = true;
 			break;
 		case 'm':
 			if (!strncmp("skb", optarg, strlen(optarg)))
@@ -294,8 +308,9 @@ static void run_pkt_test(struct test_spec *test)
 	pkt_stream_restore_default(test);
 }
 
-static bool is_xdp_supported(int ifindex)
+static bool is_xdp_supported(struct ifobject *ifobj, bool *zc_avail)
 {
+	u32 frame_size = XSK_UMEM__DEFAULT_FRAME_SIZE;
 	int flags = XDP_FLAGS_DRV_MODE;
 
 	LIBBPF_OPTS(bpf_link_create_opts, opts, .flags = flags);
@@ -310,14 +325,27 @@ static bool is_xdp_supported(int ifindex)
 	if (prog_fd < 0)
 		return false;
 
-	err = bpf_xdp_attach(ifindex, prog_fd, flags, NULL);
+	err = bpf_xdp_attach(ifobj->ifindex, prog_fd, flags, NULL);
 	if (err) {
 		close(prog_fd);
 		return false;
 	}
 
-	bpf_xdp_detach(ifindex, flags, NULL);
+	*zc_avail = ifobj_zc_avail(ifobj, frame_size, false);
+	if (*zc_avail) {
+		ifobj->zc_2k_supp = ifobj_zc_avail(ifobj, 2048, false);
+		ifobj->zc_unaligned_supp =
+			ifobj_zc_avail(ifobj, frame_size, true);
+	}
+	for (int retry = 0; retry < 100; retry++) {
+		err = bpf_xdp_detach(ifobj->ifindex, flags, NULL);
+		if (err != -EBUSY)
+			break;
+		usleep(10000);
+	}
 	close(prog_fd);
+	if (err)
+		exit_with_error(-err);
 
 	return true;
 }
@@ -344,6 +372,8 @@ int main(int argc, char **argv)
 	int modes = TEST_MODE_SKB + 1;
 	struct test_spec test;
 	bool shared_netdev;
+	bool zc_avail = false;
+	bool rx_zc_avail = false;
 	int ret;
 
 	/* Use libbpf 1.0 API mode */
@@ -397,9 +427,17 @@ int main(int argc, char **argv)
 	if (!validate_interface(ifobj_tx) || !validate_interface(ifobj_rx))
 		print_usage(argv);
 
-	if (is_xdp_supported(ifobj_tx->ifindex)) {
+	if (is_xdp_supported(ifobj_tx, &zc_avail) &&
+	    (shared_netdev || is_xdp_supported(ifobj_rx, &rx_zc_avail))) {
 		modes++;
-		if (ifobj_zc_avail(ifobj_tx))
+		if (zc_avail && shared_netdev) {
+			ifobj_rx->zc_2k_supp = ifobj_tx->zc_2k_supp;
+			ifobj_rx->zc_unaligned_supp =
+				ifobj_tx->zc_unaligned_supp;
+		} else if (!shared_netdev) {
+			zc_avail &= rx_zc_avail;
+		}
+		if (zc_avail)
 			modes++;
 	}
 
