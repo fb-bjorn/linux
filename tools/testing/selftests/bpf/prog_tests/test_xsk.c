@@ -1258,7 +1258,7 @@ static int __send_pkts(struct test_spec *test, struct ifobject *ifobject,
 	struct pkt_stream *pkt_stream = xsk->pkt_stream;
 	struct xsk_umem_info *umem = xsk->umem;
 	struct pollfd fds = { };
-	u32 reclaim_thresh;
+	u32 tx_cons, reclaim_thresh;
 	bool use_poll = ifobject->use_poll;
 	bool reclaim;
 	int ret;
@@ -1360,6 +1360,7 @@ static int __send_pkts(struct test_spec *test, struct ifobject *ifobject,
 	pkts_in_flight += valid_pkts;
 	pthread_mutex_unlock(&pacing_mutex);
 
+	tx_cons = load_value(xsk->tx.consumer);
 	xsk_ring_prod__submit(&xsk->tx, i);
 	xsk->outstanding_tx += valid_frags;
 
@@ -1370,6 +1371,12 @@ static int __send_pkts(struct test_spec *test, struct ifobject *ifobject,
 				return TEST_PASS;
 
 			ksft_print_msg("ERROR: [%s] Poll error %d\n", __func__, ret);
+			return TEST_FAILURE;
+		}
+		if (!test->poll_tmout && i && test->mode == TEST_MODE_SKB &&
+		    ifobject->busy_poll &&
+		    load_value(xsk->tx.consumer) == tx_cons) {
+			ksft_print_msg("ERROR: busy-poll TX stalled\n");
 			return TEST_FAILURE;
 		}
 	}
