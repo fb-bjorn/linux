@@ -4201,7 +4201,7 @@ static void *bpf_xdp_frag_address(const struct xdp_buff *xdp,
 	unsigned int index;
 
 	if (xdp->rxq->mem.type != MEM_TYPE_XSK_BUFF_POOL)
-		return skb_frag_address(frag);
+		return xdp_frag_address(frag);
 
 	/* An unaligned XSK buffer may span non-contiguous pinned pages. */
 	sinfo = xdp_get_shared_info_from_buff(xdp);
@@ -4725,15 +4725,13 @@ int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
 	if (map_type == BPF_MAP_TYPE_XSKMAP)
 		return __xdp_do_redirect_xsk(ri, dev, xdp, xdp_prog);
 
-	if (xdp->rxq->mem.type != MEM_TYPE_XSK_BUFF_POOL)
+	if (xdp->rxq->mem.type != MEM_TYPE_XSK_BUFF_POOL &&
+	    !xdp_buff_has_netmem(xdp))
 		return __xdp_do_redirect_frame(ri, dev,
 					       xdp_convert_buff_to_frame(xdp),
 					       xdp_prog);
 
-	/* A zero-copy buffer is copied, so it can only be returned once the
-	 * target has taken the copy. A target that refuses the frame leaves
-	 * the caller owning the original.
-	 */
+	/* Return zero-copy buffers only after the target accepts the copy. */
 	xdpf = xdp_copy_zc_to_xdp_frame(xdp);
 	err = __xdp_do_redirect_frame(ri, dev, xdpf, xdp_prog);
 	if (err) {
@@ -4743,7 +4741,6 @@ int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
 	}
 
 	xdp_release_zc_buff(xdp);
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(xdp_do_redirect);
@@ -12747,7 +12744,7 @@ __bpf_kfunc int bpf_xdp_pull_data(struct xdp_md *x, u32 len)
 			memcpy(xdp->data_end, xsk_buff_get_head(xdp)->data,
 			       shrink);
 		else
-			memcpy(xdp->data_end, skb_frag_address(frag), shrink);
+			memcpy(xdp->data_end, xdp_frag_address(frag), shrink);
 
 		xdp->data_end += shrink;
 		sinfo->xdp_frags_size -= shrink;
