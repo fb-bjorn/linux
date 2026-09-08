@@ -121,7 +121,19 @@ MTU=1500
 
 trap ctrl_c INT
 
+busy_poll_orig=""
+
+restore_busy_poll() {
+	if [ -n "${busy_poll_orig}" ]; then
+		sysctl -wq net.core.busy_poll="${busy_poll_orig}"
+		busy_poll_orig=""
+	fi
+}
+
+trap restore_busy_poll EXIT
+
 function ctrl_c() {
+	restore_busy_poll
         cleanup_exit ${VETH0} ${VETH1}
 	exit 1
 }
@@ -224,11 +236,20 @@ fi
 
 TEST_NAME="XSK_SELFTESTS_${VETH0}_BUSY_POLL"
 busy_poll=1
+if ! busy_poll_orig=$(sysctl -n net.core.busy_poll); then
+	echo "Failed to read net.core.busy_poll" >&2
+	exit $ksft_fail
+fi
+if ! sysctl -wq net.core.busy_poll=20; then
+	echo "Failed to set net.core.busy_poll" >&2
+	exit $ksft_fail
+fi
 
 if [ -z $ETH ]; then
 	setup_vethPairs
 fi
 exec_xskxceiver
+restore_busy_poll
 
 ## END TESTS
 
