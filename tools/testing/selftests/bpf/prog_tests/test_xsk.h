@@ -154,6 +154,8 @@ struct ifobject {
 	bool unaligned_supp;
 	bool multi_buff_supp;
 	bool multi_buff_zc_supp;
+	bool zc_2k_supp;
+	bool zc_unaligned_supp;
 	bool hw_ring_size_supp;
 };
 struct ifobject *ifobject_create(void);
@@ -272,6 +274,7 @@ int testapp_xdp_metadata(struct test_spec *test);
 int testapp_xdp_metadata_mb(struct test_spec *test);
 int testapp_xdp_prog_cleanup(struct test_spec *test);
 int testapp_xdp_shared_umem(struct test_spec *test);
+int testapp_mb_headroom(struct test_spec *test);
 
 void *worker_testapp_validate_rx(void *arg);
 void *worker_testapp_validate_tx(void *arg);
@@ -322,6 +325,7 @@ static const struct test_spec ci_skip_tests[] = {
 	{.name = "HW_SW_MAX_RING_SIZE", .test_func = testapp_hw_sw_max_ring_size},
 	/* Too long test */
 	{.name = "TEARDOWN", .test_func = testapp_teardown},
+	{.name = "SEND_RECEIVE_9K_HEADROOM", .test_func = testapp_mb_headroom},
 };
 
 
