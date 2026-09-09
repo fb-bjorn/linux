@@ -34,6 +34,13 @@ static void bnxt_xdp_recycle_netmem(netmem_ref netmem)
 	page_pool_recycle_direct_netmem(netmem_get_pp(netmem), netmem);
 }
 
+static void bnxt_xsk_tx_complete(struct xsk_buff_pool *pool, u32 count)
+{
+	if (!count)
+		return;
+	xsk_tx_completed(pool, count);
+}
+
 struct bnxt_sw_tx_bd *bnxt_xmit_bd(struct bnxt *bp,
 				   struct bnxt_tx_ring_info *txr,
 				   dma_addr_t mapping, u32 len,
@@ -135,11 +142,13 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 {
 	struct bnxt_tx_ring_info *txr = bnapi->tx_ring[0];
 	struct bnxt_rx_ring_info *rxr = bnapi->rx_ring;
+	struct xsk_buff_pool *xsk_pool = NULL;
 	u16 tx_hw_cons = txr->tx_hw_cons;
 	bool rx_doorbell_needed = false;
 	struct bnxt_sw_tx_bd *tx_buf;
 	u16 tx_cons = txr->tx_cons;
 	u16 last_tx_cons = tx_cons;
+	u32 xsk_descs = 0;
 	u16 sw_cons;
 	int j, frags;
 
@@ -173,10 +182,25 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 				bnxt_xdp_recycle_netmem(tx_buf->netmem);
 				tx_buf->netmem = 0;
 			}
+		} else if (tx_buf->action == BNXT_XDP_TX_XSK) {
+			xsk_pool = tx_buf->xsk_pool;
+			frags = tx_buf->nr_frags;
+			xsk_descs += frags + 1;
+			tx_buf->action = BNXT_XDP_TX_NONE;
+			tx_buf->xsk_pool = NULL;
+
+			for (j = 0; j < frags; j++) {
+				tx_cons = NEXT_TX(tx_cons);
+				sw_cons = RING_TX(bp, tx_cons);
+				tx_buf = &txr->tx_buf_ring[sw_cons];
+				tx_buf->action = BNXT_XDP_TX_NONE;
+			}
 		} else if (tx_buf->action == BNXT_XDP_TX_LOOPBACK) {
 			tx_buf->action = BNXT_XDP_TX_NONE;
 		} else {
+			bnxt_xsk_tx_complete(xsk_pool, xsk_descs);
 			bnxt_sched_reset_txr(bp, txr, tx_cons);
+			WRITE_ONCE(txr->tx_cons, tx_cons);
 			return;
 		}
 		tx_cons = NEXT_TX(tx_cons);
@@ -184,6 +208,7 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 
 	bnapi->events &= ~BNXT_TX_CMP_EVENT;
 	WRITE_ONCE(txr->tx_cons, tx_cons);
+	bnxt_xsk_tx_complete(xsk_pool, xsk_descs);
 	if (rx_doorbell_needed) {
 		if (!txr->xdp_tx_pending) {
 			bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
@@ -197,7 +222,15 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 
 void bnxt_free_xdp_tx_ring(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
 {
+	struct bnxt_rx_ring_info *rxr = txr->bnapi->rx_ring;
+	struct xsk_buff_pool *attached_pool;
+	struct xsk_buff_pool *pool = NULL;
 	u16 cons = txr->tx_cons;
+	u32 xsk_descs = 0;
+
+	attached_pool = rxr ? READ_ONCE(rxr->xsk_pool) : NULL;
+	if (attached_pool && xsk_uses_need_wakeup(attached_pool))
+		xsk_set_tx_need_wakeup(attached_pool);
 
 	while (RING_TX(bp, cons) != RING_TX(bp, txr->tx_prod)) {
 		struct bnxt_sw_tx_bd *head_buf, *tx_buf;
@@ -223,6 +256,12 @@ void bnxt_free_xdp_tx_ring(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
 				tx_buf->netmem = 0;
 			}
 			break;
+		case BNXT_XDP_TX_XSK:
+			pool = tx_buf->xsk_pool;
+			xsk_descs += frags + 1;
+			for (i = 0; i < frags; i++)
+				cons = NEXT_TX(cons);
+			break;
 		case BNXT_XDP_TX_LOOPBACK:
 			break;
 		default:
@@ -234,6 +273,8 @@ void bnxt_free_xdp_tx_ring(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
 		head_buf->xdpf = NULL;
 		cons = NEXT_TX(cons);
 	}
+
+	bnxt_xsk_tx_complete(pool, xsk_descs);
 
 	WRITE_ONCE(txr->tx_cons, cons);
 	txr->xdp_tx_pending = 0;
@@ -449,6 +490,113 @@ int bnxt_xdp_xmit(struct net_device *dev, int num_frames,
 		spin_unlock(&txr->xdp_tx_lock);
 
 	return nxmit;
+}
+
+static void bnxt_xsk_tx_packet(struct bnxt *bp,
+			       struct bnxt_tx_ring_info *txr,
+			       struct xsk_buff_pool *pool,
+			       struct xdp_desc *descs, u32 count)
+{
+	struct bnxt_sw_tx_bd *head_buf;
+	u16 head, prod = txr->tx_prod;
+	u32 i;
+
+	head = prod;
+	head_buf = &txr->tx_buf_ring[RING_TX(bp, head)];
+	head_buf->xsk_pool = pool;
+	head_buf->nr_frags = count - 1;
+	head_buf->action = BNXT_XDP_TX_XSK;
+
+	for (i = 0; i < count; i++) {
+		struct xdp_desc *desc = &descs[i];
+		struct bnxt_sw_tx_bd *tx_buf;
+		struct xdp_desc_ctx ctx;
+		struct tx_bd *txbd;
+		u32 flags;
+
+		ctx = xsk_buff_raw_get_ctx(pool, desc->addr);
+		xsk_buff_raw_dma_sync_for_device(pool, ctx.dma, desc->len);
+
+		tx_buf = &txr->tx_buf_ring[RING_TX(bp, prod)];
+		if (i)
+			tx_buf->action = BNXT_XDP_TX_NONE;
+
+		txbd = &txr->tx_desc_ring[TX_RING(bp, prod)][TX_IDX(prod)];
+		flags = desc->len << TX_BD_LEN_SHIFT;
+		if (!i)
+			flags |= TX_BD_CNT(count) |
+				 bnxt_lhint_arr[desc->len >> 9];
+		if (xsk_is_eop_desc(desc))
+			flags |= TX_BD_FLAGS_PACKET_END;
+
+		txbd->tx_bd_len_flags_type = cpu_to_le32(flags);
+		txbd->tx_bd_haddr = cpu_to_le64(ctx.dma);
+		if (!i)
+			txbd->tx_bd_opaque =
+				SET_TX_OPAQUE(bp, txr, head, count);
+
+		prod = NEXT_TX(prod);
+	}
+
+	WRITE_ONCE(txr->tx_prod, prod);
+}
+
+static bool bnxt_xsk_tx(struct bnxt *bp, struct bnxt_tx_ring_info *txr,
+			struct xsk_buff_pool *pool)
+{
+	struct xdp_desc *descs = pool->tx_descs;
+	u32 count, first, i, budget;
+	bool need_wakeup;
+
+	if (READ_ONCE(txr->dev_state) == BNXT_DEV_STATE_CLOSING) {
+		if (xsk_uses_need_wakeup(pool))
+			xsk_set_tx_need_wakeup(pool);
+		return true;
+	}
+	need_wakeup = xsk_uses_need_wakeup(pool);
+	spin_lock(&txr->xdp_tx_lock);
+
+	if (need_wakeup && txr->tx_cons == txr->tx_prod)
+		xsk_set_tx_need_wakeup(pool);
+
+	budget = min_t(u32, bnxt_tx_avail(bp, txr), BNXT_XSK_TX_BUDGET);
+	count = xsk_tx_peek_release_desc_batch(pool, budget);
+
+	for (i = 0; i < count;) {
+		first = i;
+		while (++i < count && !xsk_is_eop_desc(&descs[i - 1]))
+			;
+
+		bnxt_xsk_tx_packet(bp, txr, pool, &descs[first], i - first);
+	}
+
+	if (count) {
+		/* Publish descriptors before notifying the device. */
+		wmb();
+		bnxt_db_write(bp, &txr->tx_db, txr->tx_prod);
+	}
+
+	if (need_wakeup && txr->tx_cons != txr->tx_prod)
+		xsk_clear_tx_need_wakeup(pool);
+
+	spin_unlock(&txr->xdp_tx_lock);
+
+	return !budget || count < budget;
+}
+
+bool bnxt_xsk_poll(struct bnxt *bp, struct bnxt_napi *bnapi)
+{
+	struct bnxt_rx_ring_info *rxr = bnapi->rx_ring;
+	struct xsk_buff_pool *pool;
+
+	if (!rxr || bnapi->tx_fault)
+		return true;
+
+	pool = READ_ONCE(rxr->xsk_pool);
+	if (!pool)
+		return true;
+
+	return bnxt_xsk_tx(bp, bnapi->tx_ring[0], pool);
 }
 
 int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id,
