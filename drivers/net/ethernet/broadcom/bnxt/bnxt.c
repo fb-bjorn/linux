@@ -3324,6 +3324,9 @@ static bool __bnxt_poll_work_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 		bnapi->events &= ~BNXT_AGG_EVENT;
 	}
 
+	if (budget)
+		complete &= bnxt_xsk_poll(bp, bnapi);
+
 	return complete;
 }
 
@@ -17945,6 +17948,10 @@ static int bnxt_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	dev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
 			    NETDEV_XDP_ACT_RX_SG;
+	if (PAGE_SIZE == SZ_4K && BNXT_SUPPORTS_QUEUE_API(bp)) {
+		dev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
+		dev->xdp_zc_max_segs = BNXT_XSK_MAX_SEGS;
+	}
 
 #ifdef CONFIG_BNXT_SRIOV
 	init_waitqueue_head(&bp->sriov_cfg_wait);
