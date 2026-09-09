@@ -1425,7 +1425,10 @@ static u32 bnxt_rx_agg_netmems_xdp(struct bnxt *bp,
 
 	total_frag_len = __bnxt_rx_agg_netmems(bp, cpr, idx, agg_bufs, tpa,
 					       NULL, xdp);
-	if (total_frag_len) {
+	if (!total_frag_len) {
+		if (shinfo->nr_frags)
+			xdp_buff_set_frags_flag(xdp);
+	} else {
 		xdp_buff_set_frags_flag(xdp);
 		shinfo->nr_frags = agg_bufs;
 		shinfo->xdp_frags_size = total_frag_len;
@@ -2286,8 +2289,11 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 							       cp_cons,
 							       agg_bufs,
 							       false);
-			if (!frag_len)
+			if (!frag_len) {
+				bnxt_xdp_buff_frags_free(rxr, &bnxt_xdp.xdp);
+				bnxt_reuse_rx_data(rxr, cons, data);
 				goto oom_next_rx;
+			}
 
 		}
 		xdp_active = true;
