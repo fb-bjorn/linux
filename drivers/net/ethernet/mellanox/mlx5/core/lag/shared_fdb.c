@@ -234,6 +234,8 @@ int mlx5_lag_shared_fdb_create(struct mlx5_lag *ldev,
 				       err);
 			goto err_add_devices;
 		}
+		/* Before the IB devices reporting it are published */
+		mlx5_lag_set_vports_agg_speed(ldev);
 	} else {
 		err = mlx5_lag_create_single_fdb_filter(ldev, group_id);
 		if (err) {
@@ -256,8 +258,6 @@ int mlx5_lag_shared_fdb_create(struct mlx5_lag *ldev,
 		goto err_rescan_drivers;
 	}
 
-	if (filter == MLX5_LAG_FILTER_PORTS || filter == MLX5_LAG_FILTER_ALL)
-		mlx5_lag_set_vports_agg_speed(ldev);
 	return 0;
 
 err_rescan_drivers:

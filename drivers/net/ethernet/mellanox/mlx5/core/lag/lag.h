@@ -72,7 +72,6 @@ struct lag_tracker {
 	unsigned int is_bonded:1;
 	unsigned int has_inactive:1;
 	enum netdev_lag_hash hash_type;
-	u32 bond_speed_mbps;
 };
 
 /* LAG data of a ConnectX card.
@@ -99,6 +98,10 @@ struct mlx5_lag {
 	/* Protect lag fields/state changes */
 	struct mutex		  lock;
 	struct lag_mpesw	  lag_mpesw;
+	/* Aggregated TX speed of the ports able to transmit in Mbps, 0 if
+	 * none can, SPEED_UNKNOWN if unknown.
+	 */
+	u32			  agg_speed_mbps;
 	/* The LAG set the max_tx_speed of the vports */
 	bool			  vports_speed_set;
 };
@@ -260,12 +263,22 @@ void mlx5_lag_rescan_dev_locked(struct mlx5_lag *ldev,
 void mlx5_lag_add_devices_filter(struct mlx5_lag *ldev, u32 filter);
 struct mlx5_devcom_comp_dev *mlx5_lag_get_devcom_comp(struct mlx5_lag *ldev);
 
+int mlx5_lag_update_agg_speed(struct mlx5_lag *ldev);
+void mlx5_lag_reset_agg_speed(struct mlx5_lag *ldev);
+
 #ifdef CONFIG_MLX5_ESWITCH
 void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev);
 void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev);
 #else
-static inline void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev) {}
-static inline void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev) {}
+static inline void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev)
+{
+	mlx5_lag_update_agg_speed(ldev);
+}
+
+static inline void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
+{
+	mlx5_lag_reset_agg_speed(ldev);
+}
 #endif
 
 static inline bool mlx5_lag_is_supported(struct mlx5_core_dev *dev)
