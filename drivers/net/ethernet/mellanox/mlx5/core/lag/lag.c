@@ -1075,6 +1075,8 @@ int mlx5_deactivate_lag(struct mlx5_lag *ldev)
 	if (master_idx < 0)
 		return -EINVAL;
 
+	mlx5_lag_reset_vports_speed(ldev);
+
 	dev0 = mlx5_lag_pf(ldev, master_idx)->dev;
 	ldev->mode = MLX5_LAG_MODE_NONE;
 	ldev->mode_flags = 0;
@@ -1508,8 +1510,15 @@ static int mlx5_lag_get_devices_max_speed(struct mlx5_lag *ldev, u32 *max_speed)
 	return 0;
 }
 
+/* While the LAG sets the speed of the vports, vport->agg_max_tx_speed holds
+ * it for mlx5_esw_vport_enable() to replay: it is updated even if the vport is
+ * disabled or the firmware command fails, the firmware gets it on the next
+ * enable of the vport. Without @replay, @speed is only written to the enabled
+ * vports, a zero speed included as the firmware takes it as a reset, and
+ * nothing is left to replay.
+ */
 static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
-						u32 speed)
+						u32 speed, bool replay)
 {
 	u16 op_mod = MLX5_VPORT_STATE_OP_MOD_ESW_VPORT;
 	struct mlx5_eswitch *esw = mdev->priv.eswitch;
@@ -1531,7 +1540,7 @@ static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
 		if (vport->vport == MLX5_VPORT_UPLINK)
 			continue;
 
-		vport->agg_max_tx_speed = speed;
+		vport->agg_max_tx_speed = replay ? speed : 0;
 
 		if (!vport->enabled)
 			continue;
@@ -1571,6 +1580,7 @@ void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev)
 
 	speed = speed / MLX5_MAX_TX_SPEED_UNIT;
 
+	ldev->vports_speed_set = true;
 	mlx5_ldev_for_each(pf_idx, 0, ldev) {
 		pf = mlx5_lag_pf(ldev, pf_idx);
 		if (!pf)
@@ -1579,7 +1589,7 @@ void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev)
 		if (!mdev)
 			continue;
 
-		mlx5_lag_modify_device_vports_speed(mdev, speed);
+		mlx5_lag_modify_device_vports_speed(mdev, speed, true);
 	}
 }
 
@@ -1590,6 +1600,11 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 	u32 speed;
 	int pf_idx;
 	int ret;
+
+	/* Nothing to restore if the LAG didn't set the vports speed */
+	if (!ldev->vports_speed_set)
+		return;
+	ldev->vports_speed_set = false;
 
 	mlx5_ldev_for_each(pf_idx, 0, ldev) {
 		pf = mlx5_lag_pf(ldev, pf_idx);
@@ -1604,11 +1619,12 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 			mlx5_core_dbg(mdev,
 				      "Failed to reset vports speed for device %s. Oper speed is not available (err=%d)\n",
 				      dev_name(mdev->device), ret);
-			continue;
+			speed = 0;
 		}
 
 		speed = speed / MLX5_MAX_TX_SPEED_UNIT;
-		mlx5_lag_modify_device_vports_speed(mdev, speed);
+		/* Don't leave the LAG speed cached for replay */
+		mlx5_lag_modify_device_vports_speed(mdev, speed, false);
 	}
 }
 #endif
@@ -1693,7 +1709,6 @@ static void mlx5_do_bond(struct mlx5_lag *ldev)
 		mlx5_modify_lag(ldev, &tracker);
 		mlx5_lag_set_vports_agg_speed(ldev);
 	} else if (mlx5_lag_should_disable_lag(ldev, do_bond)) {
-		mlx5_lag_reset_vports_speed(ldev);
 		mlx5_disable_lag(ldev);
 	}
 }

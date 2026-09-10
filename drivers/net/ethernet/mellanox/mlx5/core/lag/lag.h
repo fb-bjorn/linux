@@ -99,6 +99,8 @@ struct mlx5_lag {
 	/* Protect lag fields/state changes */
 	struct mutex		  lock;
 	struct lag_mpesw	  lag_mpesw;
+	/* The LAG set the max_tx_speed of the vports */
+	bool			  vports_speed_set;
 };
 
 static inline struct mlx5_lag *
