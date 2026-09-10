@@ -2,6 +2,7 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 
 #include <linux/etherdevice.h>
+#include <linux/if_vlan.h>
 #include <linux/ipv6.h>
 #include <linux/types.h>
 #include <net/netdev_queues.h>
@@ -9,6 +10,8 @@
 #include "fbnic.h"
 #include "fbnic_netdev.h"
 #include "fbnic_txrx.h"
+
+#define FBNIC_MAX_L2_HDR_LEN	(ETH_HLEN + 2 * VLAN_HLEN)
 
 int __fbnic_open(struct fbnic_net *fbn)
 {
@@ -531,7 +534,7 @@ bool fbnic_check_split_frames(struct bpf_prog *prog, unsigned int mtu,
 	if (prog->aux->xdp_has_frags)
 		return false;
 
-	return mtu + ETH_HLEN > hds_thresh;
+	return mtu + FBNIC_MAX_L2_HDR_LEN > hds_thresh;
 }
 
 static int fbnic_bpf(struct net_device *netdev, struct netdev_bpf *bpf)
