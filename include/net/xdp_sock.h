@@ -15,6 +15,7 @@
 #include <net/sock.h>
 
 #define XDP_UMEM_SG_FLAG BIT(3)
+#define XDP_UMEM_SG_FRAG_OFFSET_FLAG BIT(4)
 
 struct net_device;
 struct xsk_queue;

@@ -194,6 +194,8 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 
 	if (mbuf)
 		pool->umem->flags |= XDP_UMEM_SG_FLAG;
+	if (flags & XDP_USE_SG_FRAG_OFFSET)
+		pool->umem->flags |= XDP_UMEM_SG_FRAG_OFFSET_FLAG;
 
 	if (flags & XDP_USE_NEED_WAKEUP)
 		pool->uses_need_wakeup = true;
@@ -280,6 +282,8 @@ int xp_assign_dev_shared(struct xsk_buff_pool *pool, struct xdp_sock *umem_xs,
 
 	if (umem->flags & XDP_UMEM_SG_FLAG)
 		flags |= XDP_USE_SG;
+	if (umem->flags & XDP_UMEM_SG_FRAG_OFFSET_FLAG)
+		flags |= XDP_USE_SG_FRAG_OFFSET;
 
 	if (umem_xs->pool->uses_need_wakeup)
 		flags |= XDP_USE_NEED_WAKEUP;

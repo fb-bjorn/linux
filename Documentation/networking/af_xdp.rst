@@ -547,6 +547,15 @@ that only a complete packet (all frames in the packet) is sent to the
 application. If there is not enough space in the AF_XDP Rx ring, all
 frames of the packet will be dropped.
 
+By default, the configured UMEM headroom and ``XDP_PACKET_HEADROOM`` are
+reserved in every buffer. Some zero-copy devices select the data offset of
+continuation buffers in hardware and cannot preserve that layout. Applications
+which can tolerate this may additionally bind with ``XDP_USE_SG_FRAG_OFFSET``.
+The first buffer retains the normal headroom, while continuation buffers may
+start at any valid offset in the chunk. Read their data offset from each
+descriptor's ``addr`` field. This flag is only valid together with
+``XDP_USE_SG``.
+
 If application reads a batch of descriptors, using for example the libxdp
 interfaces, it is not guaranteed that the batch will end with a full
 packet. It might end in the middle of a packet and the rest of the

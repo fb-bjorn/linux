@@ -31,6 +31,11 @@
  * such frames will be dropped.
  */
 #define XDP_USE_SG	(1 << 4)
+/* Permit zero-copy Rx continuation fragments to start at any valid offset in
+ * their UMEM chunk. The configured headroom remains reserved in the first
+ * fragment, but the device may consume it in continuation fragments.
+ */
+#define XDP_USE_SG_FRAG_OFFSET	(1U << 5)
 
 /* Flags for xsk_umem_config flags */
 #define XDP_UMEM_UNALIGNED_CHUNK_FLAG	(1 << 0)

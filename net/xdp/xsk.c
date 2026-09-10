@@ -1628,7 +1628,10 @@ static int xsk_bind(struct socket *sock, struct sockaddr_unsized *addr, int addr
 
 	flags = sxdp->sxdp_flags;
 	if (flags & ~(XDP_SHARED_UMEM | XDP_COPY | XDP_ZEROCOPY |
-		      XDP_USE_NEED_WAKEUP | XDP_USE_SG))
+		      XDP_USE_NEED_WAKEUP | XDP_USE_SG |
+		      XDP_USE_SG_FRAG_OFFSET))
+		return -EINVAL;
+	if ((flags & XDP_USE_SG_FRAG_OFFSET) && !(flags & XDP_USE_SG))
 		return -EINVAL;
 
 	bound_dev_if = READ_ONCE(sk->sk_bound_dev_if);
@@ -1662,7 +1665,8 @@ static int xsk_bind(struct socket *sock, struct sockaddr_unsized *addr, int addr
 		struct socket *sock;
 
 		if ((flags & XDP_COPY) || (flags & XDP_ZEROCOPY) ||
-		    (flags & XDP_USE_NEED_WAKEUP) || (flags & XDP_USE_SG)) {
+		    (flags & XDP_USE_NEED_WAKEUP) || (flags & XDP_USE_SG) ||
+		    (flags & XDP_USE_SG_FRAG_OFFSET)) {
 			/* Cannot specify flags for shared sockets. */
 			err = -EINVAL;
 			goto out_unlock;
