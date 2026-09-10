@@ -162,9 +162,20 @@ static inline bool xsk_buff_add_frag(struct xdp_buff *head,
 {
 	struct xdp_buff_xsk *frag = container_of(xdp, struct xdp_buff_xsk, xdp);
 	const void *data = xdp->data;
+	u64 addr;
+	netmem_ref netmem;
+	u32 offset;
 
-	if (!__xdp_buff_add_frag(head, virt_to_netmem(data),
-				 offset_in_page(data), xdp->data_end - data,
+	/* UMEM data is reached through a vmap of the pinned user pages, so the
+	 * page behind an address has to come from that pinned array.
+	 * virt_to_page() would translate the vmap address as if it were in the
+	 * direct map.
+	 */
+	addr = (const char *)data - (const char *)frag->pool->addrs;
+	offset = offset_in_page(addr);
+	netmem = page_to_netmem(frag->pool->umem->pgs[addr >> PAGE_SHIFT]);
+
+	if (!__xdp_buff_add_frag(head, netmem, offset, xdp->data_end - data,
 				 frag->pool->chunk_size, false))
 		return false;
 
