@@ -958,6 +958,23 @@ static bool bnxt_separate_head_pool(struct bnxt_rx_ring_info *rxr)
 	return rxr->need_head_pool || rxr->rx_page_size < PAGE_SIZE;
 }
 
+static void bnxt_set_rx_buf_params(struct bnxt *bp,
+				   struct bnxt_rx_ring_info *rxr)
+{
+	rxr->rx_buf_use_size = bp->rx_buf_use_size;
+	rxr->xdp_frame_size = rxr->rx_page_size;
+
+	if (BNXT_RX_PAGE_MODE(bp)) {
+		rxr->rx_offset = NET_IP_ALIGN + XDP_PACKET_HEADROOM;
+		rxr->rx_dma_offset = XDP_PACKET_HEADROOM;
+		rxr->xdp_headroom = NET_IP_ALIGN + XDP_PACKET_HEADROOM;
+	} else {
+		rxr->rx_offset = BNXT_RX_OFFSET;
+		rxr->rx_dma_offset = BNXT_RX_DMA_OFFSET;
+		rxr->xdp_headroom = BNXT_RX_OFFSET;
+	}
+}
+
 static struct page *__bnxt_alloc_rx_page(struct bnxt *bp, dma_addr_t *mapping,
 					 struct bnxt_rx_ring_info *rxr,
 					 unsigned int *offset,
@@ -1031,9 +1048,9 @@ int bnxt_alloc_rx_data(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 		if (!page)
 			return -ENOMEM;
 
-		mapping += bp->rx_dma_offset;
+		mapping += rxr->rx_dma_offset;
 		rx_buf->data = page;
-		rx_buf->data_ptr = page_address(page) + offset + bp->rx_offset;
+		rx_buf->data_ptr = page_address(page) + offset + rxr->rx_offset;
 		rx_buf->offset = offset;
 	} else {
 		u8 *data = __bnxt_alloc_rx_frag(bp, &mapping, rxr, gfp);
@@ -1211,7 +1228,7 @@ static struct sk_buff *bnxt_rx_multi_page_skb(struct bnxt *bp,
 		bnxt_reuse_rx_data(rxr, cons, data);
 		return NULL;
 	}
-	dma_addr -= bp->rx_dma_offset;
+	dma_addr -= rxr->rx_dma_offset;
 	dma_sync_single_for_cpu(&bp->pdev->dev, dma_addr, rxr->rx_page_size,
 				bp->rx_dir);
 	skb = napi_build_skb(frag_start, rxr->rx_page_size);
@@ -1245,7 +1262,7 @@ static struct sk_buff *bnxt_rx_page_skb(struct bnxt *bp,
 		bnxt_reuse_rx_data(rxr, cons, data);
 		return NULL;
 	}
-	dma_addr -= bp->rx_dma_offset;
+	dma_addr -= rxr->rx_dma_offset;
 	dma_sync_single_for_cpu(&bp->pdev->dev, dma_addr, rxr->rx_page_size,
 				bp->rx_dir);
 
@@ -4500,6 +4517,7 @@ static void bnxt_init_ring_struct(struct bnxt *bp)
 
 		netdev_queue_config(bp->dev, i, &qcfg);
 		rxr->rx_page_size = qcfg.rx_page_size;
+		bnxt_set_rx_buf_params(bp, rxr);
 
 		ring = &rxr->rx_ring_struct;
 		rmem = &ring->ring_mem;
@@ -4642,7 +4660,7 @@ static void bnxt_init_one_rx_ring_rxbd(struct bnxt *bp,
 	struct bnxt_ring_struct *ring;
 	u32 type;
 
-	type = (bp->rx_buf_use_size << RX_BD_LEN_SHIFT) |
+	type = (rxr->rx_buf_use_size << RX_BD_LEN_SHIFT) |
 		RX_BD_TYPE_RX_PACKET_BD | RX_BD_FLAGS_EOP;
 
 	if (NET_IP_ALIGN == 2)
@@ -4684,6 +4702,7 @@ static int bnxt_init_one_rx_ring(struct bnxt *bp, int ring_nr)
 	struct bnxt_rx_ring_info *rxr;
 
 	rxr = &bp->rx_ring[ring_nr];
+	bnxt_set_rx_buf_params(bp, rxr);
 	bnxt_init_one_rx_ring_rxbd(bp, rxr);
 
 	netif_queue_set_napi(bp->dev, ring_nr, NETDEV_QUEUE_TYPE_RX,
@@ -7272,7 +7291,7 @@ static void bnxt_set_rx_ring_params_p5(struct bnxt *bp, u32 ring_type,
 		req->rx_buf_size = cpu_to_le16(rxr->rx_page_size);
 		enables |= RING_ALLOC_REQ_ENABLES_RX_RING_ID_VALID;
 	} else {
-		req->rx_buf_size = cpu_to_le16(bp->rx_buf_use_size);
+		req->rx_buf_size = cpu_to_le16(rxr->rx_buf_use_size);
 		if (NET_IP_ALIGN == 2)
 			req->flags =
 				cpu_to_le16(RING_ALLOC_REQ_FLAGS_RX_SOP_PAD);
@@ -16578,6 +16597,7 @@ static int bnxt_queue_mem_alloc(struct net_device *dev,
 	clone->rx_next_cons = 0;
 	clone->need_head_pool = false;
 	clone->rx_page_size = qcfg->rx_page_size;
+	bnxt_set_rx_buf_params(bp, clone);
 	clone->rx_agg_bmap = NULL;
 	clone->rx_tpa = NULL;
 	clone->rx_tpa_idx_map = NULL;
@@ -16782,6 +16802,11 @@ static int bnxt_queue_start(struct net_device *dev,
 	rxr->head_pool = clone->head_pool;
 	rxr->xdp_rxq = clone->xdp_rxq;
 	rxr->need_head_pool = clone->need_head_pool;
+	rxr->rx_buf_use_size = clone->rx_buf_use_size;
+	rxr->xdp_frame_size = clone->xdp_frame_size;
+	rxr->rx_offset = clone->rx_offset;
+	rxr->rx_dma_offset = clone->rx_dma_offset;
+	rxr->xdp_headroom = clone->xdp_headroom;
 
 	bnxt_copy_rx_ring(bp, rxr, clone);
 
