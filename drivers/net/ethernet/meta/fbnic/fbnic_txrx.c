@@ -8,6 +8,7 @@
 #include <linux/pci.h>
 #include <linux/time64.h>
 #include <net/netdev_queues.h>
+#include <net/netdev_rx_queue.h>
 #include <net/page_pool/helpers.h>
 #include <net/tcp.h>
 #include <net/xdp.h>
@@ -2893,6 +2894,20 @@ void fbnic_napi_depletion_check(struct net_device *netdev)
 	fbnic_wrfl(fbd);
 }
 
+/* Vectors are not indexed by receive queue: a configuration with separate
+ * channels allocates every Tx-only vector first, so queue N is not on vector
+ * N % num_napi. Take the association the driver already published.
+ */
+static struct fbnic_napi_vector *fbnic_rxq_nv(struct net_device *dev, int idx)
+{
+	struct napi_struct *napi = __netif_get_rx_queue(dev, idx)->napi;
+
+	if (WARN_ON_ONCE(!napi))
+		return NULL;
+
+	return container_of(napi, struct fbnic_napi_vector, napi);
+}
+
 static int fbnic_queue_mem_alloc(struct net_device *dev,
 				 struct netdev_queue_config *qcfg,
 				 void *qmem, int idx)
@@ -2906,7 +2921,9 @@ static int fbnic_queue_mem_alloc(struct net_device *dev,
 		return fbnic_alloc_qt_page_pools(fbn, qt, idx);
 
 	real = container_of(fbn->rx[idx], struct fbnic_q_triad, cmpl);
-	nv = fbn->napi[idx % fbn->num_napi];
+	nv = fbnic_rxq_nv(dev, idx);
+	if (!nv)
+		return -EINVAL;
 
 	fbnic_ring_init(&qt->sub0, real->sub0.doorbell, real->sub0.q_idx,
 			real->sub0.flags);
@@ -2961,7 +2978,9 @@ static int fbnic_queue_start(struct net_device *dev,
 	struct fbnic_q_triad *real;
 
 	real = container_of(fbn->rx[idx], struct fbnic_q_triad, cmpl);
-	nv = fbn->napi[idx % fbn->num_napi];
+	nv = fbnic_rxq_nv(dev, idx);
+	if (!nv)
+		return -EINVAL;
 
 	fbnic_aggregate_ring_bdq_counters(fbn, &real->sub0);
 	fbnic_aggregate_ring_bdq_counters(fbn, &real->sub1);
@@ -2983,7 +3002,10 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 	int err;
 
 	real = container_of(fbn->rx[idx], struct fbnic_q_triad, cmpl);
-	nv = fbn->napi[idx % fbn->num_napi];
+	nv = fbnic_rxq_nv(dev, idx);
+	if (!nv)
+		return -EINVAL;
+
 	fbnic_dbg_nv_exit(nv);
 
 	napi_disable_locked(&nv->napi);
