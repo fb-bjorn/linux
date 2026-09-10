@@ -183,7 +183,7 @@ void bnxt_xdp_buff_init(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 			u16 cons, u8 *data_ptr, unsigned int len,
 			struct xdp_buff *xdp)
 {
-	u32 buflen = rxr->rx_page_size;
+	u32 buflen = rxr->xdp_frame_size;
 	struct bnxt_sw_rx_bd *rx_buf;
 	struct pci_dev *pdev;
 	dma_addr_t mapping;
@@ -191,9 +191,9 @@ void bnxt_xdp_buff_init(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 
 	pdev = bp->pdev;
 	rx_buf = &rxr->rx_buf_ring[cons];
-	offset = bp->rx_offset;
+	offset = rxr->xdp_headroom;
 
-	mapping = rx_buf->mapping - bp->rx_dma_offset;
+	mapping = rx_buf->mapping - rxr->rx_dma_offset;
 	dma_sync_single_for_cpu(&pdev->dev, mapping + offset, len, bp->rx_dir);
 
 	xdp_init_buff(xdp, buflen, &rxr->xdp_rxq);
@@ -240,7 +240,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		return false;
 
 	pdev = bp->pdev;
-	offset = bp->rx_offset;
+	offset = rxr->xdp_headroom;
 
 	txr = rxr->bnapi->tx_ring[0];
 	/* BNXT_RX_PAGE_MODE(bp) when XDP enabled */
@@ -274,7 +274,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 			return true;
 		}
 		rx_buf = &rxr->rx_buf_ring[cons];
-		mapping = rx_buf->mapping - bp->rx_dma_offset;
+		mapping = rx_buf->mapping - rxr->rx_dma_offset;
 
 		if (unlikely(xdp_buff_has_frags(xdp))) {
 			struct skb_shared_info *sinfo = xdp_get_shared_info_from_buff(xdp);
