@@ -248,7 +248,6 @@ int mlx5_lag_shared_fdb_create(struct mlx5_lag *ldev,
 			pf = mlx5_lag_pf(ldev, i);
 			pf->sd_fdb_active = true;
 		}
-		BLOCKING_INIT_NOTIFIER_HEAD(&dev0->priv.lag_nh);
 	}
 
 	mlx5_lag_rescan_dev_locked(ldev, dev0, true);

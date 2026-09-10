@@ -1002,7 +1002,6 @@ static int mlx5_create_lag(struct mlx5_lag *ldev,
 			mlx5_core_err(dev0,
 				      "Failed to deactivate RoCE LAG; driver restart required\n");
 	}
-	BLOCKING_INIT_NOTIFIER_HEAD(&dev0->priv.lag_nh);
 
 	return err;
 }
@@ -1537,12 +1536,35 @@ static int mlx5_lag_get_devices_oper_speed(struct mlx5_lag *ldev,
 	return 0;
 }
 
+static void mlx5_lag_notify_speed_change(struct mlx5_lag *ldev)
+{
+	struct lag_func *pf;
+	int i;
+
+	/* Each IB device listens on the chain of its own device */
+	mlx5_ldev_for_each(i, 0, ldev) {
+		pf = mlx5_lag_pf(ldev, i);
+		blocking_notifier_call_chain(&pf->dev->priv.lag_nh,
+					     MLX5_DRIVER_EVENT_LAG_SPEED_CHANGE,
+					     NULL);
+	}
+}
+
 static void mlx5_lag_set_agg_speed(struct mlx5_lag *ldev, u32 speed)
 {
 	lockdep_assert_held(&ldev->lock);
 
+	if (ldev->agg_speed_mbps == speed)
+		return;
+
 	/* Read locklessly by mlx5_lag_query_aggregated_speed() */
 	WRITE_ONCE(ldev->agg_speed_mbps, speed);
+
+	/* Reported by IB for RoCE LAG and for the uplink representor in
+	 * SR-IOV LAG, where no vport max_tx_speed change reports it.
+	 */
+	if (__mlx5_lag_is_roce(ldev) || __mlx5_lag_is_sriov(ldev))
+		mlx5_lag_notify_speed_change(ldev);
 }
 
 /* Update the cached aggregated speed of the ports able to transmit: 0 if none

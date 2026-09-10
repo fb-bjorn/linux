@@ -3646,6 +3646,8 @@ static int lag_event(struct notifier_block *nb, unsigned long event, void *data)
 
 	switch (event) {
 	case MLX5_DRIVER_EVENT_ACTIVE_BACKUP_LAG_CHANGE_LOWERSTATE:
+		if (!dev->lag_active)
+			return NOTIFY_DONE;
 		ndev = data;
 		if (ndev) {
 			if (!mlx5_lag_is_roce(mdev)) {
@@ -3670,6 +3672,16 @@ static int lag_event(struct notifier_block *nb, unsigned long event, void *data)
 			rdma_roce_rescan_port(ibdev, portnum + 1);
 		}
 		break;
+	case MLX5_DRIVER_EVENT_LAG_SPEED_CHANGE: {
+		struct ib_event speed_event = {};
+
+		if (!dev->ib_active)
+			break;
+		speed_event.device = ibdev;
+		speed_event.event = IB_EVENT_DEVICE_SPEED_CHANGE;
+		ib_dispatch_event(&speed_event);
+		break;
+	}
 	default:
 		return NOTIFY_DONE;
 	}
@@ -3715,7 +3727,6 @@ static int mlx5_eth_lag_init(struct mlx5_ib_dev *dev)
 	if (err)
 		goto err_destroy_vport_lag;
 
-	mlx5e_lag_event_register(dev);
 	dev->lag_ports = mlx5_lag_get_num_ports(mdev);
 	dev->lag_active = true;
 	return 0;
@@ -3732,7 +3743,6 @@ static void mlx5_eth_lag_cleanup(struct mlx5_ib_dev *dev)
 	if (dev->lag_active) {
 		dev->lag_active = false;
 
-		mlx5e_lag_event_unregister(dev);
 		mlx5_lag_demux_cleanup(mdev);
 
 		mlx5_cmd_destroy_vport_lag(mdev);
@@ -5041,6 +5051,11 @@ static int mlx5_ib_stage_dev_notifier_init(struct mlx5_ib_dev *dev)
 
 	mlx5r_macsec_event_register(dev);
 
+	/* After IB registration, so unregistering waits for lag_event() to
+	 * finish before the device is unregistered.
+	 */
+	mlx5e_lag_event_register(dev);
+
 	return 0;
 }
 
@@ -5048,6 +5063,8 @@ static void mlx5_ib_stage_dev_notifier_cleanup(struct mlx5_ib_dev *dev)
 {
 	struct mlx5_ib_resources *devr = &dev->devr;
 	int port;
+
+	mlx5e_lag_event_unregister(dev);
 
 	mlx5r_macsec_event_unregister(dev);
 	mlx5_notifier_unregister(dev->mdev, &dev->mdev_events);
