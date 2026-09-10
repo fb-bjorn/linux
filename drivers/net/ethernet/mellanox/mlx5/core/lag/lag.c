@@ -1414,13 +1414,76 @@ static bool mlx5_lag_should_disable_lag(struct mlx5_lag *ldev, bool do_bond)
 	       ldev->mode != MLX5_LAG_MODE_MPESW;
 }
 
+/* PCIe bandwidth available to the port of @pf in Mbps, 0 if unknown, and in
+ * @link the device limiting it. Socket-Direct ports only join a LAG in
+ * switchdev mode, where all their channels are on the primary device.
+ */
+static u32 mlx5_lag_pf_pcie_bw(struct lag_func *pf, struct pci_dev **link)
+{
+	struct pci_dev *limit = NULL;
+	u32 bw;
+
+	bw = pcie_bandwidth_available(pf->dev->pdev, &limit, NULL, NULL);
+	if (link)
+		*link = bw ? limit : NULL;
+	return bw;
+}
+
+/* All the functions of a device share its PCIe link: sum the speeds of the
+ * ports behind the same PCIe bottleneck before limiting them by its bandwidth.
+ */
+struct mlx5_lag_link_speed {
+	struct pci_dev *link;
+	u32 pcie_bw;
+	u32 speed;
+};
+
+static void mlx5_lag_add_link_speed(struct mlx5_lag_link_speed *links,
+				    int *num_links, struct lag_func *pf,
+				    u32 speed)
+{
+	struct pci_dev *link;
+	u32 pcie_bw;
+	int i;
+
+	pcie_bw = mlx5_lag_pf_pcie_bw(pf, &link);
+	for (i = 0; i < *num_links; i++) {
+		if (link && links[i].link == link)
+			break;
+	}
+	if (i == *num_links) {
+		links[i].link = link;
+		links[i].pcie_bw = pcie_bw;
+		links[i].speed = 0;
+		(*num_links)++;
+	}
+	links[i].speed += speed;
+}
+
+static u32 mlx5_lag_sum_link_speeds(const struct mlx5_lag_link_speed *links,
+				    int num_links)
+{
+	u32 sum = 0;
+	int i;
+
+	for (i = 0; i < num_links; i++) {
+		if (links[i].pcie_bw)
+			sum += min(links[i].speed, links[i].pcie_bw);
+		else
+			sum += links[i].speed;
+	}
+	return sum;
+}
+
 static int mlx5_lag_get_devices_oper_speed(struct mlx5_lag *ldev,
 					   u32 *sum_speed)
 {
+	struct mlx5_lag_link_speed links[MLX5_MAX_PORTS];
 	struct mlx5_core_dev *pf_mdev;
 	struct lag_func *pf;
 	u32 max_tx_speed;
 	u8 vport_state;
+	int num_links = 0;
 	int pf_idx;
 	bool mpesw;
 	u32 speed;
@@ -1467,9 +1530,10 @@ static int mlx5_lag_get_devices_oper_speed(struct mlx5_lag *ldev,
 			return ret;
 		}
 
-		*sum_speed += speed;
+		mlx5_lag_add_link_speed(links, &num_links, pf, speed);
 	}
 
+	*sum_speed = mlx5_lag_sum_link_speeds(links, num_links);
 	return 0;
 }
 
@@ -1550,9 +1614,12 @@ static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
 
 static int mlx5_lag_get_devices_max_speed(struct mlx5_lag *ldev, u32 *max_speed)
 {
+	struct mlx5_lag_link_speed links[MLX5_MAX_PORTS];
 	struct mlx5_core_dev *pf_mdev;
+	int num_links = 0;
 	struct lag_func *pf;
 	bool take_max;
+	u32 pcie_bw;
 	int pf_idx;
 	u32 speed;
 	int ret;
@@ -1578,10 +1645,18 @@ static int mlx5_lag_get_devices_max_speed(struct mlx5_lag *ldev, u32 *max_speed)
 			return ret;
 		}
 
-		*max_speed = take_max ?
-			max(*max_speed, speed) : *max_speed + speed;
+		if (take_max) {
+			pcie_bw = mlx5_lag_pf_pcie_bw(pf, NULL);
+			if (pcie_bw)
+				speed = min(speed, pcie_bw);
+			*max_speed = max(*max_speed, speed);
+		} else {
+			mlx5_lag_add_link_speed(links, &num_links, pf, speed);
+		}
 	}
 
+	if (!take_max)
+		*max_speed = mlx5_lag_sum_link_speeds(links, num_links);
 	return 0;
 }
 
@@ -1623,6 +1698,7 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 {
 	struct mlx5_core_dev *mdev;
 	struct lag_func *pf;
+	u32 pcie_bw;
 	u32 speed;
 	int pf_idx;
 	int ret;
@@ -1650,6 +1726,9 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 			speed = 0;
 		}
 
+		pcie_bw = mlx5_lag_pf_pcie_bw(pf, NULL);
+		if (pcie_bw)
+			speed = min(speed, pcie_bw);
 		speed = speed / MLX5_MAX_TX_SPEED_UNIT;
 		/* Don't leave the LAG speed cached for replay */
 		mlx5_lag_modify_device_vports_speed(mdev, speed, false);
