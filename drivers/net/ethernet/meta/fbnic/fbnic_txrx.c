@@ -1744,7 +1744,7 @@ static int fbnic_alloc_napi_vector(struct fbnic_dev *fbd, struct fbnic_net *fbn,
 
 		/* Configure Tx completion queue */
 		db = &uc_addr[FBNIC_QUEUE(txq_idx) + FBNIC_QUEUE_TCQ_HEAD];
-		fbnic_ring_init(&qt->cmpl, db, 0, 0);
+		fbnic_ring_init(&qt->cmpl, db, txq_idx, 0);
 
 		/* Update Tx queue index */
 		txt_count--;
@@ -3020,8 +3020,12 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 	fbnic_nv_disable(fbn, nv);
 
 	for (t = 0; t < nv->txt_count + nv->rxt_count; t++) {
-		err = fbnic_wait_queue_idle(fbn, t >= nv->txt_count,
-					    nv->qt[t].sub0.q_idx);
+		bool rx = t >= nv->txt_count;
+
+		/* Completion rings retain the hardware queue index. The sub0
+		 * index is zero for disabled Tx and every Rx triad.
+		 */
+		err = fbnic_wait_queue_idle(fbn, rx, nv->qt[t].cmpl.q_idx);
 		if (err)
 			goto err_restart;
 	}
