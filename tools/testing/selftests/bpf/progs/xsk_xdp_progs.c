@@ -27,11 +27,20 @@ SEC("xdp.frags") int xsk_def_prog(struct xdp_md *xdp)
 
 SEC("xdp.frags") int xsk_xdp_load_bytes(struct xdp_md *xdp)
 {
-	__u32 offset = xdp->data_end - xdp->data;
-	__u8 byte;
+	__u32 len = bpf_xdp_get_buff_len(xdp);
+	__u32 pkt_nb, last, words_to_end;
 
-	if (bpf_xdp_get_buff_len(xdp) > offset &&
-	    bpf_xdp_load_bytes(xdp, offset, &byte, sizeof(byte)))
+	if (len < PKT_HDR_ALIGN + sizeof(last))
+		return XDP_DROP;
+	if (bpf_xdp_load_bytes(xdp, PKT_HDR_ALIGN, &pkt_nb, sizeof(pkt_nb)))
+		return XDP_DROP;
+	if (bpf_xdp_load_bytes(xdp, len - sizeof(last), &last, sizeof(last)))
+		return XDP_DROP;
+
+	pkt_nb = bpf_ntohl(pkt_nb) & 0xffff0000;
+	last = bpf_ntohl(last);
+	words_to_end = (len - PKT_HDR_ALIGN) / sizeof(last) - 1;
+	if (last != (pkt_nb | words_to_end))
 		return XDP_DROP;
 
 	return bpf_redirect_map(&xsk, 0, XDP_DROP);

@@ -538,6 +538,8 @@ static void pkt_stream_pkt_set(struct pkt_stream *pkt_stream, struct pkt *pkt, i
 
 	pkt_set(pkt_stream, pkt, offset, len);
 	pkt_stream->nb_valid_entries += pkt->valid - prev_pkt_valid;
+	if (pkt->valid)
+		pkt_stream->max_pkt_len = max(pkt_stream->max_pkt_len, len);
 }
 
 static u32 pkt_get_buffer_len(struct xsk_umem_info *umem, u32 len)
@@ -2219,10 +2221,20 @@ int testapp_send_receive_unaligned(struct test_spec *test)
 
 int testapp_send_receive_unaligned_mb(struct test_spec *test)
 {
+	struct xsk_xdp_progs *skel_rx = test->ifobj_rx->xdp_progs;
+	struct xsk_xdp_progs *skel_tx = test->ifobj_tx->xdp_progs;
+
+	test_spec_set_xdp_prog(test, skel_rx->progs.xsk_xdp_load_bytes,
+			       skel_tx->progs.xsk_xdp_load_bytes,
+			       skel_rx->maps.xsk, skel_tx->maps.xsk);
 	test->mtu = MAX_ETH_JUMBO_SIZE;
 	test_spec_set_unaligned(test);
-	if (pkt_stream_replace(test, DEFAULT_PKT_CNT, MAX_ETH_JUMBO_SIZE))
+
+	/* Make multi-buffer packets cross a 4K UMEM page boundary. */
+	if (pkt_stream_replace_half(test, MAX_ETH_JUMBO_SIZE,
+				    -XDP_PACKET_HEADROOM - MIN_PKT_SIZE / 2))
 		return TEST_FAILURE;
+
 	return testapp_validate_traffic(test);
 }
 
