@@ -395,7 +395,7 @@ static void nv_cspmu_set_cc_filter(struct arm_cspmu *cspmu,
 {
 	u32 filter = nv_cspmu_event_filter(event);
 
-	writel(filter, cspmu->base0 + PMCCFILTR);
+	writel(filter, cspmu->base0 + PMCCFILTR_32);
 }
 
 static u32 ucf_pmu_event_filter(const struct perf_event *event)
@@ -762,7 +762,7 @@ static void pcie_tgt_pmu_reset_ev_filter(struct arm_cspmu *cspmu,
 	pcie_tgt_pmu_config_addr_filter(cspmu, false, base, mask, idx);
 }
 
-static u32 pcie_tgt_pmu_event_type(const struct perf_event *event)
+static u64 pcie_tgt_pmu_event_type(const struct perf_event *event)
 {
 	return event->attr.config & NV_PCIE_TGT_EV_TYPE_MASK;
 }
