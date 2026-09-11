@@ -408,12 +408,17 @@ void pcc_mbox_free_channel(struct pcc_mbox_chan *pchan)
 		return;
 	pchan_info = chan->con_priv;
 	pcc_mbox_chan = &pchan_info->chan;
+
+	/*
+	 * mbox_free_channel() frees the platform interrupt, so no handler can
+	 * be using SHMEM by the time it is unmapped below.
+	 */
+	mbox_free_channel(chan);
+
 	if (pcc_mbox_chan->shmem) {
 		iounmap(pcc_mbox_chan->shmem);
 		pcc_mbox_chan->shmem = NULL;
 	}
-
-	mbox_free_channel(chan);
 }
 EXPORT_SYMBOL_GPL(pcc_mbox_free_channel);
 
@@ -474,8 +479,10 @@ static int pcc_startup(struct mbox_chan *chan)
 	if (pchan->plat_irq > 0) {
 		irqflags = pcc_chan_plat_irq_can_be_shared(pchan) ?
 						IRQF_SHARED : 0;
-		rc = devm_request_irq(chan->mbox->dev, pchan->plat_irq, pcc_mbox_irq,
-				      irqflags, MBOX_IRQ_NAME, chan);
+		irqflags |= IRQF_ONESHOT;
+		rc = devm_request_threaded_irq(chan->mbox->dev, pchan->plat_irq,
+					       NULL, pcc_mbox_irq, irqflags,
+					       MBOX_IRQ_NAME, chan);
 		if (unlikely(rc)) {
 			dev_err(chan->mbox->dev, "failed to register PCC interrupt %d\n",
 				pchan->plat_irq);
