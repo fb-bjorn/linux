@@ -2162,6 +2162,9 @@ static void fbnic_set_netif_napi(struct fbnic_napi_vector *nv)
 	for (i = 0; i < nv->txt_count; i++) {
 		struct fbnic_q_triad *qt = &nv->qt[i];
 
+		if (qt->sub0.flags & FBNIC_RING_F_DISABLED)
+			continue;
+
 		netif_queue_set_napi(nv->napi.dev, qt->sub0.q_idx,
 				     NETDEV_QUEUE_TYPE_TX, &nv->napi);
 	}
@@ -2182,6 +2185,9 @@ static void fbnic_reset_netif_napi(struct fbnic_napi_vector *nv)
 	/* Disassociate Tx queue from NAPI */
 	for (i = 0; i < nv->txt_count; i++) {
 		struct fbnic_q_triad *qt = &nv->qt[i];
+
+		if (qt->sub0.flags & FBNIC_RING_F_DISABLED)
+			continue;
 
 		netif_queue_set_napi(nv->napi.dev, qt->sub0.q_idx,
 				     NETDEV_QUEUE_TYPE_TX, NULL);
@@ -2977,8 +2983,12 @@ static void __fbnic_nv_restart(struct fbnic_net *fbn,
 	fbnic_wr32(fbd, FBNIC_INTR_SET(nv->v_idx / 32), BIT(nv->v_idx % 32));
 	fbnic_wrfl(fbd);
 
-	for (i = 0; i < nv->txt_count; i++)
-		netif_wake_subqueue(fbn->netdev, nv->qt[i].sub0.q_idx);
+	for (i = 0; i < nv->txt_count; i++) {
+		struct fbnic_ring *ring = &nv->qt[i].sub0;
+
+		if (!(ring->flags & FBNIC_RING_F_DISABLED))
+			netif_wake_subqueue(fbn->netdev, ring->q_idx);
+	}
 	fbnic_dbg_nv_init(nv);
 }
 
@@ -3019,8 +3029,12 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 	napi_disable_locked(&nv->napi);
 	fbnic_nv_irq_disable(nv);
 
-	for (i = 0; i < nv->txt_count; i++)
-		netif_stop_subqueue(dev, nv->qt[i].sub0.q_idx);
+	for (i = 0; i < nv->txt_count; i++) {
+		struct fbnic_ring *ring = &nv->qt[i].sub0;
+
+		if (!(ring->flags & FBNIC_RING_F_DISABLED))
+			netif_stop_subqueue(dev, ring->q_idx);
+	}
 	fbnic_nv_disable(fbn, nv);
 
 	for (t = 0; t < nv->txt_count + nv->rxt_count; t++) {
