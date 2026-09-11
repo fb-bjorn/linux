@@ -174,6 +174,22 @@ static inline bool xsk_buff_add_frag(struct xdp_buff *head,
 	return true;
 }
 
+/* Non-destructive walk of a packet's continuation buffers. The pool list is
+ * authoritative: it holds every buffer with the mapping the pool made for it,
+ * whatever the UMEM's page layout.
+ */
+static inline struct list_head *
+xsk_buff_frag_list(const struct xdp_buff *first)
+{
+	struct xdp_buff_xsk *xskb = container_of(first, struct xdp_buff_xsk,
+						 xdp);
+
+	return &xskb->pool->xskb_list;
+}
+
+#define xsk_buff_for_each_frag(pos, first)				\
+	list_for_each_entry(pos, xsk_buff_frag_list(first), list_node)
+
 static inline struct xdp_buff *xsk_buff_get_frag(const struct xdp_buff *first)
 {
 	struct xdp_buff_xsk *xskb = container_of(first, struct xdp_buff_xsk, xdp);
@@ -477,6 +493,15 @@ static inline bool xsk_buff_add_frag(struct xdp_buff *head,
 {
 	return false;
 }
+
+static inline struct list_head *
+xsk_buff_frag_list(const struct xdp_buff *first)
+{
+	return NULL;
+}
+
+#define xsk_buff_for_each_frag(pos, first)				\
+	for ((pos) = NULL; (pos) && (first); )
 
 static inline struct xdp_buff *xsk_buff_get_frag(const struct xdp_buff *first)
 {
