@@ -4181,6 +4181,27 @@ static const struct bpf_func_proto bpf_xdp_adjust_head_proto = {
 	.arg2_type	= ARG_ANYTHING,
 };
 
+static void *bpf_xdp_frag_address(const struct xdp_buff *xdp,
+				  const skb_frag_t *frag)
+{
+	const struct skb_shared_info *sinfo;
+	struct xdp_buff_xsk *pos;
+	unsigned int index;
+
+	if (xdp->rxq->mem.type != MEM_TYPE_XSK_BUFF_POOL)
+		return skb_frag_address(frag);
+
+	/* An unaligned XSK buffer may span non-contiguous pinned pages. */
+	sinfo = xdp_get_shared_info_from_buff(xdp);
+	index = frag - sinfo->frags;
+	xsk_buff_for_each_frag(pos, xdp) {
+		if (!index--)
+			return pos->xdp.data;
+	}
+
+	return NULL;
+}
+
 void bpf_xdp_copy_buf(struct xdp_buff *xdp, unsigned long off,
 		      void *buf, unsigned long len, bool flush)
 {
@@ -4222,7 +4243,7 @@ void bpf_xdp_copy_buf(struct xdp_buff *xdp, unsigned long off,
 			break;
 
 		ptr_off += ptr_len;
-		ptr_buf = skb_frag_address(next_frag);
+		ptr_buf = bpf_xdp_frag_address(xdp, next_frag);
 		ptr_len = skb_frag_size(next_frag);
 		next_frag++;
 	}
@@ -4250,7 +4271,7 @@ void *bpf_xdp_pointer(struct xdp_buff *xdp, u32 offset, u32 len)
 		u32 frag_size = skb_frag_size(&sinfo->frags[i]);
 
 		if  (offset < frag_size) {
-			addr = skb_frag_address(&sinfo->frags[i]);
+			addr = bpf_xdp_frag_address(xdp, &sinfo->frags[i]);
 			size = frag_size;
 			break;
 		}
@@ -4340,7 +4361,8 @@ static int bpf_xdp_frags_increase_tail(struct xdp_buff *xdp, int offset)
 	if (unlikely(offset > tailroom))
 		return -EINVAL;
 
-	memset(skb_frag_address(frag) + skb_frag_size(frag), 0, offset);
+	memset(bpf_xdp_frag_address(xdp, frag) + skb_frag_size(frag), 0,
+	       offset);
 	skb_frag_size_add(frag, offset);
 	sinfo->xdp_frags_size += offset;
 	if (rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL)
@@ -12686,7 +12708,14 @@ __bpf_kfunc int bpf_xdp_pull_data(struct xdp_md *x, u32 len)
 		skb_frag_t *frag = &sinfo->frags[i];
 		u32 shrink = min_t(u32, delta, skb_frag_size(frag));
 
-		memcpy(xdp->data_end, skb_frag_address(frag), shrink);
+		/* Fully consumed XSK frags are removed as this loop advances,
+		 * leaving the current source at the head of the pool list.
+		 */
+		if (xdp->rxq->mem.type == MEM_TYPE_XSK_BUFF_POOL)
+			memcpy(xdp->data_end, xsk_buff_get_head(xdp)->data,
+			       shrink);
+		else
+			memcpy(xdp->data_end, skb_frag_address(frag), shrink);
 
 		xdp->data_end += shrink;
 		sinfo->xdp_frags_size -= shrink;
