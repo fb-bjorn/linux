@@ -64,25 +64,8 @@ void btrfs_free_extent_map(struct extent_map *em)
 	if (!em)
 		return;
 	if (refcount_dec_and_test(&em->refs)) {
-		/*
-		 * DEBUG: an extent_map must be off the rb-tree and off all lists
-		 * before its last reference is dropped. If it isn't, someone freed
-		 * it (or over-put its refcount) while it was still linked, which
-		 * later corrupts the inode's modified_extents list and hangs the
-		 * tree-log drain (RCU stall). Trap here, *before* kmem_cache_free()
-		 * recycles the object, so the crash dump captures the offending
-		 * map intact, the freeing thread's stack, and every other CPU's
-		 * state (the racing actor). Dump first so the details reach
-		 * dmesg/netconsole even if kdump is truncated.
-		 *
-		 * This is a diagnostic-only BUG() (do not send upstream).
-		 */
-		if (unlikely(btrfs_extent_map_in_tree(em) ||
-			     !list_empty(&em->list))) {
-			btrfs_dump_extent_map(em,
-				"freed while still in tree or on a list");
-			BUG();
-		}
+		EM_WARN_ON_ONCE(btrfs_extent_map_in_tree(em), em);
+		EM_WARN_ON_ONCE(!list_empty(&em->list), em);
 		kmem_cache_free(extent_map_cache, em);
 	}
 }
