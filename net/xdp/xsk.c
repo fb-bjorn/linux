@@ -474,12 +474,17 @@ int xsk_generic_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 	int err;
 
 	err = xsk_rcv_check(xs, xdp, len);
-	if (!err) {
-		spin_lock_bh(&xs->pool->rx_lock);
-		err = __xsk_rcv(xs, xdp, len);
-		xsk_flush(xs);
+	if (err)
+		return err;
+	spin_lock_bh(&xs->pool->rx_lock);
+	if (unlikely(READ_ONCE(xs->pool->pp))) {
+		xs->rx_dropped++;
 		spin_unlock_bh(&xs->pool->rx_lock);
+		return -EOPNOTSUPP;
 	}
+	err = __xsk_rcv(xs, xdp, len);
+	xsk_flush(xs);
+	spin_unlock_bh(&xs->pool->rx_lock);
 
 	return err;
 }
