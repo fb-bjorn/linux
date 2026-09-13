@@ -3462,12 +3462,16 @@ poll_done:
 }
 
 static void bnxt_free_one_tx_ring_skbs(struct bnxt *bp,
-				       struct bnxt_tx_ring_info *txr, int idx)
+				       struct bnxt_tx_ring_info *txr)
 {
-	int i, max_idx;
 	struct pci_dev *pdev = bp->pdev;
 	unsigned int dma_len;
 	dma_addr_t dma_addr;
+	bool xdp_ring;
+	int i, max_idx;
+
+	xdp_ring = (txr->bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		   txr == txr->bnapi->tx_ring[0];
 
 	max_idx = bp->tx_nr_pages * TX_DESC_CNT;
 
@@ -3477,8 +3481,7 @@ static void bnxt_free_one_tx_ring_skbs(struct bnxt *bp,
 		struct sk_buff *skb;
 		int j, last;
 
-		if (idx  < bp->tx_nr_rings_xdp &&
-		    tx_buf->action == XDP_REDIRECT) {
+		if (xdp_ring && tx_buf->action == XDP_REDIRECT) {
 			dma_addr = dma_unmap_addr(tx_buf, mapping);
 			dma_len = dma_unmap_len(tx_buf, len);
 
@@ -3543,7 +3546,12 @@ static void bnxt_free_one_tx_ring_skbs(struct bnxt *bp,
 		if (skb)
 			dev_kfree_skb(skb);
 	}
-	netdev_tx_reset_queue(netdev_get_tx_queue(bp->dev, idx));
+	if (!xdp_ring) {
+		struct netdev_queue *txq;
+
+		txq = netdev_get_tx_queue(bp->dev, txr->txq_index);
+		netdev_tx_reset_queue(txq);
+	}
 }
 
 static void bnxt_free_tx_skbs(struct bnxt *bp)
@@ -3559,7 +3567,7 @@ static void bnxt_free_tx_skbs(struct bnxt *bp)
 		if (!txr->tx_buf_ring)
 			continue;
 
-		bnxt_free_one_tx_ring_skbs(bp, txr, i);
+		bnxt_free_one_tx_ring_skbs(bp, txr);
 	}
 
 	if (bp->ptp_cfg && !(bp->fw_cap & BNXT_FW_CAP_TX_TS_CMP))
@@ -11793,7 +11801,7 @@ static void bnxt_tx_queue_stop(struct bnxt *bp, int idx)
 
 		bnxt_hwrm_tx_ring_free(bp, txr, true);
 		bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
-		bnxt_free_one_tx_ring_skbs(bp, txr, txr->txq_index);
+		bnxt_free_one_tx_ring_skbs(bp, txr);
 		bnxt_clear_one_cp_ring(bp, txr->tx_cpr);
 	}
 }
