@@ -1821,6 +1821,7 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 {
 	struct kernfs_node *old_parent;
 	const char *dup_name = NULL;
+	const char *put_name = NULL;
 	struct kernfs_root *root;
 	const char *old_name;
 	bool reparent;
@@ -1902,12 +1903,14 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 	kernfs_link_sibling(kn);
 
 	if (new_name && !is_kernel_rodata((unsigned long)old_name))
-		kfree_rcu_mightsleep(old_name);
+		put_name = old_name;
 
 	error = 0;
  out:
 	up_write(&root->kernfs_rwsem);
 	kfree_const(dup_name);
+	if (put_name)
+		kfree_rcu_mightsleep(put_name);
 	return error;
 }
 
