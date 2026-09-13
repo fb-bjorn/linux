@@ -4429,6 +4429,9 @@ static void bnxt_reset_rx_ring_struct(struct bnxt *bp,
 	rxr->head_pool->p.napi = NULL;
 	rxr->head_pool = NULL;
 	memset(&rxr->xdp_rxq, 0, sizeof(struct xdp_rxq_info));
+	rxr->rx_tpa = NULL;
+	rxr->rx_tpa_idx_map = NULL;
+	rxr->rx_agg_bmap = NULL;
 
 	ring = &rxr->rx_ring_struct;
 	rmem = &ring->ring_mem;
@@ -7482,7 +7485,8 @@ static int bnxt_hwrm_rx_ring_alloc(struct bnxt *bp,
 }
 
 static int bnxt_hwrm_rx_agg_ring_alloc(struct bnxt *bp,
-				       struct bnxt_rx_ring_info *rxr)
+				       struct bnxt_rx_ring_info *rxr,
+				       bool doorbell)
 {
 	struct bnxt_ring_struct *ring = &rxr->rx_agg_ring_struct;
 	u32 type = HWRM_RING_ALLOC_AGG;
@@ -7497,8 +7501,10 @@ static int bnxt_hwrm_rx_agg_ring_alloc(struct bnxt *bp,
 
 	bnxt_set_db(bp, &rxr->rx_agg_db, type, map_idx,
 		    ring->fw_ring_id);
-	bnxt_db_write(bp, &rxr->rx_agg_db, rxr->rx_agg_prod);
-	bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
+	if (doorbell) {
+		bnxt_db_write(bp, &rxr->rx_agg_db, rxr->rx_agg_prod);
+		bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
+	}
 	bp->grp_info[grp_idx].agg_fw_ring_id = ring->fw_ring_id;
 
 	return 0;
@@ -7604,7 +7610,8 @@ static int bnxt_hwrm_ring_alloc(struct bnxt *bp)
 
 	if (agg_rings) {
 		for (i = 0; i < bp->rx_nr_rings; i++) {
-			rc = bnxt_hwrm_rx_agg_ring_alloc(bp, &bp->rx_ring[i]);
+			rc = bnxt_hwrm_rx_agg_ring_alloc(bp, &bp->rx_ring[i],
+							 true);
 			if (rc)
 				goto err_out;
 		}
@@ -7676,8 +7683,8 @@ static void bnxt_hwrm_tx_ring_free(struct bnxt *bp,
 	if (ring->fw_ring_id == INVALID_HW_RING_ID)
 		return;
 
-	cmpl_ring_id = close_path ? bnxt_cp_ring_for_tx(bp, txr) :
-		       INVALID_HW_RING_ID;
+	cmpl_ring_id = close_path && !txr->bnapi->in_queue_restart ?
+		       bnxt_cp_ring_for_tx(bp, txr) : INVALID_HW_RING_ID;
 	hwrm_ring_free_send_msg(bp, ring, RING_FREE_REQ_RING_TYPE_TX,
 				cmpl_ring_id);
 	ring->fw_ring_id = INVALID_HW_RING_ID;
@@ -12143,6 +12150,8 @@ static void bnxt_disable_napi(struct bnxt *bp)
 			cpr->sw_stats->tx.tx_resets++;
 		if (bnapi->in_reset)
 			cpr->sw_stats->rx.rx_resets++;
+		if (bnapi->in_queue_restart)
+			continue;
 		napi_disable_locked(&bnapi->napi);
 	}
 }
@@ -12157,6 +12166,7 @@ static void bnxt_enable_napi(struct bnxt *bp)
 		struct bnxt_cp_ring_info *cpr;
 
 		bnapi->tx_fault = 0;
+		bnapi->in_queue_restart = false;
 
 		cpr = &bnapi->cp_ring;
 		bnapi->in_reset = false;
@@ -16383,6 +16393,9 @@ static int bnxt_queue_mem_alloc(struct net_device *dev,
 		return -ENETDOWN;
 
 	rxr = &bp->rx_ring[idx];
+	if (!rxr->page_pool)
+		return -EIO;
+
 	clone = qmem;
 	memcpy(clone, rxr, sizeof(*rxr));
 	bnxt_init_rx_ring_struct(bp, clone);
@@ -16595,23 +16608,9 @@ static int bnxt_queue_start(struct net_device *dev,
 			goto err_reset;
 	}
 
-	rc = bnxt_hwrm_rx_agg_ring_alloc(bp, rxr);
+	rc = bnxt_hwrm_rx_agg_ring_alloc(bp, rxr, false);
 	if (rc)
 		goto err_reset;
-
-	bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
-	if (bp->flags & BNXT_FLAG_AGG_RINGS)
-		bnxt_db_write(bp, &rxr->rx_agg_db, rxr->rx_agg_prod);
-
-	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
-		rc = bnxt_tx_queue_start(bp, idx);
-		if (rc)
-			goto err_reset;
-	}
-
-	bnxt_enable_rx_page_pool(rxr);
-	napi_enable_locked(&bnapi->napi);
-	bnxt_db_nq_arm(bp, &cpr->cp_db, cpr->cp_raw_cons);
 
 	mru = bp->dev->mtu + VLAN_ETH_HLEN;
 	for (i = 0; i < bp->nr_vnics; i++) {
@@ -16619,16 +16618,42 @@ static int bnxt_queue_start(struct net_device *dev,
 
 		rc = bnxt_set_vnic_mru_p5(bp, vnic, mru, idx);
 		if (rc)
-			return rc;
+			goto err_reset;
 	}
-	return bnxt_set_rss_ctx_vnic_mru(bp, mru, idx);
+	rc = bnxt_set_rss_ctx_vnic_mru(bp, mru, idx);
+	if (rc)
+		goto err_reset;
+
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
+		rc = bnxt_tx_queue_start(bp, idx);
+		if (rc)
+			goto err_reset;
+	}
+
+	if (bp->flags & BNXT_FLAG_AGG_RINGS)
+		bnxt_db_write(bp, &rxr->rx_agg_db, rxr->rx_agg_prod);
+	bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
+
+	bnxt_enable_rx_page_pool(rxr);
+	napi_enable_locked(&bnapi->napi);
+	bnapi->in_queue_restart = false;
+	bnxt_db_nq_arm(bp, &cpr->cp_db, cpr->cp_raw_cons);
+	return 0;
 
 err_reset:
 	netdev_err(bp->dev, "Unexpected HWRM error during queue start rc: %d\n",
 		   rc);
-	napi_enable_locked(&bnapi->napi);
-	bnxt_db_nq_arm(bp, &cpr->cp_db, cpr->cp_raw_cons);
-	netif_close(dev);
+	for (i = 0; i < bp->nr_vnics; i++)
+		bnxt_set_vnic_mru_p5(bp, &bp->vnic_info[i], 0, idx);
+	bnxt_set_rss_ctx_vnic_mru(bp, 0, idx);
+	bnxt_hwrm_rx_ring_free(bp, rxr, false);
+	bnxt_hwrm_rx_agg_ring_free(bp, rxr, false);
+	if (bp->tph_mode) {
+		bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
+		bnxt_clear_one_cp_ring(bp, rxr->rx_cpr);
+	}
+	bnxt_reset_rx_ring_struct(bp, rxr);
+	bnxt_queue_sp_work(bp, BNXT_RESET_TASK_SILENT_SP_EVENT);
 	return rc;
 }
 
@@ -16667,6 +16692,7 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 	 * after seeing the completion.
 	 */
 	napi_disable_locked(&bnapi->napi);
+	bnapi->in_queue_restart = true;
 
 	if (bp->tph_mode) {
 		bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
@@ -16676,6 +16702,7 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 
 	memcpy(qmem, rxr, sizeof(*rxr));
 	bnxt_init_rx_ring_struct(bp, qmem);
+	bnxt_reset_rx_ring_struct(bp, rxr);
 
 	return 0;
 }
