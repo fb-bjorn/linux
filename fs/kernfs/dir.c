@@ -1820,6 +1820,7 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 		     const char *new_name, const struct ns_common *new_ns)
 {
 	struct kernfs_node *old_parent;
+	const char *dup_name = NULL;
 	struct kernfs_root *root;
 	const char *old_name;
 	bool reparent;
@@ -1828,6 +1829,9 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 	/* can't move or rename root */
 	if (!rcu_access_pointer(kn->__parent))
 		return -EINVAL;
+
+	if (new_name)
+		dup_name = kstrdup_const(new_name, GFP_KERNEL);
 
 	root = kernfs_root(kn);
 	down_write(&root->kernfs_rwsem);
@@ -1860,9 +1864,10 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 	/* rename kernfs_node */
 	if (strcmp(old_name, new_name) != 0) {
 		error = -ENOMEM;
-		new_name = kstrdup_const(new_name, GFP_KERNEL);
-		if (!new_name)
+		if (!dup_name)
 			goto out;
+		new_name = dup_name;
+		dup_name = NULL;
 	} else {
 		new_name = NULL;
 	}
@@ -1902,6 +1907,7 @@ int kernfs_rename_ns(struct kernfs_node *kn, struct kernfs_node *new_parent,
 	error = 0;
  out:
 	up_write(&root->kernfs_rwsem);
+	kfree_const(dup_name);
 	return error;
 }
 
