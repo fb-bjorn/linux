@@ -11800,22 +11800,24 @@ static int bnxt_tx_queue_start(struct bnxt *bp, int idx)
 	 */
 	bnxt_for_each_napi_tx(i, bnapi, txr) {
 		if (!bp->tph_mode)
-			goto start_tx;
+			continue;
 
 		rc = bnxt_hwrm_cp_ring_alloc_p5(bp, txr->tx_cpr);
 		if (rc)
-			return rc;
+			goto err_free_rings;
 
 		rc = bnxt_hwrm_tx_ring_alloc(bp, txr, false);
 		if (rc)
-			return rc;
+			goto err_free_rings;
 
 		txr->tx_prod = 0;
 		txr->tx_cons = 0;
 		txr->tx_hw_cons = 0;
 		txr->kick_pending = 0;
 		txr->kick_txbd0 = NULL;
-start_tx:
+	}
+
+	bnxt_for_each_napi_tx(i, bnapi, txr) {
 		WRITE_ONCE(txr->dev_state, 0);
 		synchronize_net();
 
@@ -11828,6 +11830,17 @@ start_tx:
 	}
 
 	return 0;
+
+err_free_rings:
+	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if (!bp->tph_mode)
+			continue;
+
+		bnxt_hwrm_tx_ring_free(bp, txr, false);
+		bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
+		bnxt_clear_one_cp_ring(bp, txr->tx_cpr);
+	}
+	return rc;
 }
 
 static void bnxt_irq_affinity_notify(struct irq_affinity_notify *notify,
