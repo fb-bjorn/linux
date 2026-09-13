@@ -1252,6 +1252,7 @@ struct bnxt_napi {
 #define BNXT_NAPI_FLAG_XDP	0x1
 
 	bool			in_reset;
+	bool			in_queue_restart;
 };
 
 /* "TxRx", 2 hypens, plus maximum integer */
