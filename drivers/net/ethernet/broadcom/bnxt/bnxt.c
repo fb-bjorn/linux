@@ -11772,6 +11772,10 @@ static void bnxt_tx_queue_stop(struct bnxt *bp, int idx)
 
 	bnapi = bp->bnapi[idx];
 	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		    txr == bnapi->tx_ring[0])
+			continue;
+
 		WRITE_ONCE(txr->dev_state, BNXT_DEV_STATE_CLOSING);
 		synchronize_net();
 
@@ -11806,6 +11810,10 @@ static int bnxt_tx_queue_start(struct bnxt *bp, int idx)
 	 * Reallocating with the same parameters should never fail.
 	 */
 	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		    txr == bnapi->tx_ring[0])
+			continue;
+
 		if (!bp->tph_mode)
 			continue;
 
@@ -11840,6 +11848,10 @@ static int bnxt_tx_queue_start(struct bnxt *bp, int idx)
 
 err_free_rings:
 	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		    txr == bnapi->tx_ring[0])
+			continue;
+
 		if (!bp->tph_mode)
 			continue;
 
@@ -16657,6 +16669,35 @@ err_reset:
 	return rc;
 }
 
+static int bnxt_xdp_tx_queue_quiesce(struct bnxt *bp, int idx)
+{
+	struct bnxt_napi *bnapi = bp->bnapi[idx];
+	struct bnxt_tx_ring_info *txr;
+	unsigned long timeout;
+
+	if (!(bp->flags & BNXT_FLAG_SHARED_RINGS) ||
+	    !(bnapi->flags & BNXT_NAPI_FLAG_XDP))
+		return 0;
+
+	txr = bnapi->tx_ring[0];
+	WRITE_ONCE(txr->dev_state, BNXT_DEV_STATE_CLOSING);
+	synchronize_net();
+	timeout = jiffies + msecs_to_jiffies(100);
+
+	while (READ_ONCE(txr->tx_cons) != READ_ONCE(txr->tx_prod)) {
+		if (time_after_eq(jiffies, timeout)) {
+			WRITE_ONCE(txr->dev_state, 0);
+			synchronize_net();
+			return -EBUSY;
+		}
+		if (!napi_if_scheduled_mark_missed(&bnapi->napi))
+			napi_schedule(&bnapi->napi);
+		usleep_range(1000, 2000);
+	}
+
+	return 0;
+}
+
 static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 {
 	struct bnxt *bp = netdev_priv(dev);
@@ -16664,7 +16705,11 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 	struct bnxt_cp_ring_info *cpr;
 	struct bnxt_vnic_info *vnic;
 	struct bnxt_napi *bnapi;
-	int i;
+	int i, rc;
+
+	rc = bnxt_xdp_tx_queue_quiesce(bp, idx);
+	if (rc)
+		return rc;
 
 	for (i = 0; i < bp->nr_vnics; i++) {
 		vnic = &bp->vnic_info[i];

@@ -266,6 +266,13 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		return false;
 
 	case XDP_TX:
+		if (unlikely(READ_ONCE(txr->dev_state) ==
+			     BNXT_DEV_STATE_CLOSING)) {
+			trace_xdp_exception(bp->dev, xdp_prog, act);
+			bnxt_xdp_buff_frags_free(rxr, xdp);
+			bnxt_reuse_rx_data(rxr, cons, page);
+			return true;
+		}
 		rx_buf = &rxr->rx_buf_ring[cons];
 		mapping = rx_buf->mapping - bp->rx_dma_offset;
 
