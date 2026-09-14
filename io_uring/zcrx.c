@@ -1175,9 +1175,10 @@ static unsigned io_zcrx_refill_slow(struct page_pool *pp, struct io_zcrx_ifq *if
 
 		if (!niov)
 			break;
-		net_mp_niov_set_page_pool(pp, niov);
 		netmems[allocated] = net_iov_to_netmem(niov);
 	}
+	if (allocated)
+		net_mp_netmem_set_page_pool_bulk(pp, netmems, allocated);
 	return allocated;
 }
 
@@ -1335,7 +1336,7 @@ static const struct memory_provider_ops io_uring_pp_zc_ops = {
 	.destroy		= io_pp_zc_destroy,
 	.nl_fill		= io_pp_nl_fill,
 	.uninstall		= io_pp_uninstall,
-	.caps			= MP_CAP_LEASE,
+	.caps			= MP_CAP_LEASE | MP_CAP_FRAG,
 };
 
 static unsigned zcrx_parse_rq(netmem_ref *netmem_array, unsigned nr,
