@@ -88,6 +88,9 @@ MODULE_DESCRIPTION("Broadcom NetXtreme network driver");
 #define BNXT_RX_OFFSET (NET_SKB_PAD + NET_IP_ALIGN)
 #define BNXT_RX_DMA_OFFSET NET_SKB_PAD
 
+static bool bnxt_xsk_rx_refill(struct bnxt *bp,
+			       struct bnxt_rx_ring_info *rxr);
+
 #define BNXT_TX_PUSH_THRESH 164
 
 /* indexed by enum board_idx */
@@ -959,11 +962,14 @@ static bool bnxt_separate_head_pool(struct bnxt_rx_ring_info *rxr)
 }
 
 static void bnxt_set_rx_buf_params(struct bnxt *bp,
-				   struct bnxt_rx_ring_info *rxr)
+				   struct bnxt_rx_ring_info *rxr,
+				   unsigned int queue_id)
 {
+	struct xsk_buff_pool *pool = bnxt_xsk_pool(bp, queue_id);
+	u32 headroom;
+
 	rxr->rx_buf_use_size = bp->rx_buf_use_size;
 	rxr->xdp_frame_size = rxr->rx_page_size;
-
 	if (BNXT_RX_PAGE_MODE(bp)) {
 		rxr->rx_offset = NET_IP_ALIGN + XDP_PACKET_HEADROOM;
 		rxr->rx_dma_offset = XDP_PACKET_HEADROOM;
@@ -973,6 +979,17 @@ static void bnxt_set_rx_buf_params(struct bnxt *bp,
 		rxr->rx_dma_offset = BNXT_RX_DMA_OFFSET;
 		rxr->xdp_headroom = BNXT_RX_OFFSET;
 	}
+	rxr->xsk_pool = pool;
+	if (!pool)
+		return;
+
+	headroom = rxr->rx_mp_headroom;
+	rxr->rx_buf_use_size = bnxt_xsk_rx_size(pool);
+	rxr->xdp_frame_size = xsk_pool_get_chunk_size(pool) -
+				  (headroom - XDP_PACKET_HEADROOM);
+	rxr->rx_dma_offset = headroom - NET_IP_ALIGN;
+	rxr->xdp_headroom = XDP_PACKET_HEADROOM;
+	rxr->rx_offset = headroom;
 }
 
 static netmem_ref __bnxt_alloc_rx_netmem(struct bnxt *bp, dma_addr_t *mapping,
@@ -1396,7 +1413,12 @@ static u32 __bnxt_rx_agg_netmems(struct bnxt *bp,
 		if (xdp && netmem_is_pfmemalloc(netmem))
 			xdp_buff_set_frag_pfmemalloc(xdp);
 
-		if (bnxt_alloc_rx_netmem(bp, rxr, prod, GFP_ATOMIC) != 0) {
+		if (bnxt_alloc_rx_netmem(bp, rxr, prod, GFP_ATOMIC) == 0) {
+			prod = NEXT_RX_AGG(prod);
+		} else if (rxr->xsk_pool) {
+			/* Deliver with an empty FILL ring; refill later. */
+			WRITE_ONCE(rxr->xsk_rx_starved, true);
+		} else {
 			if (skb) {
 				skb->len -= frag_len;
 				skb->data_len -= frag_len;
@@ -1418,7 +1440,6 @@ static u32 __bnxt_rx_agg_netmems(struct bnxt *bp,
 						  rxr->rx_page_size);
 
 		total_frag_len += frag_len;
-		prod = NEXT_RX_AGG(prod);
 	}
 	rxr->rx_agg_prod = prod;
 	return total_frag_len;
@@ -1533,6 +1554,27 @@ static struct sk_buff *bnxt_copy_xdp(struct bnxt_napi *bnapi,
 		skb_metadata_set(skb, metasize);
 		__skb_pull(skb, metasize);
 	}
+
+	return skb;
+}
+
+static struct sk_buff *
+bnxt_build_skb_from_provider(struct bnxt *bp,
+			     struct bnxt_rx_ring_info *rxr,
+			     struct xdp_buff *xdp, enum bnxt_rx_slot *slot)
+{
+	struct sk_buff *skb;
+
+	/* The copy releases the UMEM buffer at once. With an empty FILL ring,
+	 * deliver anyway and refill the slot later; dropping would keep
+	 * userspace from ever returning frames.
+	 */
+	if (bnxt_alloc_rx_data(bp, rxr, rxr->rx_prod, GFP_ATOMIC))
+		*slot = BNXT_RX_SLOT_EMPTY;
+
+	skb = xdp_build_skb_from_buff(xdp);
+	if (!skb)
+		xdp_return_buff(xdp);
 
 	return skb;
 }
@@ -2193,8 +2235,9 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 	struct bpf_prog *xdp_prog;
 	struct bnxt_sw_rx_bd *rx_buf;
 	unsigned int len;
+	enum bnxt_rx_slot slot = BNXT_RX_SLOT_FILLED;
 	u8 *data_ptr, agg_bufs, cmp_type;
-	bool xdp_active = false;
+	bool xdp_active = false, provider = false, provider_pass = false;
 	dma_addr_t dma_addr;
 	netmem_ref netmem = 0;
 	struct sk_buff *skb;
@@ -2269,7 +2312,8 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 	rx_buf = &rxr->rx_buf_ring[cons];
 	if (BNXT_RX_PAGE_MODE(bp)) {
 		netmem = rx_buf->netmem;
-		data = netmem_to_page(netmem);
+		provider = netmem_is_net_iov(netmem);
+		data = provider ? NULL : netmem_to_page(netmem);
 	} else {
 		data = rx_buf->data;
 	}
@@ -2321,7 +2365,7 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 	dma_addr = rx_buf->mapping;
 	xdp_prog = READ_ONCE(rxr->xdp_prog);
 
-	if (xdp_prog) {
+	if (xdp_prog || provider) {
 		bnxt_xdp.rxcmp = rxcmp;
 		bnxt_xdp.rxcmp1 = rxcmp1;
 		bnxt_xdp.cmp_type = cmp_type;
@@ -2346,7 +2390,7 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 
 	if (xdp_active) {
 		if (bnxt_rx_xdp(bp, rxr, cons, &bnxt_xdp.xdp, xdp_prog,
-				netmem, &data_ptr, &len, event)) {
+				netmem, &data_ptr, &len, event, &slot)) {
 			rc = 1;
 			goto next_rx;
 		}
@@ -2356,6 +2400,17 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 		} else {
 			agg_bufs = 0;
 		}
+	}
+
+	if (provider) {
+		skb = bnxt_build_skb_from_provider(bp, rxr, &bnxt_xdp.xdp,
+						   &slot);
+		if (!skb)
+			goto oom_next_rx;
+
+		agg_bufs = 0;
+		provider_pass = true;
+		goto skb_ready;
 	}
 
 	if (len <= bp->rx_copybreak) {
@@ -2409,6 +2464,8 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 		}
 	}
 
+skb_ready:
+
 	if (RX_CMP_HASH_VALID(rxcmp)) {
 		enum pkt_hash_types type;
 
@@ -2428,7 +2485,12 @@ static int bnxt_rx_pkt(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 
 	if (cmp_type == CMP_TYPE_RX_L2_CMP)
 		dev = bnxt_get_pkt_dev(bp, RX_CMP_CFA_CODE(rxcmp1));
-	skb->protocol = eth_type_trans(skb, dev);
+	if (!provider_pass) {
+		skb->protocol = eth_type_trans(skb, dev);
+	} else if (skb->dev != dev) {
+		skb_push(skb, ETH_HLEN);
+		skb->protocol = eth_type_trans(skb, dev);
+	}
 
 	if (skb->dev->features & BNXT_HW_FEATURE_VLAN_ALL_RX) {
 		skb = bnxt_rx_vlan(skb, cmp_type, rxcmp, rxcmp1);
@@ -2471,7 +2533,10 @@ next_rx:
 	cpr->rx_bytes += len;
 
 next_rx_no_len:
-	rxr->rx_prod = NEXT_RX(prod);
+	if (likely(slot == BNXT_RX_SLOT_FILLED))
+		rxr->rx_prod = NEXT_RX(prod);
+	else
+		WRITE_ONCE(rxr->xsk_rx_starved, true);
 	rxr->rx_next_cons = RING_RX(bp, NEXT_RX(cons));
 
 next_rx_no_prod_no_len:
@@ -3226,11 +3291,16 @@ static int __bnxt_poll_work(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 	return rx_pkts;
 }
 
-static void __bnxt_poll_work_done(struct bnxt *bp, struct bnxt_napi *bnapi,
+static bool __bnxt_poll_work_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 				  int budget)
 {
+	bool complete = true;
+
 	if ((bnapi->events & BNXT_TX_CMP_EVENT) && !bnapi->tx_fault)
 		bnapi->tx_int(bp, bnapi, budget);
+
+	if (budget && bnapi->rx_ring && !bnapi->in_reset)
+		complete = bnxt_xsk_rx_refill(bp, bnapi->rx_ring);
 
 	if ((bnapi->events & BNXT_RX_EVENT) && !(bnapi->in_reset)) {
 		struct bnxt_rx_ring_info *rxr = bnapi->rx_ring;
@@ -3247,6 +3317,8 @@ static void __bnxt_poll_work_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 		bnxt_db_write(bp, &rxr->rx_agg_db, rxr->rx_agg_prod);
 		bnapi->events &= ~BNXT_AGG_EVENT;
 	}
+
+	return complete;
 }
 
 static int bnxt_poll_work(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
@@ -3263,8 +3335,10 @@ static int bnxt_poll_work(struct bnxt *bp, struct bnxt_cp_ring_info *cpr,
 	 */
 	bnxt_db_cq(bp, &cpr->cp_db, cpr->cp_raw_cons);
 
-	__bnxt_poll_work_done(bp, bnapi, budget);
-	return rx_pkts;
+	if (__bnxt_poll_work_done(bp, bnapi, budget))
+		return rx_pkts;
+
+	return budget;
 }
 
 static int bnxt_poll_nitroa0(struct napi_struct *napi, int budget)
@@ -3398,7 +3472,7 @@ static int __bnxt_poll_cqs(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 	return work_done;
 }
 
-static void __bnxt_poll_cqs_done(struct bnxt *bp, struct bnxt_napi *bnapi,
+static bool __bnxt_poll_cqs_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 				 u64 dbr_type, int budget)
 {
 	struct bnxt_cp_ring_info *cpr = &bnapi->cp_ring;
@@ -3423,7 +3497,7 @@ static void __bnxt_poll_cqs_done(struct bnxt *bp, struct bnxt_napi *bnapi,
 			cpr2->had_work_done = 0;
 		}
 	}
-	__bnxt_poll_work_done(bp, bnapi, budget);
+	return __bnxt_poll_work_done(bp, bnapi, budget);
 }
 
 static int bnxt_poll_p5(struct napi_struct *napi, int budget)
@@ -3452,11 +3526,18 @@ static int bnxt_poll_p5(struct napi_struct *napi, int budget)
 		nqcmp = &cpr->nq_desc_ring[CP_RING(cons)][CP_IDX(cons)];
 
 		if (!NQ_CMP_VALID(nqcmp, raw_cons)) {
+			u64 dbr_type = DBR_TYPE_CQ_ARMALL;
+			bool complete;
+
 			if (cpr->has_more_work)
 				break;
 
-			__bnxt_poll_cqs_done(bp, bnapi, DBR_TYPE_CQ_ARMALL,
-					     budget);
+			complete = __bnxt_poll_cqs_done(bp, bnapi, dbr_type,
+							budget);
+			if (!complete) {
+				work_done = budget;
+				goto db_nq;
+			}
 			cpr->cp_raw_cons = raw_cons;
 			if (napi_complete_done(napi, work_done))
 				BNXT_DB_NQ_ARM_P5(&cpr->cp_db,
@@ -3492,7 +3573,9 @@ static int bnxt_poll_p5(struct napi_struct *napi, int budget)
 		}
 		raw_cons = NEXT_RAW_CMP(raw_cons);
 	}
-	__bnxt_poll_cqs_done(bp, bnapi, DBR_TYPE_CQ, budget);
+	if (!__bnxt_poll_cqs_done(bp, bnapi, DBR_TYPE_CQ, budget))
+		work_done = budget;
+db_nq:
 	if (raw_cons != cpr->cp_raw_cons) {
 		cpr->cp_raw_cons = raw_cons;
 		BNXT_DB_NQ_P5(&cpr->cp_db, raw_cons);
@@ -4482,6 +4565,8 @@ static void bnxt_reset_rx_ring_struct(struct bnxt *bp,
 	rxr->rx_tpa = NULL;
 	rxr->rx_tpa_idx_map = NULL;
 	rxr->rx_agg_bmap = NULL;
+	rxr->xsk_pool = NULL;
+	rxr->xsk_rx_starved = false;
 
 	ring = &rxr->rx_ring_struct;
 	rmem = &ring->ring_mem;
@@ -4535,7 +4620,8 @@ static void bnxt_init_ring_struct(struct bnxt *bp)
 
 		netdev_queue_config(bp->dev, i, &qcfg);
 		rxr->rx_page_size = qcfg.rx_page_size;
-		bnxt_set_rx_buf_params(bp, rxr);
+		rxr->rx_mp_headroom = qcfg.rx_headroom;
+		bnxt_set_rx_buf_params(bp, rxr, i);
 
 		ring = &rxr->rx_ring_struct;
 		rmem = &ring->ring_mem;
@@ -4631,6 +4717,75 @@ static void bnxt_alloc_one_rx_ring_netmem(struct bnxt *bp,
 	rxr->rx_agg_prod = prod;
 }
 
+static bool bnxt_fill_xsk_rx_buffers(struct bnxt *bp,
+				     struct bnxt_rx_ring_info *rxr,
+				     gfp_t gfp)
+{
+	unsigned int agg_fill, agg_used, rx_used;
+	u16 agg_prod = rxr->rx_agg_prod;
+	u16 rx_prod = rxr->rx_prod;
+	bool progress;
+
+	rx_used = (rx_prod - rxr->rx_next_cons) & bp->rx_ring_mask;
+	agg_fill = 0;
+	agg_used = 0;
+	if (bp->flags & BNXT_FLAG_AGG_RINGS &&
+	    xsk_pool_uses_sg(rxr->xsk_pool)) {
+		agg_fill = bnxt_rx_agg_ring_fill_level(bp, rxr);
+		agg_used = bitmap_weight(rxr->rx_agg_bmap,
+					 rxr->rx_agg_bmap_size);
+	}
+
+	do {
+		progress = false;
+		if (rx_used < bp->rx_ring_size &&
+		    !bnxt_alloc_rx_data(bp, rxr, rx_prod, gfp)) {
+			rx_prod = NEXT_RX(rx_prod);
+			rx_used++;
+			progress = true;
+		}
+
+		if (agg_used < agg_fill &&
+		    !bnxt_alloc_rx_netmem(bp, rxr, agg_prod, gfp)) {
+			agg_prod = NEXT_RX_AGG(agg_prod);
+			agg_used++;
+			progress = true;
+		}
+	} while (progress &&
+		 (rx_used < bp->rx_ring_size || agg_used < agg_fill));
+
+	rxr->rx_prod = rx_prod;
+	rxr->rx_agg_prod = agg_prod;
+	rxr->xsk_rx_starved = rx_used < bp->rx_ring_size ||
+				agg_used < agg_fill;
+
+	return page_pool_refill_done(rxr->page_pool, !rxr->xsk_rx_starved);
+}
+
+static bool bnxt_xsk_rx_refill(struct bnxt *bp,
+			       struct bnxt_rx_ring_info *rxr)
+{
+	struct xsk_buff_pool *pool = READ_ONCE(rxr->xsk_pool);
+	u16 agg_prod, rx_prod;
+	bool complete;
+
+	if (!pool)
+		return true;
+	if (!READ_ONCE(rxr->xsk_rx_starved))
+		return page_pool_refill_done(rxr->page_pool, true);
+
+	rx_prod = rxr->rx_prod;
+	agg_prod = rxr->rx_agg_prod;
+	complete = bnxt_fill_xsk_rx_buffers(bp, rxr, GFP_ATOMIC);
+
+	if (rx_prod != rxr->rx_prod)
+		rxr->bnapi->events |= BNXT_RX_EVENT;
+	if (agg_prod != rxr->rx_agg_prod)
+		rxr->bnapi->events |= BNXT_AGG_EVENT;
+
+	return complete;
+}
+
 static int bnxt_alloc_one_tpa_info_data(struct bnxt *bp,
 					struct bnxt_rx_ring_info *rxr)
 {
@@ -4656,6 +4811,11 @@ static int bnxt_alloc_one_rx_ring(struct bnxt *bp, int ring_nr)
 {
 	struct bnxt_rx_ring_info *rxr = &bp->rx_ring[ring_nr];
 	int rc;
+
+	if (rxr->xsk_pool) {
+		bnxt_fill_xsk_rx_buffers(bp, rxr, GFP_KERNEL);
+		return 0;
+	}
 
 	bnxt_alloc_one_rx_ring_skb(bp, rxr, ring_nr);
 
@@ -4720,7 +4880,7 @@ static int bnxt_init_one_rx_ring(struct bnxt *bp, int ring_nr)
 	struct bnxt_rx_ring_info *rxr;
 
 	rxr = &bp->rx_ring[ring_nr];
-	bnxt_set_rx_buf_params(bp, rxr);
+	bnxt_set_rx_buf_params(bp, rxr, ring_nr);
 	bnxt_init_one_rx_ring_rxbd(bp, rxr);
 
 	netif_queue_set_napi(bp->dev, ring_nr, NETDEV_QUEUE_TYPE_RX,
@@ -4975,7 +5135,8 @@ void bnxt_set_ring_params(struct bnxt *bp)
 		agg_factor = min_t(u32, 4, 65536 / BNXT_RX_PAGE_SIZE);
 
 	bp->flags &= ~BNXT_FLAG_JUMBO;
-	if (rx_space > PAGE_SIZE && !(bp->flags & BNXT_FLAG_NO_AGG_RINGS)) {
+	if ((rx_space > PAGE_SIZE || bp->flags & BNXT_FLAG_XSK) &&
+	    !(bp->flags & BNXT_FLAG_NO_AGG_RINGS)) {
 		u32 jumbo_factor;
 
 		bp->flags |= BNXT_FLAG_JUMBO;
@@ -5056,17 +5217,20 @@ void bnxt_set_ring_params(struct bnxt *bp)
 static void __bnxt_set_rx_skb_mode(struct bnxt *bp, bool page_mode)
 {
 	struct net_device *dev = bp->dev;
+	bool xdp_frags;
 
 	if (page_mode) {
+		xdp_frags = !bp->xdp_prog || bp->xdp_prog->aux->xdp_has_frags;
 		bp->flags &= ~(BNXT_FLAG_AGG_RINGS | BNXT_FLAG_NO_AGG_RINGS);
 		bp->flags |= BNXT_FLAG_RX_PAGE_MODE;
 
-		if (bp->xdp_prog->aux->xdp_has_frags)
+		if (xdp_frags)
 			dev->max_mtu = min_t(u16, bp->max_mtu, BNXT_MAX_MTU);
 		else
 			dev->max_mtu =
 				min_t(u16, bp->max_mtu, BNXT_MAX_PAGE_MODE_MTU);
-		if (dev->mtu > BNXT_MAX_PAGE_MODE_MTU) {
+		if (bp->flags & BNXT_FLAG_XSK ||
+		    dev->mtu > BNXT_MAX_PAGE_MODE_MTU) {
 			bp->flags |= BNXT_FLAG_JUMBO;
 			bp->rx_skb_func = bnxt_rx_multi_page_skb;
 		} else {
@@ -6954,7 +7118,13 @@ static int bnxt_hwrm_vnic_set_hds(struct bnxt *bp, struct bnxt_vnic_info *vnic)
 {
 	u16 hds_thresh = (u16)bp->dev->cfg_pending->hds_thresh;
 	struct hwrm_vnic_plcmodes_cfg_input *req;
+	u32 jumbo_thresh = bp->rx_buf_use_size;
 	int rc;
+	int i;
+
+	for (i = 0; i < bp->rx_nr_rings; i++)
+		jumbo_thresh = min(jumbo_thresh,
+				   bp->rx_ring[i].rx_buf_use_size);
 
 	rc = hwrm_req_init(bp, req, HWRM_VNIC_PLCMODES_CFG);
 	if (rc)
@@ -6962,7 +7132,7 @@ static int bnxt_hwrm_vnic_set_hds(struct bnxt *bp, struct bnxt_vnic_info *vnic)
 
 	req->flags = cpu_to_le32(VNIC_PLCMODES_CFG_REQ_FLAGS_JUMBO_PLACEMENT);
 	req->enables = cpu_to_le32(VNIC_PLCMODES_CFG_REQ_ENABLES_JUMBO_THRESH_VALID);
-	req->jumbo_thresh = cpu_to_le16(bp->rx_buf_use_size);
+	req->jumbo_thresh = cpu_to_le16(jumbo_thresh);
 
 	if (!BNXT_RX_PAGE_MODE(bp) && (bp->flags & BNXT_FLAG_AGG_RINGS)) {
 		req->flags |= cpu_to_le32(VNIC_PLCMODES_CFG_REQ_FLAGS_HDS_IPV4 |
@@ -11254,6 +11424,29 @@ static int bnxt_set_rss_ctx_vnic_mru(struct bnxt *bp, u16 mru, int rxr_id)
 	return 0;
 }
 
+static int bnxt_update_vnic_hds(struct bnxt *bp)
+{
+	struct ethtool_rxfh_context *ctx;
+	unsigned long context;
+	int i, rc;
+
+	for (i = 0; i < bp->nr_vnics; i++) {
+		rc = bnxt_hwrm_vnic_set_hds(bp, &bp->vnic_info[i]);
+		if (rc)
+			return rc;
+	}
+
+	xa_for_each(&bp->dev->ethtool->rss_ctx, context, ctx) {
+		struct bnxt_rss_ctx *rss_ctx = ethtool_rxfh_context_priv(ctx);
+
+		rc = bnxt_hwrm_vnic_set_hds(bp, &rss_ctx->vnic);
+		if (rc)
+			return rc;
+	}
+
+	return 0;
+}
+
 static void bnxt_hwrm_realloc_rss_ctx_vnic(struct bnxt *bp)
 {
 	bool set_tpa = !!(bp->flags & BNXT_FLAG_TPA);
@@ -12255,6 +12448,22 @@ static void bnxt_enable_napi(struct bnxt *bp)
 			cpr->dim.mode = DIM_CQ_PERIOD_MODE_START_FROM_EQE;
 		}
 		napi_enable_locked(&bnapi->napi);
+	}
+}
+
+static void bnxt_xsk_start_rx(struct bnxt *bp)
+{
+	int i;
+
+	for (i = 0; i < bp->rx_nr_rings; i++) {
+		struct bnxt_rx_ring_info *rxr = &bp->rx_ring[i];
+		struct xsk_buff_pool *pool = READ_ONCE(rxr->xsk_pool);
+
+		if (!pool || !READ_ONCE(rxr->xsk_rx_starved) ||
+		    xsk_uses_need_wakeup(pool))
+			continue;
+
+		napi_schedule(&rxr->bnapi->napi);
 	}
 }
 
@@ -13439,6 +13648,7 @@ static int __bnxt_open_nic(struct bnxt *bp, bool irq_re_init, bool link_re_init)
 	}
 	set_bit(BNXT_STATE_OPEN, &bp->state);
 	bnxt_enable_int(bp);
+	bnxt_xsk_start_rx(bp);
 	/* Enable TX queues */
 	bnxt_tx_enable(bp);
 	mod_timer(&bp->timer, jiffies + bp->current_interval);
@@ -14159,7 +14369,7 @@ static netdev_features_t bnxt_fix_features(struct net_device *dev,
 	    bp->tx_ring_size < 2 * BNXT_SW_USO_MAX_DESCS)
 		features &= ~NETIF_F_GSO_UDP_L4;
 
-	if ((bp->flags & BNXT_FLAG_NO_AGG_RINGS) || bp->xdp_prog)
+	if ((bp->flags & BNXT_FLAG_NO_AGG_RINGS) || BNXT_RX_PAGE_MODE(bp))
 		features &= ~(NETIF_F_LRO | NETIF_F_GRO_HW);
 
 	if (!(features & NETIF_F_GRO))
@@ -15282,7 +15492,7 @@ int bnxt_check_rings(struct bnxt *bp, int tx, int rx, bool sh, int tcs,
 	if (max_rx < rx_rings)
 		return -ENOMEM;
 
-	if (bp->flags & BNXT_FLAG_AGG_RINGS)
+	if (bp->flags & (BNXT_FLAG_AGG_RINGS | BNXT_FLAG_XSK))
 		rx_rings <<= 1;
 
 	hwr.rx = rx_rings;
@@ -15997,7 +16207,7 @@ static int bnxt_change_mtu(struct net_device *dev, int new_mtu)
 	 * program is attached.  We need to set the AGG rings settings and
 	 * rx_skb_func accordingly.
 	 */
-	if (READ_ONCE(bp->xdp_prog))
+	if (READ_ONCE(bp->xdp_prog) || bp->flags & BNXT_FLAG_XSK)
 		bnxt_set_rx_skb_mode(bp, true);
 
 	bnxt_set_ring_params(bp);
@@ -16615,10 +16825,11 @@ static int bnxt_queue_mem_alloc(struct net_device *dev,
 	clone->rx_next_cons = 0;
 	clone->need_head_pool = false;
 	clone->rx_page_size = qcfg->rx_page_size;
-	bnxt_set_rx_buf_params(bp, clone);
+	clone->rx_mp_headroom = qcfg->rx_headroom;
 	clone->rx_agg_bmap = NULL;
 	clone->rx_tpa = NULL;
 	clone->rx_tpa_idx_map = NULL;
+	bnxt_set_rx_buf_params(bp, clone, idx);
 
 	rc = bnxt_alloc_rx_page_pool(bp, clone, rxr->page_pool->p.nid);
 	if (rc)
@@ -16659,9 +16870,13 @@ static int bnxt_queue_mem_alloc(struct net_device *dev,
 	bnxt_init_one_rx_ring_rxbd(bp, clone);
 	bnxt_init_one_rx_agg_ring_rxbd(bp, clone);
 
-	bnxt_alloc_one_rx_ring_skb(bp, clone, idx);
-	if (bp->flags & BNXT_FLAG_AGG_RINGS)
-		bnxt_alloc_one_rx_ring_netmem(bp, clone, idx);
+	if (clone->xsk_pool) {
+		bnxt_fill_xsk_rx_buffers(bp, clone, GFP_KERNEL);
+	} else {
+		bnxt_alloc_one_rx_ring_skb(bp, clone, idx);
+		if (bp->flags & BNXT_FLAG_AGG_RINGS)
+			bnxt_alloc_one_rx_ring_netmem(bp, clone, idx);
+	}
 	if (bp->flags & BNXT_FLAG_TPA) {
 		rc = bnxt_alloc_one_tpa_info_data(bp, clone);
 		if (rc)
@@ -16797,6 +17012,7 @@ static int bnxt_queue_start(struct net_device *dev,
 	struct bnxt_vnic_info *vnic;
 	struct bnxt_napi *bnapi;
 	bool alloc_error = false;
+	bool update_hds;
 	int err;
 	int i, rc;
 	u16 mru;
@@ -16809,6 +17025,7 @@ static int bnxt_queue_start(struct net_device *dev,
 
 	rxr = &bp->rx_ring[idx];
 	clone = qmem;
+	update_hds = rxr->rx_buf_use_size != clone->rx_buf_use_size;
 
 	rxr->rx_prod = clone->rx_prod;
 	rxr->rx_agg_prod = clone->rx_agg_prod;
@@ -16822,14 +17039,22 @@ static int bnxt_queue_start(struct net_device *dev,
 	rxr->need_head_pool = clone->need_head_pool;
 	rxr->rx_buf_use_size = clone->rx_buf_use_size;
 	rxr->xdp_frame_size = clone->xdp_frame_size;
-	rxr->rx_offset = clone->rx_offset;
 	rxr->rx_dma_offset = clone->rx_dma_offset;
 	rxr->xdp_headroom = clone->xdp_headroom;
+	rxr->rx_offset = clone->rx_offset;
+	rxr->xsk_rx_starved = clone->xsk_rx_starved;
+	rxr->xsk_pool = clone->xsk_pool;
 
 	bnxt_copy_rx_ring(bp, rxr, clone);
 
 	bnapi = rxr->bnapi;
 	cpr = &bnapi->cp_ring;
+
+	if ((bp->flags & BNXT_FLAG_AGG_RINGS) && update_hds) {
+		rc = bnxt_update_vnic_hds(bp);
+		if (rc)
+			goto err_reset;
+	}
 
 	/* All rings have been reserved and previously allocated.
 	 * Reallocating with the same parameters should never fail.
@@ -17194,7 +17419,7 @@ static void _bnxt_get_max_rings(struct bnxt *bp, int *max_rx, int *max_tx,
 		*max_cp -= 1;
 		*max_rx -= 2;
 	}
-	if (bp->flags & BNXT_FLAG_AGG_RINGS)
+	if (bp->flags & (BNXT_FLAG_AGG_RINGS | BNXT_FLAG_XSK))
 		*max_rx >>= 1;
 	if (bp->flags & BNXT_FLAG_CHIP_P5_PLUS) {
 		int rc;

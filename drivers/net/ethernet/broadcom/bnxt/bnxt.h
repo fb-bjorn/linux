@@ -1133,6 +1133,10 @@ struct bnxt_rx_ring_info {
 	u16			rx_dma_offset;
 	u16			xdp_headroom;
 	bool                    need_head_pool;
+	bool			xsk_rx_starved;
+	struct xsk_buff_pool	*xsk_pool;
+	/* Headroom requested by the queue's memory provider */
+	u32			rx_mp_headroom;
 
 	dma_addr_t		rx_desc_mapping[MAX_RX_PAGES];
 	dma_addr_t		rx_agg_desc_mapping[MAX_RX_AGG_PAGES];
@@ -2293,6 +2297,7 @@ struct bnxt {
 	#define BNXT_FLAG_TPA		(BNXT_FLAG_LRO | BNXT_FLAG_GRO)
 	#define BNXT_FLAG_JUMBO		0x10
 	#define BNXT_FLAG_STRIP_VLAN	0x20
+	#define BNXT_FLAG_XSK		0x40
 	#define BNXT_FLAG_RFS		0x100
 	#define BNXT_FLAG_SHARED_RINGS	0x200
 	#define BNXT_FLAG_PORT_STATS	0x400
