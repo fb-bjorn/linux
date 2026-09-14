@@ -281,10 +281,12 @@ static void run_pkt_test(struct test_spec *test)
 				      test->name);
 		break;
 	case TEST_FAILURE:
+		test->fail = true;
 		ksft_test_result_fail("FAIL: %s %s%s\n", mode_string(test), busy_poll_string(test),
 				      test->name);
 		break;
 	default:
+		test->fail = true;
 		ksft_test_result_fail("FAIL: %s %s%s -- Unexpected returned value (%d)\n",
 				      mode_string(test), busy_poll_string(test), test->name, ret);
 	}
