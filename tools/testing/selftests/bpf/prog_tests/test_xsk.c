@@ -20,6 +20,7 @@
 
 #define DEFAULT_BATCH_SIZE		64
 #define ICE_RX_DESC_GRANULARITY		8
+#define INVALID_FILL_ENTRIES		64
 #define MIN_PKT_SIZE			64
 #define MAX_ETH_JUMBO_SIZE		9000
 #define MAX_INTERFACES			2
@@ -102,6 +103,7 @@ int xsk_configure_umem(struct ifobject *ifobj, struct xsk_umem_info *umem, void 
 		return ret;
 
 	umem->buffer = buffer;
+	umem->size = size;
 	if (ifobj->shared_umem && ifobj->rx_on) {
 		umem->base_addr = umem_size(umem);
 		umem->next_buffer = umem_size(umem);
@@ -1653,10 +1655,18 @@ static int xsk_populate_fill_ring(struct xsk_umem_info *umem, struct pkt_stream 
 		return -ENOSPC;
 
 	while (filled < buffers_to_fill) {
-		struct pkt *pkt = pkt_stream_get_next_rx_pkt(pkt_stream, &nb_pkts);
+		struct pkt *pkt;
 		u64 addr;
 		u32 i;
 
+		if (filled < umem->invalid_fill_entries) {
+			*xsk_ring_prod__fill_addr(&umem->fq, idx++) =
+				umem->size;
+			filled++;
+			continue;
+		}
+
+		pkt = pkt_stream_get_next_rx_pkt(pkt_stream, &nb_pkts);
 		for (i = 0; i < pkt_nb_frags(rx_frame_size, pkt_stream, pkt); i++) {
 			if (!pkt) {
 				if (!fill_up)
@@ -2236,6 +2246,13 @@ out:
 	clean_sockets(test, test->ifobj_tx);
 	clean_umem(test, test->ifobj_rx, test->ifobj_tx);
 	return ret;
+}
+
+int testapp_invalid_fill(struct test_spec *test)
+{
+	test->ifobj_rx->xsk->umem->invalid_fill_entries = INVALID_FILL_ENTRIES;
+
+	return testapp_single_pkt(test);
 }
 
 int testapp_send_receive_unaligned(struct test_spec *test)
