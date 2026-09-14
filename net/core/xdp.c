@@ -573,6 +573,54 @@ void xdp_attachment_setup(struct xdp_attachment_info *info,
 }
 EXPORT_SYMBOL_GPL(xdp_attachment_setup);
 
+/* The buffers are read through the pool list rather than the fragment array,
+ * because a UMEM buffer is only guaranteed to be addressable through the
+ * mapping the pool holds for it.
+ */
+static bool xdp_copy_frags_to_frame(struct xdp_frame *xdpf,
+				    const struct xdp_buff *xdp)
+{
+	const struct skb_shared_info *xinfo;
+	struct skb_shared_info *sinfo;
+	struct xdp_buff_xsk *pos;
+	u32 i;
+
+	xinfo = xdp_get_shared_info_from_buff(xdp);
+	sinfo = xdp_get_shared_info_from_frame(xdpf);
+	memset(sinfo, 0, sizeof(*sinfo));
+
+	i = 0;
+	xsk_buff_for_each_frag(pos, xdp) {
+		u32 len = pos->xdp.data_end - pos->xdp.data;
+		struct page *page;
+
+		if (len > PAGE_SIZE)
+			goto err;
+
+		page = dev_alloc_page();
+		if (!page)
+			goto err;
+
+		memcpy(page_address(page), pos->xdp.data, len);
+		__skb_fill_page_desc_noacc(sinfo, i, page, 0, len);
+		if (page_is_pfmemalloc(page))
+			xdpf->flags |= XDP_FLAGS_FRAGS_PF_MEMALLOC;
+		i++;
+	}
+
+	sinfo->nr_frags = xinfo->nr_frags;
+	sinfo->xdp_frags_size = xinfo->xdp_frags_size;
+	sinfo->xdp_frags_truesize = xinfo->nr_frags * PAGE_SIZE;
+
+	return true;
+
+err:
+	while (i--)
+		put_page(skb_frag_page(&sinfo->frags[i]));
+
+	return false;
+}
+
 struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 {
 	unsigned int data_len, headroom, min_headroom, metasize, totsize;
@@ -613,6 +661,14 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 	xdpf->metasize = metasize;
 	xdpf->frame_sz = PAGE_SIZE;
 	xdpf->mem_type = MEM_TYPE_PAGE_ORDER0;
+
+	if (xdp_buff_has_frags(xdp)) {
+		xdpf->flags = XDP_FLAGS_HAS_FRAGS;
+		if (!xdp_copy_frags_to_frame(xdpf, xdp)) {
+			put_page(page);
+			return NULL;
+		}
+	}
 
 	xsk_buff_free(xdp);
 	return xdpf;
@@ -697,15 +753,17 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
 {
 	struct skb_shared_info *sinfo = skb_shinfo(skb);
 	const struct skb_shared_info *xinfo;
+	struct xdp_buff_xsk *pos;
 	u32 nr_frags, tsize = 0;
 	u32 flags = 0;
+	u32 i;
 
 	xinfo = xdp_get_shared_info_from_buff(xdp);
 	nr_frags = xinfo->nr_frags;
 
-	for (u32 i = 0; i < nr_frags; i++) {
-		const skb_frag_t *frag = &xinfo->frags[i];
-		u32 len = skb_frag_size(frag);
+	i = 0;
+	xsk_buff_for_each_frag(pos, xdp) {
+		u32 len = pos->xdp.data_end - pos->xdp.data;
 		u32 offset, truesize = len;
 		struct page *page;
 
@@ -715,13 +773,14 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
 			return false;
 		}
 
-		memcpy(page_address(page) + offset, skb_frag_address(frag),
+		memcpy(page_address(page) + offset, pos->xdp.data,
 		       LARGEST_ALIGN(len));
 		__skb_fill_page_desc_noacc(sinfo, i, page, offset, len);
 
 		tsize += truesize;
 		if (page_is_pfmemalloc(page))
 			flags |= XDP_FLAGS_FRAGS_PF_MEMALLOC;
+		i++;
 	}
 
 	xdp_update_skb_frags_info(skb, nr_frags, xinfo->xdp_frags_size, tsize,
