@@ -515,6 +515,7 @@ static void mp_dmabuf_devmem_uninstall(void *mp_priv,
 }
 
 static const struct memory_provider_ops dmabuf_devmem_ops = {
+	.supports_page_pool_frag = true,
 	.init			= mp_dmabuf_devmem_init,
 	.destroy		= mp_dmabuf_devmem_destroy,
 	.alloc_netmems		= mp_dmabuf_devmem_alloc_netmems,
