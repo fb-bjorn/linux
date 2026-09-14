@@ -161,6 +161,7 @@ err_start_queue:
 		     "Failed to restart old queue in error path. RX queue %d may be unhealthy.",
 		     rxq_idx);
 		qops->ndo_queue_mem_free(dev, old_mem);
+		err = -ENETDOWN;
 	}
 
 err_free_new_queue_mem:
