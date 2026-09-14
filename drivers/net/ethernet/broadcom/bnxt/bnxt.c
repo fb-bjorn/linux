@@ -969,7 +969,9 @@ static void bnxt_set_rx_buf_params(struct bnxt *bp,
 	u32 headroom;
 
 	rxr->rx_buf_use_size = bp->rx_buf_use_size;
+	rxr->rx_agg_buf_use_size = rxr->rx_page_size;
 	rxr->xdp_frame_size = rxr->rx_page_size;
+	rxr->rx_agg_offset = 0;
 	if (BNXT_RX_PAGE_MODE(bp)) {
 		rxr->rx_offset = NET_IP_ALIGN + XDP_PACKET_HEADROOM;
 		rxr->rx_dma_offset = XDP_PACKET_HEADROOM;
@@ -985,8 +987,10 @@ static void bnxt_set_rx_buf_params(struct bnxt *bp,
 
 	headroom = xsk_pool_get_headroom(pool);
 	rxr->rx_buf_use_size = bnxt_xsk_rx_size(pool);
+	rxr->rx_agg_buf_use_size = rxr->rx_buf_use_size;
 	rxr->xdp_frame_size = xsk_pool_get_chunk_size(pool) -
 				  (headroom - XDP_PACKET_HEADROOM);
+	rxr->rx_agg_offset = headroom;
 	rxr->rx_dma_offset = headroom - NET_IP_ALIGN;
 	rxr->xdp_headroom = XDP_PACKET_HEADROOM;
 	rxr->rx_offset = headroom;
@@ -1144,6 +1148,8 @@ static int bnxt_alloc_rx_netmem(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 	netmem = __bnxt_alloc_rx_netmem(bp, &mapping, rxr, &offset, gfp);
 	if (!netmem)
 		return -ENOMEM;
+	offset += rxr->rx_agg_offset;
+	mapping += rxr->rx_agg_offset;
 
 	if (unlikely(test_bit(sw_prod, rxr->rx_agg_bmap)))
 		sw_prod = bnxt_find_next_agg_idx(rxr, sw_prod);
@@ -4848,7 +4854,7 @@ static void bnxt_init_one_rx_agg_ring_rxbd(struct bnxt *bp,
 	ring = &rxr->rx_agg_ring_struct;
 	ring->fw_ring_id = INVALID_HW_RING_ID;
 	if ((bp->flags & BNXT_FLAG_AGG_RINGS)) {
-		type = ((u32)rxr->rx_page_size << RX_BD_LEN_SHIFT) |
+		type = (rxr->rx_agg_buf_use_size << RX_BD_LEN_SHIFT) |
 			RX_BD_TYPE_RX_AGG_BD;
 
 		/* Disable EOP if TPA is enabled to prevent overlapping zero
@@ -7465,7 +7471,7 @@ static void bnxt_set_rx_ring_params_p5(struct bnxt *bp, u32 ring_type,
 	if (ring_type == HWRM_RING_ALLOC_AGG) {
 		req->ring_type = RING_ALLOC_REQ_RING_TYPE_RX_AGG;
 		req->rx_ring_id = cpu_to_le16(grp_info->rx_fw_ring_id);
-		req->rx_buf_size = cpu_to_le16(rxr->rx_page_size);
+		req->rx_buf_size = cpu_to_le16(rxr->rx_agg_buf_use_size);
 		enables |= RING_ALLOC_REQ_ENABLES_RX_RING_ID_VALID;
 	} else {
 		req->rx_buf_size = cpu_to_le16(rxr->rx_buf_use_size);
@@ -16229,8 +16235,16 @@ static int bnxt_change_mac_addr(struct net_device *dev, void *p)
 static int bnxt_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct bnxt *bp = netdev_priv(dev);
+	struct netlink_ext_ack extack = {};
+	int rc;
 
 	netdev_assert_locked(dev);
+	rc = bnxt_xsk_validate_mtu(bp, new_mtu, &extack);
+	if (rc) {
+		if (extack._msg)
+			netdev_err(dev, "%s\n", extack._msg);
+		return rc;
+	}
 
 	if (netif_running(dev))
 		bnxt_close_nic(bp, true, false);
@@ -16719,6 +16733,7 @@ static const struct net_device_ops bnxt_netdev_ops = {
 #endif
 	.ndo_bpf		= bnxt_xdp,
 	.ndo_xdp_xmit		= bnxt_xdp_xmit,
+	.ndo_xsk_wakeup		= bnxt_xsk_wakeup,
 	.ndo_bridge_getlink	= bnxt_bridge_getlink,
 	.ndo_bridge_setlink	= bnxt_bridge_setlink,
 	.ndo_hwtstamp_get	= bnxt_hwtstamp_get,
@@ -17075,10 +17090,12 @@ static int bnxt_queue_start(struct net_device *dev,
 	rxr->xdp_rxq = clone->xdp_rxq;
 	rxr->need_head_pool = clone->need_head_pool;
 	rxr->rx_buf_use_size = clone->rx_buf_use_size;
+	rxr->rx_agg_buf_use_size = clone->rx_agg_buf_use_size;
 	rxr->xdp_frame_size = clone->xdp_frame_size;
 	rxr->rx_dma_offset = clone->rx_dma_offset;
 	rxr->xdp_headroom = clone->xdp_headroom;
 	rxr->rx_offset = clone->rx_offset;
+	rxr->rx_agg_offset = clone->rx_agg_offset;
 	rxr->xsk_rx_starved = clone->xsk_rx_starved;
 	rxr->xsk_pool = clone->xsk_pool;
 

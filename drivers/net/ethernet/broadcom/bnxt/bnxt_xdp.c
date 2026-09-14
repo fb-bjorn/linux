@@ -23,6 +23,12 @@
 
 DEFINE_STATIC_KEY_FALSE(bnxt_xdp_locking_key);
 
+static __always_inline bool bnxt_xdp_tx_needs_lock(struct bnxt *bp)
+{
+	return static_branch_unlikely(&bnxt_xdp_locking_key) ||
+	       (READ_ONCE(bp->flags) & BNXT_FLAG_XSK);
+}
+
 static void bnxt_xdp_recycle_netmem(netmem_ref netmem)
 {
 	page_pool_recycle_direct_netmem(netmem_get_pp(netmem), netmem);
@@ -285,6 +291,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 	dma_addr_t mapping;
 	u32 tx_needed = 1;
 	void *orig_data;
+	bool locking;
 	u32 tx_avail;
 	u32 offset;
 	u32 act;
@@ -313,13 +320,12 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		return false;
 
 	case XDP_TX:
+		locking = bnxt_xdp_tx_needs_lock(bp);
+		if (locking)
+			spin_lock(&txr->xdp_tx_lock);
 		if (unlikely(READ_ONCE(txr->dev_state) ==
-			     BNXT_DEV_STATE_CLOSING)) {
-			trace_xdp_exception(bp->dev, xdp_prog, act);
-			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_netmem(rxr, cons, netmem);
-			return true;
-		}
+			     BNXT_DEV_STATE_CLOSING))
+			goto xdp_tx_err;
 		rx_buf = &rxr->rx_buf_ring[cons];
 		mapping = rx_buf->mapping - rxr->rx_dma_offset;
 		mapping += rxr->rx_offset - rxr->xdp_headroom;
@@ -331,12 +337,8 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 			tx_needed += sinfo->nr_frags;
 		}
 
-		if (tx_avail < tx_needed) {
-			trace_xdp_exception(bp->dev, xdp_prog, act);
-			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_netmem(rxr, cons, netmem);
-			return true;
-		}
+		if (tx_avail < tx_needed)
+			goto xdp_tx_err;
 
 		dma_sync_single_for_device(&pdev->dev, mapping + offset, *len,
 					   bp->rx_dir);
@@ -345,6 +347,15 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		*event |= BNXT_TX_EVENT;
 		__bnxt_xmit_xdp(bp, txr, mapping + offset, *len,
 				NEXT_RX(rxr->rx_prod), xdp);
+		if (locking)
+			spin_unlock(&txr->xdp_tx_lock);
+		bnxt_reuse_rx_netmem(rxr, cons, netmem);
+		return true;
+xdp_tx_err:
+		if (locking)
+			spin_unlock(&txr->xdp_tx_lock);
+		trace_xdp_exception(bp->dev, xdp_prog, act);
+		bnxt_xdp_buff_frags_free(rxr, xdp);
 		bnxt_reuse_rx_netmem(rxr, cons, netmem);
 		return true;
 	case XDP_REDIRECT:
@@ -391,6 +402,7 @@ int bnxt_xdp_xmit(struct net_device *dev, int num_frames,
 	struct bpf_prog *xdp_prog = READ_ONCE(bp->xdp_prog);
 	struct pci_dev *pdev = bp->pdev;
 	struct bnxt_tx_ring_info *txr;
+	bool locking;
 	dma_addr_t mapping;
 	int nxmit = 0;
 	int ring;
@@ -407,7 +419,8 @@ int bnxt_xdp_xmit(struct net_device *dev, int num_frames,
 	if (READ_ONCE(txr->dev_state) == BNXT_DEV_STATE_CLOSING)
 		return -EINVAL;
 
-	if (static_branch_unlikely(&bnxt_xdp_locking_key))
+	locking = bnxt_xdp_tx_needs_lock(bp);
+	if (locking)
 		spin_lock(&txr->xdp_tx_lock);
 
 	for (i = 0; i < num_frames; i++) {
@@ -432,20 +445,268 @@ int bnxt_xdp_xmit(struct net_device *dev, int num_frames,
 		bnxt_db_write(bp, &txr->tx_db, txr->tx_prod);
 	}
 
-	if (static_branch_unlikely(&bnxt_xdp_locking_key))
+	if (locking)
 		spin_unlock(&txr->xdp_tx_lock);
 
 	return nxmit;
 }
 
-static int bnxt_xdp_set(struct bnxt *bp, struct bpf_prog *prog)
+int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id,
+		    u32 __always_unused flags)
+{
+	struct bnxt *bp = netdev_priv(dev);
+	struct bnxt_rx_ring_info *rxr;
+	struct xsk_buff_pool *pool;
+
+	if (queue_id >= bp->rx_nr_rings)
+		return -EINVAL;
+	if (!test_bit(BNXT_STATE_OPEN, &bp->state))
+		return -ENETDOWN;
+
+	rxr = &bp->rx_ring[queue_id];
+	pool = READ_ONCE(rxr->xsk_pool);
+	if (!pool)
+		return -EINVAL;
+
+	if (!napi_if_scheduled_mark_missed(&rxr->bnapi->napi))
+		napi_schedule(&rxr->bnapi->napi);
+
+	return 0;
+}
+
+static bool bnxt_xsk_active(struct bnxt *bp)
+{
+	unsigned int queue_id;
+
+	for (queue_id = 0; queue_id < bp->dev->real_num_rx_queues;
+	     queue_id++)
+		if (bnxt_xsk_pool(bp, queue_id))
+			return true;
+
+	return false;
+}
+
+static int bnxt_xsk_validate(struct bnxt *bp, struct xsk_buff_pool *pool,
+			     struct bpf_prog *prog, unsigned int mtu,
+			     u32 rx_size, struct netlink_ext_ack *extack)
+{
+	u32 packet_size = mtu + VLAN_ETH_HLEN;
+
+	if (rx_size > NET_IP_ALIGN &&
+	    packet_size <= rx_size - NET_IP_ALIGN)
+		return 0;
+
+	if (!xsk_pool_uses_sg(pool)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "VNIC buffer geometry and MTU require XDP_USE_SG");
+		return -EOPNOTSUPP;
+	}
+	if (prog && !prog->aux->xdp_has_frags) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "VNIC buffer geometry and MTU require XDP frags");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+static int bnxt_xsk_validate_pools(struct bnxt *bp,
+				   struct xsk_buff_pool *new_pool,
+				   unsigned int new_queue,
+				   struct bpf_prog *prog, unsigned int mtu,
+				   struct netlink_ext_ack *extack)
+{
+	u32 rx_size = bnxt_xdp_rx_size();
+	struct xsk_buff_pool *pool;
+	unsigned int queue_id;
+	int rc;
+
+	if (new_pool)
+		rx_size = min(rx_size, bnxt_xsk_rx_size(new_pool));
+
+	/* Jumbo placement uses one VNIC-wide threshold. Validate every XSK
+	 * queue against the minimum size that hardware will program.
+	 */
+	for (queue_id = 0; queue_id < bp->dev->real_num_rx_queues;
+	     queue_id++) {
+		if (new_pool && queue_id == new_queue)
+			continue;
+
+		pool = bnxt_xsk_pool(bp, queue_id);
+		if (!pool)
+			continue;
+		rx_size = min(rx_size, bnxt_xsk_rx_size(pool));
+	}
+
+	if (new_pool) {
+		rc = bnxt_xsk_validate(bp, new_pool, prog, mtu, rx_size,
+				       extack);
+		if (rc)
+			return rc;
+	}
+
+	for (queue_id = 0; queue_id < bp->dev->real_num_rx_queues;
+	     queue_id++) {
+		if (new_pool && queue_id == new_queue)
+			continue;
+
+		pool = bnxt_xsk_pool(bp, queue_id);
+		if (!pool)
+			continue;
+
+		rc = bnxt_xsk_validate(bp, pool, prog, mtu, rx_size, extack);
+		if (rc)
+			return rc;
+	}
+
+	return 0;
+}
+
+static int bnxt_xsk_check_mode(struct bnxt *bp, bool xsk)
+{
+	bool page_mode = READ_ONCE(bp->xdp_prog) || xsk;
+	int tx_xdp = page_mode ? bp->rx_nr_rings : 0;
+	int tc = bp->num_tc ?: 1;
+
+	return bnxt_check_rings(bp, bp->tx_nr_rings_per_tc,
+				bp->rx_nr_rings, true, tc, tx_xdp);
+}
+
+static int bnxt_xsk_set_mode(struct bnxt *bp, bool xsk, bool running)
+{
+	bool page_mode = READ_ONCE(bp->xdp_prog) || xsk;
+	int tx_xdp = page_mode ? bp->rx_nr_rings : 0;
+	int tc = bp->num_tc ?: 1;
+
+	if (xsk)
+		bp->flags |= BNXT_FLAG_XSK;
+	else
+		bp->flags &= ~BNXT_FLAG_XSK;
+
+	if (test_bit(BNXT_STATE_OPEN, &bp->state))
+		bnxt_close_nic(bp, true, false);
+
+	bnxt_set_rx_skb_mode(bp, page_mode);
+	bp->tx_nr_rings_xdp = tx_xdp;
+	bp->tx_nr_rings = bp->tx_nr_rings_per_tc * tc + tx_xdp;
+	bnxt_set_cp_rings(bp, true);
+	bnxt_set_tpa_flags(bp);
+	bnxt_set_ring_params(bp);
+
+	return running ? bnxt_open_nic(bp, true, false) : 0;
+}
+
+static int bnxt_xsk_switch_mode(struct bnxt *bp, bool xsk)
+{
+	bool old_xsk = bp->flags & BNXT_FLAG_XSK;
+	bool running = netif_running(bp->dev);
+	int err, restore_err;
+
+	err = bnxt_xsk_set_mode(bp, xsk, running);
+	if (!err)
+		return 0;
+
+	/* A failed open leaves the running netdev closed. Reopen the mode which
+	 * was known to work so a failed AF_XDP transition is transactional.
+	 */
+	restore_err = bnxt_xsk_set_mode(bp, old_xsk, false);
+	if (!restore_err && running)
+		restore_err = netif_open(bp->dev, NULL);
+	if (restore_err)
+		netdev_err(bp->dev,
+			   "AF_XDP mode switch failed: %d; recovery failed: %d\n",
+			   err, restore_err);
+
+	return restore_err ? -ENETDOWN : err;
+}
+
+static int bnxt_xsk_setup_pool(struct bnxt *bp, struct xsk_buff_pool *pool,
+			       u16 queue_id, struct netlink_ext_ack *extack)
+{
+	bool switch_mode = false;
+	int rc;
+
+	netdev_assert_locked(bp->dev);
+
+	if (queue_id >= bp->dev->real_num_rx_queues) {
+		NL_SET_ERR_MSG_MOD(extack, "RX queue index out of range");
+		return -EINVAL;
+	}
+
+	if (!pool) {
+		rc = xsk_pool_setup_page_pool(bp->dev, NULL, queue_id, extack);
+		if (rc)
+			return rc;
+
+		if (!bnxt_xsk_active(bp)) {
+			rc = bnxt_xsk_switch_mode(bp, false);
+			if (rc) {
+				bp->flags &= ~BNXT_FLAG_XSK;
+				if (rc == -ENETDOWN)
+					netdev_err(bp->dev,
+						   "failed to restore RX mode after AF_XDP detach; interface is down\n");
+				else
+					netdev_warn(bp->dev,
+						    "failed to restore RX skb mode after AF_XDP detach: %d; keeping page mode\n",
+						    rc);
+			}
+		}
+		return 0;
+	}
+
+	if (!BNXT_SUPPORTS_QUEUE_API(bp)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy requires queue management");
+		return -EOPNOTSUPP;
+	}
+	if (!(bp->flags & BNXT_FLAG_SHARED_RINGS)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy requires combined channels");
+		return -EOPNOTSUPP;
+	}
+	if (bp->flags & BNXT_FLAG_HDS) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "AF_XDP zero-copy is disallowed when HDS is enabled");
+		return -EOPNOTSUPP;
+	}
+	rc = bnxt_xsk_validate_pools(bp, pool, queue_id,
+				     READ_ONCE(bp->xdp_prog), bp->dev->mtu,
+				     extack);
+	if (rc)
+		return rc;
+
+	if (!(bp->flags & BNXT_FLAG_XSK)) {
+		rc = bnxt_xsk_check_mode(bp, true);
+		if (rc)
+			return rc;
+		rc = bnxt_xsk_switch_mode(bp, true);
+		if (rc)
+			return rc;
+		switch_mode = true;
+	}
+
+	rc = xsk_pool_setup_page_pool(bp->dev, pool, queue_id, extack);
+	if (!rc)
+		return 0;
+
+	if (switch_mode) {
+		if (bnxt_xsk_switch_mode(bp, false)) {
+			bp->flags &= ~BNXT_FLAG_XSK;
+			netdev_err(bp->dev,
+				   "failed to restore RX skb mode after AF_XDP setup failure\n");
+		}
+	}
+	return rc;
+}
+
+static int bnxt_xdp_set(struct bnxt *bp, struct bpf_prog *prog,
+			struct netlink_ext_ack *extack)
 {
 	struct net_device *dev = bp->dev;
 	int tx_xdp = 0, rc, tc;
 	struct bpf_prog *old;
 
 	netdev_assert_locked(dev);
-
 	if (prog && !prog->aux->xdp_has_frags &&
 	    bp->dev->mtu > BNXT_MAX_PAGE_MODE_MTU) {
 		netdev_warn(dev, "MTU %d larger than %d without XDP frag support.\n",
@@ -460,7 +721,13 @@ static int bnxt_xdp_set(struct bnxt *bp, struct bpf_prog *prog)
 		netdev_warn(dev, "ethtool rx/tx channels must be combined to support XDP.\n");
 		return -EOPNOTSUPP;
 	}
-	if (prog)
+	if (prog) {
+		rc = bnxt_xsk_validate_pools(bp, NULL, 0, prog, dev->mtu,
+					     extack);
+		if (rc)
+			return rc;
+	}
+	if (prog || bp->flags & BNXT_FLAG_XSK)
 		tx_xdp = bp->rx_nr_rings;
 
 	tc = bp->num_tc;
@@ -484,7 +751,7 @@ static int bnxt_xdp_set(struct bnxt *bp, struct bpf_prog *prog)
 		xdp_features_set_redirect_target_locked(dev, true);
 	} else {
 		xdp_features_clear_redirect_target_locked(dev);
-		bnxt_set_rx_skb_mode(bp, false);
+		bnxt_set_rx_skb_mode(bp, bp->flags & BNXT_FLAG_XSK);
 	}
 	bp->tx_nr_rings_xdp = tx_xdp;
 	bp->tx_nr_rings = bp->tx_nr_rings_per_tc * tc + tx_xdp;
@@ -498,6 +765,13 @@ static int bnxt_xdp_set(struct bnxt *bp, struct bpf_prog *prog)
 	return 0;
 }
 
+int bnxt_xsk_validate_mtu(struct bnxt *bp, unsigned int mtu,
+			  struct netlink_ext_ack *extack)
+{
+	return bnxt_xsk_validate_pools(bp, NULL, 0,
+				       READ_ONCE(bp->xdp_prog), mtu, extack);
+}
+
 int bnxt_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 {
 	struct bnxt *bp = netdev_priv(dev);
@@ -505,7 +779,11 @@ int bnxt_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
-		rc = bnxt_xdp_set(bp, xdp->prog);
+		rc = bnxt_xdp_set(bp, xdp->prog, xdp->extack);
+		break;
+	case XDP_SETUP_XSK_POOL:
+		rc = bnxt_xsk_setup_pool(bp, xdp->xsk.pool,
+					 xdp->xsk.queue_id, xdp->extack);
 		break;
 	default:
 		rc = -EINVAL;

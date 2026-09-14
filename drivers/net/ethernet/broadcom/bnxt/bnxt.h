@@ -1128,8 +1128,10 @@ struct bnxt_rx_ring_info {
 	u16			rx_agg_bmap_size;
 	u32			rx_page_size;
 	u32			rx_buf_use_size;
+	u32			rx_agg_buf_use_size;
 	u32			xdp_frame_size;
 	u16			rx_offset;
+	u16			rx_agg_offset;
 	u16			rx_dma_offset;
 	u16			xdp_headroom;
 	bool                    need_head_pool;
