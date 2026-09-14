@@ -1128,8 +1128,10 @@ struct bnxt_rx_ring_info {
 	u16			rx_agg_bmap_size;
 	u32			rx_page_size;
 	u32			rx_buf_use_size;
+	u32			rx_agg_buf_use_size;
 	u32			xdp_frame_size;
 	u16			rx_offset;
+	u16			rx_agg_offset;
 	u16			rx_dma_offset;
 	u16			xdp_headroom;
 	bool                    need_head_pool;
@@ -1137,6 +1139,8 @@ struct bnxt_rx_ring_info {
 	struct xsk_buff_pool	*xsk_pool;
 	/* Headroom requested by the queue's memory provider */
 	u32			rx_mp_headroom;
+	/* bp->xsk_agg_gen seen by the last XSK refill */
+	u32			xsk_agg_gen;
 
 	dma_addr_t		rx_desc_mapping[MAX_RX_PAGES];
 	dma_addr_t		rx_agg_desc_mapping[MAX_RX_AGG_PAGES];
@@ -2401,6 +2405,8 @@ struct bnxt {
 	u16			max_tpa_roundup_size;
 	u32			rx_buf_size;
 	u32			rx_buf_use_size;	/* useable size */
+	/* Bumped when a queue restart changes the VNIC jumbo threshold */
+	u32			xsk_agg_gen;
 	u16			rx_offset;
 	u16			rx_dma_offset;
 	enum dma_data_direction	rx_dir;

@@ -977,6 +977,8 @@ static int bnxt_set_channels(struct net_device *dev,
 	if (BNXT_CHIP_TYPE_NITRO_A0(bp) && (channel->rx_count ||
 					    channel->tx_count))
 		return -EINVAL;
+	if (bp->flags & BNXT_FLAG_XSK)
+		return -EBUSY;
 
 	if (channel->combined_count)
 		sh = true;
