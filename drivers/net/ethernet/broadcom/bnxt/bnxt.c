@@ -969,7 +969,9 @@ static void bnxt_set_rx_buf_params(struct bnxt *bp,
 	u32 headroom;
 
 	rxr->rx_buf_use_size = bp->rx_buf_use_size;
+	rxr->rx_agg_buf_use_size = rxr->rx_page_size;
 	rxr->xdp_frame_size = rxr->rx_page_size;
+	rxr->rx_agg_offset = 0;
 	if (BNXT_RX_PAGE_MODE(bp)) {
 		rxr->rx_offset = NET_IP_ALIGN + XDP_PACKET_HEADROOM;
 		rxr->rx_dma_offset = XDP_PACKET_HEADROOM;
@@ -985,8 +987,10 @@ static void bnxt_set_rx_buf_params(struct bnxt *bp,
 
 	headroom = rxr->rx_mp_headroom;
 	rxr->rx_buf_use_size = bnxt_xsk_rx_size(pool);
+	rxr->rx_agg_buf_use_size = rxr->rx_buf_use_size;
 	rxr->xdp_frame_size = xsk_pool_get_chunk_size(pool) -
 				  (headroom - XDP_PACKET_HEADROOM);
+	rxr->rx_agg_offset = headroom;
 	rxr->rx_dma_offset = headroom - NET_IP_ALIGN;
 	rxr->xdp_headroom = XDP_PACKET_HEADROOM;
 	rxr->rx_offset = headroom;
@@ -1144,6 +1148,8 @@ static int bnxt_alloc_rx_netmem(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 	netmem = __bnxt_alloc_rx_netmem(bp, &mapping, rxr, &offset, gfp);
 	if (!netmem)
 		return -ENOMEM;
+	offset += rxr->rx_agg_offset;
+	mapping += rxr->rx_agg_offset;
 
 	if (unlikely(test_bit(sw_prod, rxr->rx_agg_bmap)))
 		sw_prod = bnxt_find_next_agg_idx(rxr, sw_prod);
@@ -4717,6 +4723,30 @@ static void bnxt_alloc_one_rx_ring_netmem(struct bnxt *bp,
 	rxr->rx_agg_prod = prod;
 }
 
+/* Aggregation buffers a frame at the current MTU can use. The VNIC places
+ * up to its smallest ring buffer size in the head buffer.
+ */
+static u32 bnxt_xsk_agg_per_frame(struct bnxt *bp,
+				  struct bnxt_rx_ring_info *rxr)
+{
+	u32 packet_size = bp->dev->mtu + VLAN_ETH_HLEN;
+	u32 head_size = min(bp->rx_buf_use_size, rxr->rx_buf_use_size);
+	int i;
+
+	for (i = 0; i < bp->rx_nr_rings; i++)
+		head_size = min(head_size,
+				READ_ONCE(bp->rx_ring[i].rx_buf_use_size));
+	if (head_size <= NET_IP_ALIGN)
+		return 0;
+
+	head_size -= NET_IP_ALIGN;
+	if (packet_size <= head_size)
+		return 0;
+
+	return DIV_ROUND_UP(packet_size - head_size,
+			    rxr->rx_agg_buf_use_size);
+}
+
 static bool bnxt_fill_xsk_rx_buffers(struct bnxt *bp,
 				     struct bnxt_rx_ring_info *rxr,
 				     gfp_t gfp)
@@ -4726,12 +4756,17 @@ static bool bnxt_fill_xsk_rx_buffers(struct bnxt *bp,
 	u16 rx_prod = rxr->rx_prod;
 	bool progress;
 
+	/* Pairs with smp_store_release() in bnxt_xsk_agg_changed(). */
+	rxr->xsk_agg_gen = smp_load_acquire(&bp->xsk_agg_gen);
 	rx_used = (rx_prod - rxr->rx_next_cons) & bp->rx_ring_mask;
 	agg_fill = 0;
 	agg_used = 0;
 	if (bp->flags & BNXT_FLAG_AGG_RINGS &&
 	    xsk_pool_uses_sg(rxr->xsk_pool)) {
-		agg_fill = bnxt_rx_agg_ring_fill_level(bp, rxr);
+		/* Park only the UMEM frames the MTU can use. */
+		agg_fill = min_t(u32, bnxt_rx_agg_ring_fill_level(bp, rxr),
+				 bnxt_xsk_agg_per_frame(bp, rxr) *
+				 bp->rx_ring_size);
 		agg_used = bitmap_weight(rxr->rx_agg_bmap,
 					 rxr->rx_agg_bmap_size);
 	}
@@ -4771,7 +4806,8 @@ static bool bnxt_xsk_rx_refill(struct bnxt *bp,
 
 	if (!pool)
 		return true;
-	if (!READ_ONCE(rxr->xsk_rx_starved))
+	if (!READ_ONCE(rxr->xsk_rx_starved) &&
+	    rxr->xsk_agg_gen == READ_ONCE(bp->xsk_agg_gen))
 		return page_pool_refill_done(rxr->page_pool, true);
 
 	rx_prod = rxr->rx_prod;
@@ -4858,7 +4894,7 @@ static void bnxt_init_one_rx_agg_ring_rxbd(struct bnxt *bp,
 	ring = &rxr->rx_agg_ring_struct;
 	ring->fw_ring_id = INVALID_HW_RING_ID;
 	if ((bp->flags & BNXT_FLAG_AGG_RINGS)) {
-		type = ((u32)rxr->rx_page_size << RX_BD_LEN_SHIFT) |
+		type = (rxr->rx_agg_buf_use_size << RX_BD_LEN_SHIFT) |
 			RX_BD_TYPE_RX_AGG_BD;
 
 		/* Disable EOP if TPA is enabled to prevent overlapping zero
@@ -7475,7 +7511,7 @@ static void bnxt_set_rx_ring_params_p5(struct bnxt *bp, u32 ring_type,
 	if (ring_type == HWRM_RING_ALLOC_AGG) {
 		req->ring_type = RING_ALLOC_REQ_RING_TYPE_RX_AGG;
 		req->rx_ring_id = cpu_to_le16(grp_info->rx_fw_ring_id);
-		req->rx_buf_size = cpu_to_le16(rxr->rx_page_size);
+		req->rx_buf_size = cpu_to_le16(rxr->rx_agg_buf_use_size);
 		enables |= RING_ALLOC_REQ_ENABLES_RX_RING_ID_VALID;
 	} else {
 		req->rx_buf_size = cpu_to_le16(rxr->rx_buf_use_size);
@@ -12451,6 +12487,24 @@ static void bnxt_enable_napi(struct bnxt *bp)
 	}
 }
 
+/* A new VNIC jumbo threshold changes how many aggregation buffers a frame
+ * uses on every ring. A ring whose frames no longer fit gets no completion
+ * which would trigger a refill, so have each XSK ring recompute its target.
+ */
+static void bnxt_xsk_agg_changed(struct bnxt *bp)
+{
+	int i;
+
+	/* Pairs with smp_load_acquire() in bnxt_fill_xsk_rx_buffers(). */
+	smp_store_release(&bp->xsk_agg_gen, bp->xsk_agg_gen + 1);
+	for (i = 0; i < bp->rx_nr_rings; i++) {
+		struct bnxt_rx_ring_info *rxr = &bp->rx_ring[i];
+
+		if (READ_ONCE(rxr->xsk_pool))
+			napi_schedule(&rxr->bnapi->napi);
+	}
+}
+
 static void bnxt_xsk_start_rx(struct bnxt *bp)
 {
 	int i;
@@ -16195,8 +16249,16 @@ static int bnxt_change_mac_addr(struct net_device *dev, void *p)
 static int bnxt_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct bnxt *bp = netdev_priv(dev);
+	struct netlink_ext_ack extack = {};
+	int rc;
 
 	netdev_assert_locked(dev);
+	rc = bnxt_xsk_validate_mtu(bp, new_mtu, &extack);
+	if (rc) {
+		if (extack._msg)
+			netdev_err(dev, "%s\n", extack._msg);
+		return rc;
+	}
 
 	if (netif_running(dev))
 		bnxt_close_nic(bp, true, false);
@@ -16685,6 +16747,7 @@ static const struct net_device_ops bnxt_netdev_ops = {
 #endif
 	.ndo_bpf		= bnxt_xdp,
 	.ndo_xdp_xmit		= bnxt_xdp_xmit,
+	.ndo_xsk_wakeup		= bnxt_xsk_wakeup,
 	.ndo_bridge_getlink	= bnxt_bridge_getlink,
 	.ndo_bridge_setlink	= bnxt_bridge_setlink,
 	.ndo_hwtstamp_get	= bnxt_hwtstamp_get,
@@ -16794,6 +16857,14 @@ static int bnxt_validate_qcfg(struct net_device *dev,
 	if (qcfg->rx_page_size < BNXT_RX_PAGE_SIZE ||
 	    qcfg->rx_page_size > BNXT_MAX_RX_PAGE_SIZE)
 		return -ERANGE;
+
+	/* Provider headroom must include XDP's and leave room for data. */
+	if (qcfg->rx_headroom &&
+	    (qcfg->rx_headroom < XDP_PACKET_HEADROOM ||
+	     qcfg->rx_headroom >= qcfg->rx_page_size)) {
+		NL_SET_ERR_MSG_MOD(extack, "rx_headroom is not supported");
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -17038,11 +17109,14 @@ static int bnxt_queue_start(struct net_device *dev,
 	rxr->xdp_rxq = clone->xdp_rxq;
 	rxr->need_head_pool = clone->need_head_pool;
 	rxr->rx_buf_use_size = clone->rx_buf_use_size;
+	rxr->rx_agg_buf_use_size = clone->rx_agg_buf_use_size;
 	rxr->xdp_frame_size = clone->xdp_frame_size;
 	rxr->rx_dma_offset = clone->rx_dma_offset;
 	rxr->xdp_headroom = clone->xdp_headroom;
 	rxr->rx_offset = clone->rx_offset;
+	rxr->rx_agg_offset = clone->rx_agg_offset;
 	rxr->xsk_rx_starved = clone->xsk_rx_starved;
+	rxr->xsk_agg_gen = clone->xsk_agg_gen;
 	rxr->xsk_pool = clone->xsk_pool;
 
 	bnxt_copy_rx_ring(bp, rxr, clone);
@@ -17054,6 +17128,7 @@ static int bnxt_queue_start(struct net_device *dev,
 		rc = bnxt_update_vnic_hds(bp);
 		if (rc)
 			goto err_reset;
+		bnxt_xsk_agg_changed(bp);
 	}
 
 	/* All rings have been reserved and previously allocated.
@@ -17290,7 +17365,7 @@ static const struct netdev_queue_mgmt_ops bnxt_queue_mgmt_ops = {
 	.ndo_queue_stop		= bnxt_queue_stop,
 	.ndo_default_qcfg	= bnxt_queue_default_qcfg,
 	.ndo_validate_qcfg	= bnxt_validate_qcfg,
-	.supported_params	= QCFG_RX_PAGE_SIZE,
+	.supported_params	= QCFG_RX_PAGE_SIZE | QCFG_RX_HEADROOM,
 };
 
 static const struct netdev_queue_mgmt_ops bnxt_queue_mgmt_ops_unsupp = {
