@@ -23,6 +23,11 @@
 
 DEFINE_STATIC_KEY_FALSE(bnxt_xdp_locking_key);
 
+static void bnxt_xdp_recycle_netmem(netmem_ref netmem)
+{
+	page_pool_recycle_direct_netmem(netmem_get_pp(netmem), netmem);
+}
+
 struct bnxt_sw_tx_bd *bnxt_xmit_bd(struct bnxt *bp,
 				   struct bnxt_tx_ring_info *txr,
 				   dma_addr_t mapping, u32 len,
@@ -45,8 +50,6 @@ struct bnxt_sw_tx_bd *bnxt_xmit_bd(struct bnxt *bp,
 	prod = txr->tx_prod;
 	tx_buf = &txr->tx_buf_ring[RING_TX(bp, prod)];
 	tx_buf->nr_frags = num_frags;
-	if (xdp)
-		tx_buf->page = virt_to_head_page(xdp->data);
 
 	txbd = &txr->tx_desc_ring[TX_RING(bp, prod)][TX_IDX(prod)];
 	flags = (len << TX_BD_LEN_SHIFT) | TX_BD_CNT(num_frags + 1) |
@@ -67,15 +70,18 @@ struct bnxt_sw_tx_bd *bnxt_xmit_bd(struct bnxt *bp,
 
 		/* first fill up the first buffer */
 		frag_tx_buf = &txr->tx_buf_ring[RING_TX(bp, prod)];
-		frag_tx_buf->page = skb_frag_page(frag);
+		frag_tx_buf->netmem = skb_frag_netmem(frag);
 
 		txbd = &txr->tx_desc_ring[TX_RING(bp, prod)][TX_IDX(prod)];
 
 		frag_len = skb_frag_size(frag);
 		flags = frag_len << TX_BD_LEN_SHIFT;
 		txbd->tx_bd_len_flags_type = cpu_to_le32(flags);
-		frag_mapping = page_pool_get_dma_addr(skb_frag_page(frag)) +
-			       skb_frag_off(frag);
+		frag_mapping =
+			page_pool_get_dma_addr_netmem(frag_tx_buf->netmem);
+		frag_mapping += skb_frag_off(frag);
+		dma_sync_single_for_device(&bp->pdev->dev, frag_mapping,
+					   frag_len, bp->rx_dir);
 		txbd->tx_bd_haddr = cpu_to_le64(frag_mapping);
 
 		len = frag_len;
@@ -100,7 +106,8 @@ static void __bnxt_xmit_xdp(struct bnxt *bp, struct bnxt_tx_ring_info *txr,
 
 	tx_buf = bnxt_xmit_bd(bp, txr, mapping, len, xdp);
 	tx_buf->rx_prod = rx_prod;
-	tx_buf->action = XDP_TX;
+	tx_buf->action = BNXT_XDP_TX;
+	txr->xdp_tx_pending++;
 
 }
 
@@ -112,7 +119,7 @@ static void __bnxt_xmit_xdp_redirect(struct bnxt *bp,
 	struct bnxt_sw_tx_bd *tx_buf;
 
 	tx_buf = bnxt_xmit_bd(bp, txr, mapping, len, NULL);
-	tx_buf->action = XDP_REDIRECT;
+	tx_buf->action = BNXT_XDP_REDIRECT;
 	tx_buf->xdpf = xdpf;
 	dma_unmap_addr_set(tx_buf, mapping, mapping);
 	dma_unmap_len_set(tx_buf, len, len);
@@ -127,6 +134,7 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 	struct bnxt_sw_tx_bd *tx_buf;
 	u16 tx_cons = txr->tx_cons;
 	u16 last_tx_cons = tx_cons;
+	u16 sw_cons;
 	int j, frags;
 
 	if (!budget)
@@ -135,7 +143,7 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 	while (RING_TX(bp, tx_cons) != tx_hw_cons) {
 		tx_buf = &txr->tx_buf_ring[RING_TX(bp, tx_cons)];
 
-		if (tx_buf->action == XDP_REDIRECT) {
+		if (tx_buf->action == BNXT_XDP_REDIRECT) {
 			struct pci_dev *pdev = bp->pdev;
 
 			dma_unmap_single(&pdev->dev,
@@ -143,19 +151,24 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 					 dma_unmap_len(tx_buf, len),
 					 DMA_TO_DEVICE);
 			xdp_return_frame(tx_buf->xdpf);
-			tx_buf->action = 0;
+			tx_buf->action = BNXT_XDP_TX_NONE;
 			tx_buf->xdpf = NULL;
-		} else if (tx_buf->action == XDP_TX) {
-			tx_buf->action = 0;
+		} else if (tx_buf->action == BNXT_XDP_TX) {
+			tx_buf->action = BNXT_XDP_TX_NONE;
+			txr->xdp_tx_pending--;
 			rx_doorbell_needed = true;
 			last_tx_cons = tx_cons;
 
 			frags = tx_buf->nr_frags;
 			for (j = 0; j < frags; j++) {
 				tx_cons = NEXT_TX(tx_cons);
-				tx_buf = &txr->tx_buf_ring[RING_TX(bp, tx_cons)];
-				page_pool_recycle_direct(rxr->page_pool, tx_buf->page);
+				sw_cons = RING_TX(bp, tx_cons);
+				tx_buf = &txr->tx_buf_ring[sw_cons];
+				bnxt_xdp_recycle_netmem(tx_buf->netmem);
+				tx_buf->netmem = 0;
 			}
+		} else if (tx_buf->action == BNXT_XDP_TX_LOOPBACK) {
+			tx_buf->action = BNXT_XDP_TX_NONE;
 		} else {
 			bnxt_sched_reset_txr(bp, txr, tx_cons);
 			return;
@@ -166,37 +179,78 @@ void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget)
 	bnapi->events &= ~BNXT_TX_CMP_EVENT;
 	WRITE_ONCE(txr->tx_cons, tx_cons);
 	if (rx_doorbell_needed) {
-		tx_buf = &txr->tx_buf_ring[RING_TX(bp, last_tx_cons)];
-		bnxt_db_write(bp, &rxr->rx_db, tx_buf->rx_prod);
+		if (!txr->xdp_tx_pending) {
+			bnxt_db_write(bp, &rxr->rx_db, rxr->rx_prod);
+		} else {
+			tx_buf = &txr->tx_buf_ring[RING_TX(bp, last_tx_cons)];
+			bnxt_db_write(bp, &rxr->rx_db, tx_buf->rx_prod);
+		}
 
 	}
 }
 
-bool bnxt_xdp_attached(struct bnxt *bp, struct bnxt_rx_ring_info *rxr)
+void bnxt_free_xdp_tx_ring(struct bnxt *bp, struct bnxt_tx_ring_info *txr)
 {
-	struct bpf_prog *xdp_prog = READ_ONCE(rxr->xdp_prog);
+	u16 cons = txr->tx_cons;
 
-	return !!xdp_prog;
+	while (RING_TX(bp, cons) != RING_TX(bp, txr->tx_prod)) {
+		struct bnxt_sw_tx_bd *head_buf, *tx_buf;
+		int frags, i;
+
+		tx_buf = &txr->tx_buf_ring[RING_TX(bp, cons)];
+		head_buf = tx_buf;
+		frags = tx_buf->nr_frags;
+
+		switch (tx_buf->action) {
+		case BNXT_XDP_REDIRECT:
+			dma_unmap_single(&bp->pdev->dev,
+					 dma_unmap_addr(tx_buf, mapping),
+					 dma_unmap_len(tx_buf, len),
+					 DMA_TO_DEVICE);
+			xdp_return_frame(tx_buf->xdpf);
+			break;
+		case BNXT_XDP_TX:
+			for (i = 0; i < frags; i++) {
+				cons = NEXT_TX(cons);
+				tx_buf = &txr->tx_buf_ring[RING_TX(bp, cons)];
+				bnxt_xdp_recycle_netmem(tx_buf->netmem);
+				tx_buf->netmem = 0;
+			}
+			break;
+		case BNXT_XDP_TX_LOOPBACK:
+			break;
+		default:
+			WARN_ON_ONCE(1);
+			break;
+		}
+
+		head_buf->action = BNXT_XDP_TX_NONE;
+		head_buf->xdpf = NULL;
+		cons = NEXT_TX(cons);
+	}
+
+	WRITE_ONCE(txr->tx_cons, cons);
+	txr->xdp_tx_pending = 0;
 }
 
-void bnxt_xdp_buff_init(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
-			u16 cons, u8 *data_ptr, unsigned int len,
-			struct xdp_buff *xdp)
+void bnxt_xdp_buff_init(struct bnxt_rx_ring_info *rxr, u16 cons,
+			u8 *data_ptr, unsigned int len,
+			netmem_ref netmem, struct xdp_buff *xdp)
 {
 	u32 buflen = rxr->xdp_frame_size;
 	struct bnxt_sw_rx_bd *rx_buf;
-	struct pci_dev *pdev;
-	dma_addr_t mapping;
+	u32 dma_offset;
 	u32 offset;
 
-	pdev = bp->pdev;
 	rx_buf = &rxr->rx_buf_ring[cons];
+	dma_offset = rx_buf->offset + rxr->rx_offset;
 	offset = rxr->xdp_headroom;
 
-	mapping = rx_buf->mapping - rxr->rx_dma_offset;
-	dma_sync_single_for_cpu(&pdev->dev, mapping + offset, len, bp->rx_dir);
+	page_pool_dma_sync_netmem_for_cpu(rxr->page_pool, netmem,
+					  dma_offset, len);
 
-	xdp_init_buff(xdp, buflen, &rxr->xdp_rxq);
+	xdp_init_buff_from_netmem(xdp, buflen, &rxr->xdp_rxq, netmem,
+				  &rxr->xdp_sinfo);
 	xdp_prepare_buff(xdp, data_ptr - offset, offset, len, true);
 }
 
@@ -210,9 +264,9 @@ void bnxt_xdp_buff_frags_free(struct bnxt_rx_ring_info *rxr,
 		return;
 	shinfo = xdp_get_shared_info_from_buff(xdp);
 	for (i = 0; i < shinfo->nr_frags; i++) {
-		struct page *page = skb_frag_page(&shinfo->frags[i]);
+		netmem_ref netmem = skb_frag_netmem(&shinfo->frags[i]);
 
-		page_pool_recycle_direct(rxr->page_pool, page);
+		page_pool_recycle_direct_netmem(rxr->page_pool, netmem);
 	}
 	shinfo->nr_frags = 0;
 }
@@ -222,10 +276,9 @@ void bnxt_xdp_buff_frags_free(struct bnxt_rx_ring_info *rxr,
  * false   - packet should be passed to the stack.
  */
 bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
-		 struct xdp_buff *xdp, struct page *page, u8 **data_ptr,
-		 unsigned int *len, u8 *event)
+		 struct xdp_buff *xdp, struct bpf_prog *xdp_prog,
+		 netmem_ref netmem, u8 **data_ptr, unsigned int *len, u8 *event)
 {
-	struct bpf_prog *xdp_prog = READ_ONCE(rxr->xdp_prog);
 	struct bnxt_tx_ring_info *txr;
 	struct bnxt_sw_rx_bd *rx_buf;
 	struct pci_dev *pdev;
@@ -236,9 +289,6 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 	u32 offset;
 	u32 act;
 
-	if (!xdp_prog)
-		return false;
-
 	pdev = bp->pdev;
 	offset = rxr->xdp_headroom;
 
@@ -248,11 +298,8 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 
 	act = bpf_prog_run_xdp(xdp_prog, xdp);
 
-	tx_avail = bnxt_tx_avail(bp, txr);
-	/* If the tx ring is not full, we must not update the rx producer yet
-	 * because we may still be transmitting on some BDs.
-	 */
-	if (tx_avail != bp->tx_ring_size)
+	/* Hold the RX producer while XDP_TX owns reposted RX buffers. */
+	if (txr->xdp_tx_pending)
 		*event &= ~BNXT_RX_EVENT;
 
 	*len = xdp->data_end - xdp->data;
@@ -270,11 +317,13 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 			     BNXT_DEV_STATE_CLOSING)) {
 			trace_xdp_exception(bp->dev, xdp_prog, act);
 			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_data(rxr, cons, page);
+			bnxt_reuse_rx_netmem(rxr, cons, netmem);
 			return true;
 		}
 		rx_buf = &rxr->rx_buf_ring[cons];
 		mapping = rx_buf->mapping - rxr->rx_dma_offset;
+		mapping += rxr->rx_offset - rxr->xdp_headroom;
+		tx_avail = bnxt_tx_avail(bp, txr);
 
 		if (unlikely(xdp_buff_has_frags(xdp))) {
 			struct skb_shared_info *sinfo = xdp_get_shared_info_from_buff(xdp);
@@ -285,7 +334,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		if (tx_avail < tx_needed) {
 			trace_xdp_exception(bp->dev, xdp_prog, act);
 			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_data(rxr, cons, page);
+			bnxt_reuse_rx_netmem(rxr, cons, netmem);
 			return true;
 		}
 
@@ -296,7 +345,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		*event |= BNXT_TX_EVENT;
 		__bnxt_xmit_xdp(bp, txr, mapping + offset, *len,
 				NEXT_RX(rxr->rx_prod), xdp);
-		bnxt_reuse_rx_data(rxr, cons, page);
+		bnxt_reuse_rx_netmem(rxr, cons, netmem);
 		return true;
 	case XDP_REDIRECT:
 		/* if we are calling this here then we know that the
@@ -308,13 +357,14 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		if (bnxt_alloc_rx_data(bp, rxr, rxr->rx_prod, GFP_ATOMIC)) {
 			trace_xdp_exception(bp->dev, xdp_prog, act);
 			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_data(rxr, cons, page);
+			bnxt_reuse_rx_netmem(rxr, cons, netmem);
 			return true;
 		}
 
 		if (xdp_do_redirect(bp->dev, xdp, xdp_prog)) {
 			trace_xdp_exception(bp->dev, xdp_prog, act);
-			page_pool_recycle_direct(rxr->page_pool, page);
+			bnxt_xdp_buff_frags_free(rxr, xdp);
+			page_pool_recycle_direct_netmem(rxr->page_pool, netmem);
 			return true;
 		}
 
@@ -328,7 +378,7 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		fallthrough;
 	case XDP_DROP:
 		bnxt_xdp_buff_frags_free(rxr, xdp);
-		bnxt_reuse_rx_data(rxr, cons, page);
+		bnxt_reuse_rx_netmem(rxr, cons, netmem);
 		break;
 	}
 	return true;

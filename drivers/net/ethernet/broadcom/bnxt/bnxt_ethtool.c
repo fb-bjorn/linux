@@ -5163,6 +5163,7 @@ static int bnxt_run_loopback(struct bnxt *bp)
 {
 	struct bnxt_tx_ring_info *txr = &bp->tx_ring[0];
 	struct bnxt_rx_ring_info *rxr = &bp->rx_ring[0];
+	struct bnxt_sw_tx_bd *tx_buf;
 	struct bnxt_cp_ring_info *cpr;
 	int pkt_size, i = 0;
 	struct sk_buff *skb;
@@ -5192,7 +5193,10 @@ static int bnxt_run_loopback(struct bnxt *bp)
 		dev_kfree_skb(skb);
 		return -EIO;
 	}
-	bnxt_xmit_bd(bp, txr, map, pkt_size, NULL);
+	tx_buf = bnxt_xmit_bd(bp, txr, map, pkt_size, NULL);
+	if ((txr->bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+	    txr == txr->bnapi->tx_ring[0])
+		tx_buf->action = BNXT_XDP_TX_LOOPBACK;
 
 	/* Sync BD data before updating doorbell */
 	wmb();
