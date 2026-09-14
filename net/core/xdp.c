@@ -23,6 +23,8 @@
 #include <trace/events/xdp.h>
 #include <net/xdp_sock_drv.h>
 
+#include "dev.h"
+
 #define REG_STATE_NEW		0x0
 #define REG_STATE_REGISTERED	0x1
 #define REG_STATE_UNREGISTERED	0x2
@@ -621,7 +623,16 @@ err:
 	return false;
 }
 
-struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
+/**
+ * xdp_copy_zc_to_xdp_frame - copy a zero-copy buff into a page-backed frame
+ * @xdp: zero-copy &xdp_buff to copy
+ *
+ * The source keeps its buffers, so a caller that cannot hand the frame on
+ * must free the frame and may still return the source to its owner.
+ *
+ * Return: new frame on success, %NULL on failure.
+ */
+struct xdp_frame *xdp_copy_zc_to_xdp_frame(struct xdp_buff *xdp)
 {
 	unsigned int metasize, totsize;
 	void *addr, *data_to_copy;
@@ -663,7 +674,22 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 		}
 	}
 
+	return xdpf;
+}
+
+void xdp_release_zc_buff(struct xdp_buff *xdp)
+{
 	xsk_buff_free(xdp);
+}
+
+struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
+{
+	struct xdp_frame *xdpf;
+
+	xdpf = xdp_copy_zc_to_xdp_frame(xdp);
+	if (xdpf)
+		xdp_release_zc_buff(xdp);
+
 	return xdpf;
 }
 EXPORT_SYMBOL_GPL(xdp_convert_zc_to_xdp_frame);
