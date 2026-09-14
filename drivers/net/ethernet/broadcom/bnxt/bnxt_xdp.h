@@ -10,6 +10,9 @@
 #ifndef BNXT_XDP_H
 #define BNXT_XDP_H
 
+#include <net/page_pool/helpers.h>
+#include <net/xdp_sock_drv.h>
+
 DECLARE_STATIC_KEY_FALSE(bnxt_xdp_locking_key);
 
 #define BNXT_XDP_TAILROOM	SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
@@ -39,10 +42,17 @@ struct bnxt_sw_tx_bd *bnxt_xmit_bd(struct bnxt *bp,
 				   dma_addr_t mapping, u32 len,
 				   struct xdp_buff *xdp);
 void bnxt_tx_int_xdp(struct bnxt *bp, struct bnxt_napi *bnapi, int budget);
+/* State of the RX producer slot after a packet was handled. */
+enum bnxt_rx_slot {
+	BNXT_RX_SLOT_FILLED,
+	/* An XSK ring delivered without a replacement; refill later. */
+	BNXT_RX_SLOT_EMPTY,
+};
+
 bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		 struct xdp_buff *xdp, struct bpf_prog *xdp_prog,
 		 netmem_ref netmem, u8 **data_ptr, unsigned int *len,
-		 u8 *event);
+		 u8 *event, enum bnxt_rx_slot *slot);
 int bnxt_xdp(struct net_device *dev, struct netdev_bpf *xdp);
 int bnxt_xdp_xmit(struct net_device *dev, int num_frames,
 		  struct xdp_frame **frames, u32 flags);
@@ -57,7 +67,25 @@ struct sk_buff *bnxt_xdp_build_skb(struct bnxt *bp, struct sk_buff *skb,
 				   struct xdp_buff *xdp);
 int bnxt_xdp_rx_hash(const struct xdp_md *ctx, u32 *hash,
 		     enum xdp_rss_hash_type *rss_type);
+
+int bnxt_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags);
 void bnxt_free_xdp_tx_ring(struct bnxt *bp,
 			   struct bnxt_tx_ring_info *txr);
+int bnxt_xsk_validate_mtu(struct bnxt *bp, unsigned int mtu,
+			  struct netlink_ext_ack *extack);
+
+static inline struct xsk_buff_pool *
+bnxt_xsk_pool(struct bnxt *bp, unsigned int queue_id)
+{
+	return xsk_get_pool_from_rxq(bp->dev, queue_id);
+}
+
+static inline u32 bnxt_xsk_rx_size(struct xsk_buff_pool *pool)
+{
+	u32 frame_size = __xsk_pool_get_rx_frame_size(pool);
+
+	frame_size -= xsk_pool_get_tailroom(xsk_pool_uses_sg(pool));
+	return ALIGN_DOWN(frame_size, XSK_RX_FRAME_SIZE_ALIGN);
+}
 
 #endif

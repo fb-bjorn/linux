@@ -283,7 +283,8 @@ void bnxt_xdp_buff_frags_free(struct bnxt_rx_ring_info *rxr,
  */
 bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 		 struct xdp_buff *xdp, struct bpf_prog *xdp_prog,
-		 netmem_ref netmem, u8 **data_ptr, unsigned int *len, u8 *event)
+		 netmem_ref netmem, u8 **data_ptr, unsigned int *len, u8 *event,
+		 enum bnxt_rx_slot *slot)
 {
 	struct bnxt_tx_ring_info *txr;
 	struct bnxt_sw_rx_bd *rx_buf;
@@ -361,10 +362,16 @@ bool bnxt_rx_xdp(struct bnxt *bp, struct bnxt_rx_ring_info *rxr, u16 cons,
 
 		/* if we are unable to allocate a new buffer, abort and reuse */
 		if (bnxt_alloc_rx_data(bp, rxr, rxr->rx_prod, GFP_ATOMIC)) {
-			trace_xdp_exception(bp->dev, xdp_prog, act);
-			bnxt_xdp_buff_frags_free(rxr, xdp);
-			bnxt_reuse_rx_netmem(rxr, cons, netmem);
-			return true;
+			if (!rxr->xsk_pool) {
+				trace_xdp_exception(bp->dev, xdp_prog, act);
+				bnxt_xdp_buff_frags_free(rxr, xdp);
+				bnxt_reuse_rx_netmem(rxr, cons, netmem);
+				return true;
+			}
+			/* An XSK FILL ring stays empty until userspace receives
+			 * frames. Deliver this one and refill the slot later.
+			 */
+			*slot = BNXT_RX_SLOT_EMPTY;
 		}
 
 		if (xdp_do_redirect(bp->dev, xdp, xdp_prog)) {
