@@ -575,7 +575,7 @@ EXPORT_SYMBOL_GPL(xdp_attachment_setup);
 
 struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 {
-	unsigned int metasize, totsize;
+	unsigned int data_len, headroom, min_headroom, metasize, totsize;
 	void *addr, *data_to_copy;
 	struct xdp_frame *xdpf;
 	struct page *page;
@@ -584,9 +584,16 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 	metasize = xdp_data_meta_unsupported(xdp) ? 0 :
 		   xdp->data - xdp->data_meta;
 	totsize = xdp->data_end - xdp->data + metasize;
+	data_len = totsize - metasize;
+	min_headroom = sizeof(*xdpf) + metasize;
+	headroom = xdp->data - xdp->data_hard_start;
+	headroom = max(headroom, min_headroom);
 
-	if (sizeof(*xdpf) + totsize > SKB_WITH_OVERHEAD(PAGE_SIZE))
+	/* Fragments need the shared info at the end of the page. */
+	if (data_len > SKB_WITH_OVERHEAD(PAGE_SIZE) - min_headroom)
 		return NULL;
+	if (headroom > SKB_WITH_OVERHEAD(PAGE_SIZE) - data_len)
+		headroom = min_headroom;
 
 	page = dev_alloc_page();
 	if (!page)
@@ -596,13 +603,13 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 	xdpf = addr;
 	memset(xdpf, 0, sizeof(*xdpf));
 
-	addr += sizeof(*xdpf);
+	addr += headroom - metasize;
 	data_to_copy = metasize ? xdp->data_meta : xdp->data;
 	memcpy(addr, data_to_copy, totsize);
 
 	xdpf->data = addr + metasize;
 	xdpf->len = totsize - metasize;
-	xdpf->headroom = metasize;
+	xdpf->headroom = headroom - sizeof(*xdpf);
 	xdpf->metasize = metasize;
 	xdpf->frame_sz = PAGE_SIZE;
 	xdpf->mem_type = MEM_TYPE_PAGE_ORDER0;
