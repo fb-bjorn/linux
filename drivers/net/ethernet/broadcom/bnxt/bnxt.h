@@ -2478,6 +2478,7 @@ struct bnxt {
 #define BNXT_STATE_FW_NON_FATAL_COND	13
 #define BNXT_STATE_FW_ACTIVATE_RESET	14
 #define BNXT_STATE_HALF_OPEN		15	/* For offline ethtool tests */
+#define BNXT_STATE_QUEUE_RECOVER	16
 
 #define BNXT_NO_FW_ACCESS(bp)					\
 	(test_bit(BNXT_STATE_FW_FATAL_COND, &(bp)->state) ||	\
@@ -2559,7 +2560,8 @@ struct bnxt {
 	((bp)->fw_cap & BNXT_FW_CAP_ROCE_VF_DYN_ALLOC_SUPPORT)
 #define BNXT_SUPPORTS_QUEUE_API(bp)				\
 	(BNXT_PF(bp) && BNXT_SUPPORTS_NTUPLE_VNIC(bp) &&	\
-	 ((bp)->fw_cap & BNXT_FW_CAP_VNIC_RE_FLUSH))
+	 ((bp)->fw_cap & BNXT_FW_CAP_VNIC_RE_FLUSH) &&		\
+	 !pcie_reset_flr((bp)->pdev, PCI_RESET_PROBE))
 #define BNXT_RDMA_SRIOV_EN(bp)		\
 	((bp)->fw_cap & BNXT_FW_CAP_ENABLE_RDMA_SRIOV)
 #define BNXT_ROCE_VF_RESC_CAP(bp)	\
@@ -2651,6 +2653,7 @@ struct bnxt {
 #define BNXT_THERMAL_THRESHOLD_SP_EVENT	22
 #define BNXT_FW_ECHO_REQUEST_SP_EVENT	23
 #define BNXT_RESTART_ULP_SP_EVENT	24
+#define BNXT_QUEUE_RECOVER_SP_EVENT	25
 
 	struct delayed_work	fw_reset_task;
 	int			fw_reset_state;
