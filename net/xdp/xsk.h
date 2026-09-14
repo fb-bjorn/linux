@@ -4,6 +4,44 @@
 #ifndef XSK_H_
 #define XSK_H_
 
+#include <net/netmem.h>
+
+struct xsk_buff_pool;
+
+enum xsk_pool_clear_mode {
+	XSK_POOL_CLEAR_NORMAL,
+	XSK_POOL_CLEAR_FORCE,
+};
+
+struct xsk_pp_info {
+	struct net_iov_area area;
+	struct xsk_buff_pool *pool;
+	u32 chunk_shift;
+	u32 headroom;
+};
+
+int xp_clear_dev(struct xsk_buff_pool *pool, enum xsk_pool_clear_mode mode);
+
+static inline bool xp_netmem_is_xsk(netmem_ref netmem)
+{
+	return netmem_is_net_iov(netmem) &&
+	       netmem_to_net_iov(netmem)->type == NET_IOV_XSK;
+}
+
+static inline struct xsk_pp_info *xp_netmem_to_pp(netmem_ref netmem)
+{
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+
+	return container_of(net_iov_owner(niov), struct xsk_pp_info, area);
+}
+
+static inline bool xp_netmem_is_from_pool(netmem_ref netmem,
+					  const struct xsk_buff_pool *pool)
+{
+	return xp_netmem_is_xsk(netmem) &&
+	       xp_netmem_to_pp(netmem)->pool == pool;
+}
+
 struct xdp_ring_offset_v1 {
 	__u64 producer;
 	__u64 consumer;

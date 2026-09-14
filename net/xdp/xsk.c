@@ -498,6 +498,14 @@ static int xsk_rcv(struct xdp_sock *xs, struct xdp_buff *xdp)
 		return xsk_rcv_zc(xs, xdp, len);
 	}
 
+	/* Provider allocation consumes FILL in the owning RX NAPI context.
+	 * Reject synthetic RX queues before their remote context can enter
+	 * the provider pool's lockless copy fallback.
+	 */
+	if (unlikely(READ_ONCE(xs->pool->pp) &&
+		     !xdp_rxq_info_is_reg(xdp->rxq)))
+		return -EINVAL;
+
 	err = __xsk_rcv(xs, xdp, len);
 	if (!err)
 		xdp_return_buff(xdp);
@@ -2189,8 +2197,8 @@ static int xsk_notifier(struct notifier_block *this,
 
 				xsk_unbind_dev(xs);
 
-				/* Clear device references. */
-				xp_clear_dev(xs->pool);
+				/* Unregister cannot hold a device reference. */
+				xp_clear_dev(xs->pool, XSK_POOL_CLEAR_FORCE);
 			}
 			mutex_unlock(&xs->mutex);
 		}

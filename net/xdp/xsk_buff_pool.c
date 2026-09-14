@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/netdevice.h>
+#include <linux/sizes.h>
 #include <net/netdev_lock.h>
+#include <net/netdev_queues.h>
+#include <net/netdev_rx_queue.h>
+#include <net/page_pool/helpers.h>
 #include <net/page_pool/memory_provider.h>
 #include <net/xsk_buff_pool.h>
 #include <net/xdp_sock.h>
@@ -12,6 +16,37 @@
 #include "xsk.h"
 
 #define ETH_PAD_LEN (ETH_HLEN + 2 * VLAN_HLEN  + ETH_FCS_LEN)
+#define XSK_PAGE_POOL_DMA_ATTR	(DMA_ATTR_WEAK_ORDERING | \
+				 DMA_ATTR_SKIP_CPU_SYNC)
+#define XSK_POOL_RELEASE_RETRY_MAX	(60 * HZ)
+
+/* Keep page_pool descriptors independent from direct-driver XSK buffers.
+ * Provider-private data and the FILL ring follow the page_pool single-consumer
+ * contract. Generic XDP cannot deliver to a provider-backed socket.
+ */
+struct xsk_pp {
+	struct xsk_pp_info info;
+	struct xsk_queue __rcu *fq;
+	struct page_pool *active_pp;
+	u64 chunk_mask;
+	u64 addrs_cnt;
+	u32 reuse_cnt;
+	u8 release_retries;
+	bool dma_need_sync;
+	bool detached;
+	u32 reuse[];
+};
+
+static bool xp_pp_teardown(struct xsk_buff_pool *pool);
+static void xp_pp_retry_release(struct xsk_buff_pool *pool);
+static void xp_destroy_unbound_deferred(struct work_struct *work);
+
+static void __xp_destroy(struct xsk_buff_pool *pool)
+{
+	kvfree(pool->tx_descs);
+	kvfree(pool->heads);
+	kvfree(pool);
+}
 
 void xp_add_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs)
 {
@@ -38,9 +73,22 @@ void xp_destroy(struct xsk_buff_pool *pool)
 	if (!pool)
 		return;
 
-	kvfree(pool->tx_descs);
-	kvfree(pool->heads);
-	kvfree(pool);
+	/* A failed queue replacement can leave a page_pool waiting for an
+	 * in-flight buffer.  Keep the UMEM and pool alive until its provider
+	 * destroy callback has run.
+	 */
+	if (pool->pp) {
+		rcu_assign_pointer(pool->pp->fq, NULL);
+		WRITE_ONCE(pool->fq, NULL);
+		WRITE_ONCE(pool->cq, NULL);
+		synchronize_net();
+		xdp_get_umem(pool->umem);
+		INIT_DELAYED_WORK(&pool->work, xp_destroy_unbound_deferred);
+		schedule_delayed_work(&pool->work, 0);
+		return;
+	}
+
+	__xp_destroy(pool);
 }
 
 int xp_alloc_tx_descs(struct xsk_buff_pool *pool, struct xdp_sock *xs,
@@ -143,23 +191,20 @@ void xp_fill_cb(struct xsk_buff_pool *pool, struct xsk_cb_desc *desc)
 }
 EXPORT_SYMBOL(xp_fill_cb);
 
-static void xp_disable_drv_zc(struct xsk_buff_pool *pool)
+static int xp_disable_drv_zc(struct xsk_buff_pool *pool)
 {
 	struct netdev_bpf bpf = {};
-	int err;
 
 	ASSERT_RTNL();
 
-	if (pool->umem->zc) {
-		bpf.command = XDP_SETUP_XSK_POOL;
-		bpf.xsk.pool = NULL;
-		bpf.xsk.queue_id = pool->queue_id;
+	if (!pool->umem->zc)
+		return 0;
 
-		err = pool->netdev->netdev_ops->ndo_bpf(pool->netdev, &bpf);
+	bpf.command = XDP_SETUP_XSK_POOL;
+	bpf.xsk.pool = NULL;
+	bpf.xsk.queue_id = pool->queue_id;
 
-		if (err)
-			WARN(1, "Failed to disable zero-copy!\n");
-	}
+	return pool->netdev->netdev_ops->ndo_bpf(pool->netdev, &bpf);
 }
 
 int xp_assign_dev(struct xsk_buff_pool *pool,
@@ -167,10 +212,12 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 {
 	u32 needed = netdev->mtu + ETH_PAD_LEN;
 	u32 segs = netdev->xdp_zc_max_segs;
+	bool old_zc = pool->umem->zc;
 	bool mbuf = flags & XDP_USE_SG;
 	bool force_zc, force_copy;
 	struct netdev_bpf bpf = {};
 	u32 frame_size;
+	int disable_err;
 	int err = 0;
 
 	ASSERT_RTNL();
@@ -252,23 +299,38 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 	if (err)
 		goto err_unreg_pool;
 
+	/* Record the successful driver install before validating its result so
+	 * the error path can issue the matching XDP_SETUP_XSK_POOL teardown.
+	 */
+	pool->umem->zc = true;
 	if (!pool->dma_pages) {
 		WARN(1, "Driver did not DMA map zero-copy buffers");
 		err = -EINVAL;
 		goto err_unreg_xsk;
 	}
-	pool->umem->zc = true;
 	pool->xdp_zc_max_segs = netdev->xdp_zc_max_segs;
 	return 0;
 
 err_unreg_xsk:
-	xp_disable_drv_zc(pool);
+	disable_err = xp_disable_drv_zc(pool);
+	if (!disable_err) {
+		if (pool->pp)
+			pool->pp->detached = true;
+		pool->umem->zc = old_zc;
+	}
+	WARN_ON_ONCE(disable_err);
 err_unreg_pool:
-	if (!force_zc)
+	/* A provider whose page_pool destruction was deferred still owns the
+	 * DMA mapping.  Do not turn that failed zero-copy setup into copy mode.
+	 */
+	if (!force_zc && !pool->pp && err != -ENETDOWN)
 		err = 0; /* fallback to copy mode */
 	if (err) {
 		xsk_clear_pool_at_qid(netdev, queue_id);
-		dev_put(netdev);
+		if (!pool->pp) {
+			pool->netdev = NULL;
+			dev_put(netdev);
+		}
 	}
 	return err;
 }
@@ -292,29 +354,99 @@ int xp_assign_dev_shared(struct xsk_buff_pool *pool, struct xdp_sock *umem_xs,
 	return xp_assign_dev(pool, dev, queue_id, flags);
 }
 
-void xp_clear_dev(struct xsk_buff_pool *pool)
+static void xp_pp_force_dma_unmap(struct xsk_buff_pool *pool)
 {
-	struct net_device *netdev = pool->netdev;
-
-	if (!pool->netdev)
+	if (!pool->dma_map)
 		return;
 
+	pool->dma_map->netdev = NULL;
+	xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+}
+
+int xp_clear_dev(struct xsk_buff_pool *pool, enum xsk_pool_clear_mode mode)
+{
+	struct net_device *netdev = pool->netdev;
+	struct xsk_pp *provider = pool->pp;
+	int err;
+
+	if (!netdev)
+		return 0;
+	/* Keep this reference after a normal detach. It keeps the netdev
+	 * identity stable for shared DMA-map lookup and lets unregister
+	 * invalidate that mapping while the old page_pool drains.
+	 */
+	if (provider && provider->detached) {
+		if (mode != XSK_POOL_CLEAR_FORCE)
+			return 0;
+		xp_pp_force_dma_unmap(pool);
+		pool->netdev = NULL;
+		dev_put(netdev);
+		return 0;
+	}
+
 	netdev_lock_ops(netdev);
-	xp_disable_drv_zc(pool);
+	err = xp_disable_drv_zc(pool);
+	if (err && provider && mode != XSK_POOL_CLEAR_FORCE)
+		goto unlock;
+	if (err && !provider)
+		WARN_ON_ONCE(err);
+
 	xsk_clear_pool_at_qid(pool->netdev, pool->queue_id);
-	pool->netdev = NULL;
+	if (provider) {
+		provider->detached = true;
+		if (mode == XSK_POOL_CLEAR_FORCE) {
+			xp_pp_force_dma_unmap(pool);
+			pool->netdev = NULL;
+		}
+	} else {
+		pool->netdev = NULL;
+	}
+unlock:
 	netdev_unlock_ops(netdev);
-	dev_put(netdev);
+	if (err && provider && mode != XSK_POOL_CLEAR_FORCE)
+		return err;
+
+	if (!provider || mode == XSK_POOL_CLEAR_FORCE)
+		dev_put(netdev);
+	return provider && mode != XSK_POOL_CLEAR_FORCE ? err : 0;
 }
 
 static void xp_release_deferred(struct work_struct *work)
 {
-	struct xsk_buff_pool *pool = container_of(work, struct xsk_buff_pool,
-						  work);
+	struct xsk_buff_pool *pool;
+	struct net_device *netdev = NULL;
+	bool teardown_done = true;
+	int err;
+
+	pool = container_of(to_delayed_work(work), struct xsk_buff_pool, work);
 
 	rtnl_lock();
-	xp_clear_dev(pool);
+	err = xp_clear_dev(pool, XSK_POOL_CLEAR_NORMAL);
+	if (!err) {
+		teardown_done = xp_pp_teardown(pool);
+		if (teardown_done && pool->netdev) {
+			netdev = pool->netdev;
+			pool->netdev = NULL;
+		}
+	}
+	if (err) {
+		WARN_ON_ONCE(err != -EBUSY && err != -ENOMEM);
+		if (pool->netdev && net_ratelimit())
+			netdev_warn(pool->netdev,
+				    "AF_XDP queue %u release failed: %d; retrying\n",
+				    pool->queue_id, err);
+		rtnl_unlock();
+		/* Retry while the queue still owns the pool. */
+		xp_pp_retry_release(pool);
+		return;
+	}
 	rtnl_unlock();
+	if (!teardown_done) {
+		xp_pp_retry_release(pool);
+		return;
+	}
+	if (netdev)
+		dev_put(netdev);
 
 	if (pool->fq) {
 		xskq_destroy(pool->fq);
@@ -327,7 +459,7 @@ static void xp_release_deferred(struct work_struct *work)
 	}
 
 	xdp_put_umem(pool->umem, false);
-	xp_destroy(pool);
+	__xp_destroy(pool);
 }
 
 void xp_get_pool(struct xsk_buff_pool *pool)
@@ -341,8 +473,8 @@ bool xp_put_pool(struct xsk_buff_pool *pool)
 		return false;
 
 	if (refcount_dec_and_test(&pool->users)) {
-		INIT_WORK(&pool->work, xp_release_deferred);
-		schedule_work(&pool->work);
+		INIT_DELAYED_WORK(&pool->work, xp_release_deferred);
+		schedule_delayed_work(&pool->work, 0);
 		return true;
 	}
 
@@ -518,6 +650,528 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 	return 0;
 }
 EXPORT_SYMBOL(xp_dma_map);
+
+static void xp_pp_free(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider = pool->pp;
+	u32 idx;
+
+	if (!provider)
+		return;
+	if (WARN_ON_ONCE(READ_ONCE(provider->active_pp)))
+		return;
+
+	/* A failed queue install may have consumed FILL entries before the
+	 * replacement queue failed to start. Preserve those frames for the
+	 * direct or copy-mode allocator selected by bind fallback.
+	 */
+	while (provider->reuse_cnt) {
+		idx = provider->reuse[--provider->reuse_cnt];
+		xp_free(&pool->heads[idx]);
+	}
+
+	spin_lock_bh(&pool->rx_lock);
+	WRITE_ONCE(pool->pp, NULL);
+	spin_unlock_bh(&pool->rx_lock);
+	kvfree(provider->info.area.niovs);
+	kvfree(provider);
+}
+
+static bool xp_pp_teardown(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider = pool->pp;
+
+	if (!provider)
+		return true;
+	if (WARN_ON_ONCE(!provider->detached))
+		return false;
+	if (READ_ONCE(provider->active_pp))
+		return false;
+
+	xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+	xp_pp_free(pool);
+
+	return true;
+}
+
+static void xp_pp_retry_release(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider = pool->pp;
+	unsigned long delay = HZ;
+	u8 retries;
+
+	if (provider) {
+		retries = provider->release_retries;
+		if (retries < 6)
+			provider->release_retries++;
+		delay = min_t(unsigned long, HZ << retries,
+			      XSK_POOL_RELEASE_RETRY_MAX);
+	}
+	schedule_delayed_work(&pool->work, delay);
+}
+
+static void xp_destroy_unbound_deferred(struct work_struct *work)
+{
+	struct xsk_buff_pool *pool;
+	struct net_device *netdev;
+
+	pool = container_of(to_delayed_work(work), struct xsk_buff_pool, work);
+
+	rtnl_lock();
+	if (!xp_pp_teardown(pool)) {
+		rtnl_unlock();
+		xp_pp_retry_release(pool);
+		return;
+	}
+	netdev = pool->netdev;
+	pool->netdev = NULL;
+	rtnl_unlock();
+
+	if (netdev)
+		dev_put(netdev);
+	xdp_put_umem(pool->umem, false);
+	__xp_destroy(pool);
+}
+
+static struct xsk_pp *xp_pp_create(struct xsk_buff_pool *pool)
+{
+	struct xsk_pp *provider;
+	struct net_iov *niov;
+	dma_addr_t dma;
+	u64 addr;
+	u32 i;
+
+	provider = kvzalloc_flex(*provider, reuse, pool->heads_cnt);
+	if (!provider)
+		return ERR_PTR(-ENOMEM);
+
+	provider->info.area.niovs =
+		kvzalloc_objs(*provider->info.area.niovs, pool->heads_cnt);
+	if (!provider->info.area.niovs) {
+		kvfree(provider);
+		return ERR_PTR(-ENOMEM);
+	}
+	provider->info.pool = pool;
+	RCU_INIT_POINTER(provider->fq, pool->fq);
+	provider->info.area.num_niovs = pool->heads_cnt;
+	provider->info.area.base_virtual = (unsigned long)pool->addrs;
+	provider->chunk_mask = pool->chunk_mask;
+	provider->addrs_cnt = pool->addrs_cnt;
+	provider->info.chunk_shift = pool->chunk_shift;
+	provider->info.headroom = pool->headroom;
+	provider->dma_need_sync = dma_dev_need_sync(pool->dev);
+
+	for (i = 0; i < provider->info.area.num_niovs; i++) {
+		niov = &provider->info.area.niovs[i];
+		addr = (u64)i << provider->info.chunk_shift;
+		dma = (pool->dma_pages[addr >> PAGE_SHIFT] &
+		       ~XSK_NEXT_PG_CONTIG_MASK) + (addr & ~PAGE_MASK);
+
+		net_iov_init(niov, &provider->info.area, NET_IOV_XSK);
+		if (net_mp_niov_set_dma_addr(niov, dma))
+			goto err_free_niovs;
+	}
+
+	/* Exclude generic receive which may also consume this pool's FILL
+	 * ring.
+	 */
+	spin_lock_bh(&pool->rx_lock);
+	WRITE_ONCE(pool->pp, provider);
+	spin_unlock_bh(&pool->rx_lock);
+	return provider;
+
+err_free_niovs:
+	kvfree(provider->info.area.niovs);
+	kvfree(provider);
+	return ERR_PTR(-ERANGE);
+}
+
+static int xp_pp_init(struct page_pool *pp)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+
+	if (!provider || !pool->dma_pages)
+		return -EINVAL;
+	if (pp->p.order)
+		return -E2BIG;
+	if (pp->p.dev != pool->dev ||
+	    pp->p.dma_dir != DMA_BIDIRECTIONAL)
+		return -EINVAL;
+
+	/* A provider has one page-pool allocation and recycle owner. Do not let
+	 * queue replacement overlap two page pools backed by the same provider.
+	 * Normal RX, FILL consumption, and recycling are serialized by the
+	 * queue's NAPI context.
+	 */
+	if (cmpxchg(&provider->active_pp, NULL, pp))
+		return -EBUSY;
+
+	return 0;
+}
+
+static void xp_pp_destroy(struct page_pool *pp)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	u32 i;
+
+	if (WARN_ON_ONCE(READ_ONCE(provider->active_pp) != pp))
+		return;
+
+	/* Provider objects can outlive a page_pool while userspace owns them.
+	 * Clear retained associations before the page_pool itself is freed, so
+	 * pointer reuse cannot make a later page_pool look like the same one.
+	 */
+	for (i = 0; i < provider->info.area.num_niovs; i++) {
+		struct net_iov *niov = &provider->info.area.niovs[i];
+		netmem_ref netmem = net_iov_to_netmem(niov);
+
+		if (netmem_get_pp(netmem) == pp)
+			net_mp_niov_clear_page_pool(niov);
+	}
+
+	if (cmpxchg(&provider->active_pp, pp, NULL) != pp) {
+		WARN_ON_ONCE(1);
+		return;
+	}
+}
+
+static netmem_ref xp_pp_prepare_netmem(struct page_pool *pp,
+				       struct xsk_pp *provider,
+				       struct net_iov *niov)
+{
+	netmem_ref netmem = net_iov_to_netmem(niov);
+	dma_addr_t dma = page_pool_get_dma_addr_netmem(netmem);
+
+	if (provider->dma_need_sync)
+		dma_sync_single_range_for_device(pp->p.dev, dma,
+						 pp->p.offset, pp->p.max_len,
+						 pp->p.dma_dir);
+
+	return netmem;
+}
+
+static unsigned int
+xp_pp_alloc_reused(struct xsk_pp *provider, netmem_ref *netmems,
+		   unsigned int max)
+{
+	unsigned int entries;
+	unsigned int allocated = 0;
+	unsigned int i;
+	u32 idx;
+
+	entries = min(max, provider->reuse_cnt);
+	for (i = 0; i < entries; i++) {
+		idx = provider->reuse[--provider->reuse_cnt];
+		netmems[allocated++] =
+			net_iov_to_netmem(&provider->info.area.niovs[idx]);
+	}
+
+	/* page_pool normally synced these buffers before ->release_netmem(),
+	 * but page_pool teardown disables DMA sync before emptying its caches.
+	 * Conservatively prepare both reuse and FQ buffers below.
+	 */
+	return allocated;
+}
+
+static unsigned int xp_pp_alloc_fq(struct xsk_pp *provider,
+				   netmem_ref *netmems, unsigned int max)
+{
+	struct xsk_buff_pool *pool = provider->info.pool;
+	struct xsk_queue *fq;
+	struct net_iov *niov;
+	u64 addr;
+	unsigned int allocated = 0;
+	u32 cached_cons, entries;
+	u32 cons, idx;
+	u32 i;
+
+	rcu_read_lock_bh();
+	fq = rcu_dereference_bh(provider->fq);
+	if (!fq)
+		goto out;
+
+	entries = xskq_cons_nb_entries(fq, max);
+	if (!entries && pool->uses_need_wakeup) {
+		/* Publish NEED_WAKEUP before checking again. */
+		xsk_set_rx_need_wakeup(pool);
+		/* Pair the publication with the producer recheck. */
+		smp_mb();
+		entries = xskq_cons_nb_entries(fq, max);
+	}
+	if (!entries) {
+		fq->queue_empty_descs++;
+		goto out;
+	}
+
+	cached_cons = fq->cached_cons;
+	for (i = 0; i < entries; i++) {
+		cons = cached_cons++;
+		__xskq_cons_read_addr_unchecked(fq, cons, &addr);
+		addr &= provider->chunk_mask;
+		if (unlikely(addr >= provider->addrs_cnt)) {
+			fq->invalid_descs++;
+			continue;
+		}
+
+		idx = addr >> provider->info.chunk_shift;
+		niov = &provider->info.area.niovs[idx];
+		netmems[allocated++] = net_iov_to_netmem(niov);
+	}
+
+	xskq_cons_release_n(fq, entries);
+	__xskq_cons_release(fq);
+out:
+	rcu_read_unlock_bh();
+	return allocated;
+}
+
+static netmem_ref xp_pp_alloc_netmems(struct page_pool *pp, gfp_t gfp)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	netmem_ref *netmems = pp->alloc.cache;
+	unsigned int allocated;
+	unsigned int i;
+
+	if (WARN_ON_ONCE(pp->alloc.count))
+		return 0;
+
+	allocated = xp_pp_alloc_reused(provider, netmems,
+				       PP_ALLOC_CACHE_REFILL);
+	if (allocated < PP_ALLOC_CACHE_REFILL)
+		allocated += xp_pp_alloc_fq(provider, netmems + allocated,
+					    PP_ALLOC_CACHE_REFILL - allocated);
+	if (!allocated)
+		return 0;
+
+	/* The selected netmems cannot be observed by the driver until this
+	 * callback returns. Finish DMA and page-pool setup before that handoff.
+	 */
+	for (i = 0; i < allocated; i++) {
+		struct net_iov *niov = netmem_to_net_iov(netmems[i]);
+
+		netmems[i] = xp_pp_prepare_netmem(pp, provider, niov);
+	}
+	net_mp_netmem_set_page_pool_bulk(pp, netmems, allocated);
+
+	allocated--;
+	pp->alloc.count = allocated;
+	return netmems[allocated];
+}
+
+static bool xp_pp_release_netmem(struct page_pool *pp, netmem_ref netmem)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+	u32 idx = net_iov_idx(niov);
+
+	/* XDP_PASS and foreign redirects copy provider memory before release;
+	 * XSKMAP transfers it to userspace. Other RX returns stay in the
+	 * queue's serialized poll context, which may be a syscall busy loop
+	 * rather than softirq context. Teardown drains caches only after that
+	 * context is quiesced, so this stack needs no lock. Repeated FILL
+	 * addresses are a userspace error. Match direct XSK by containing the
+	 * damage without warning or per-frame ownership state.
+	 */
+	if (unlikely(provider->reuse_cnt >= provider->info.area.num_niovs))
+		return false;
+	provider->reuse[provider->reuse_cnt++] = idx;
+
+	return false;
+}
+
+static void *xp_pp_get_netmem_addr(netmem_ref netmem, u32 *offset)
+{
+	struct xsk_pp_info *provider = xp_netmem_to_pp(netmem);
+	struct net_iov *niov = netmem_to_net_iov(netmem);
+
+	if (offset)
+		*offset = provider->headroom;
+
+	return (void *)provider->area.base_virtual +
+	       ((u64)net_iov_idx(niov) << provider->chunk_shift);
+}
+
+static bool xp_pp_refill_done(struct page_pool *pp, bool full)
+{
+	struct xsk_buff_pool *pool = pp->mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	bool need_wakeup = pool->uses_need_wakeup;
+	struct xsk_queue *fq;
+	bool pending;
+
+	if (likely(full) &&
+	    (!need_wakeup || !(pool->cached_need_wakeup & XDP_WAKEUP_RX)))
+		return true;
+
+	rcu_read_lock_bh();
+	fq = rcu_dereference_bh(provider->fq);
+	if (!fq) {
+		rcu_read_unlock_bh();
+		return true;
+	}
+
+	if (full) {
+		if (need_wakeup)
+			xsk_clear_rx_need_wakeup(pool);
+		rcu_read_unlock_bh();
+		return true;
+	}
+
+	pending = xskq_cons_nb_entries(fq, 1);
+	if (!pending && need_wakeup) {
+		xsk_set_rx_need_wakeup(pool);
+		smp_mb(); /* Order NEED_WAKEUP before the producer recheck. */
+		pending = xskq_cons_nb_entries(fq, 1);
+	}
+	rcu_read_unlock_bh();
+
+	return pending ? false : need_wakeup;
+}
+
+static int xp_pp_nl_fill(void *mp_priv, struct sk_buff *rsp,
+			 struct netdev_rx_queue *rxq)
+{
+	return 0;
+}
+
+static void xp_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq)
+{
+	struct xsk_buff_pool *pool = mp_priv;
+	struct xsk_pp *provider = pool->pp;
+	struct net_device *netdev = pool->netdev;
+
+	if (!netdev)
+		goto clear_rxq;
+
+	/* Device unregister supersedes a failed deferred queue close. */
+	xsk_clear_pool_at_qid(netdev, pool->queue_id);
+	if (provider)
+		provider->detached = true;
+	else
+		WARN_ON_ONCE(1);
+	if (pool->dma_map) {
+		pool->dma_map->netdev = NULL;
+		xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+	}
+	pool->netdev = NULL;
+	dev_put(netdev);
+
+clear_rxq:
+	/* Existing page_pools retain their private pool pointer until their
+	 * deferred destruction; the device queue is no longer operational.
+	 */
+	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+}
+
+static const struct memory_provider_ops xsk_pp_ops = {
+	.init			= xp_pp_init,
+	.destroy		= xp_pp_destroy,
+	.alloc_netmems		= xp_pp_alloc_netmems,
+	.release_netmem		= xp_pp_release_netmem,
+	.get_netmem_addr	= xp_pp_get_netmem_addr,
+	.refill_done		= xp_pp_refill_done,
+	.nl_fill		= xp_pp_nl_fill,
+	.uninstall		= xp_pp_uninstall,
+};
+
+static int xsk_pool_validate_page_pool(struct xsk_buff_pool *pool,
+				       struct netlink_ext_ack *extack)
+{
+	if (PAGE_SIZE != SZ_4K) {
+		NL_SET_ERR_MSG(extack,
+			       "page pool UMEM requires 4 KiB base pages");
+		return -EOPNOTSUPP;
+	}
+	if (pool->unaligned) {
+		NL_SET_ERR_MSG(extack,
+			       "page pool UMEM requires aligned chunks");
+		return -EOPNOTSUPP;
+	}
+	/* Each provider object represents one complete UMEM chunk. */
+	if (pool->chunk_size != PAGE_SIZE) {
+		NL_SET_ERR_MSG(extack,
+			       "page pool UMEM requires page-sized chunks");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+int xsk_pool_setup_page_pool(struct net_device *dev, struct xsk_buff_pool *pool,
+			     u16 queue_id, struct netlink_ext_ack *extack)
+{
+	struct xsk_pp *provider;
+	struct device *dma_dev;
+	struct pp_memory_provider_params mp = {
+		.mp_ops = &xsk_pp_ops,
+	};
+	int err;
+
+	ASSERT_RTNL();
+
+	if (!pool) {
+		pool = xsk_get_pool_from_qid(dev, queue_id);
+		if (!pool)
+			return -EINVAL;
+
+		mp.mp_priv = pool;
+		err = netif_mp_close_rxq(dev, queue_id, &mp);
+		if (err)
+			return err;
+
+		return 0;
+	}
+	if (xsk_get_pool_from_qid(dev, queue_id) != pool) {
+		NL_SET_ERR_MSG(extack,
+			       "designated queue has no matching XSK pool");
+		return -EINVAL;
+	}
+	err = xsk_pool_validate_page_pool(pool, extack);
+	if (err)
+		return err;
+
+	dma_dev = netdev_queue_get_dma_dev(dev, queue_id,
+					   NETDEV_QUEUE_TYPE_RX);
+	if (!dma_dev) {
+		NL_SET_ERR_MSG(extack, "RX queue has no DMA device");
+		return -EOPNOTSUPP;
+	}
+
+	err = xsk_pool_dma_map(pool, dma_dev, XSK_PAGE_POOL_DMA_ATTR);
+	if (err)
+		return err;
+
+	provider = xp_pp_create(pool);
+	if (IS_ERR(provider)) {
+		err = PTR_ERR(provider);
+		goto err_unmap;
+	}
+
+	mp.mp_priv = pool;
+	mp.rx_page_size = pool->chunk_size;
+	err = netif_mp_open_rxq(dev, queue_id, &mp, extack);
+	if (err)
+		goto err_free_provider;
+
+	return 0;
+
+err_free_provider:
+	provider->detached = true;
+	/* A deferred page_pool destroy keeps pool->pp installed. That state
+	 * suppresses copy-mode fallback in xp_assign_dev(), while xp_destroy()
+	 * keeps the UMEM alive until the provider destroy callback completes.
+	 */
+	xp_pp_teardown(pool);
+	return err;
+err_unmap:
+	xsk_pool_dma_unmap(pool, XSK_PAGE_POOL_DMA_ATTR);
+	return err;
+}
+EXPORT_SYMBOL_GPL(xsk_pool_setup_page_pool);
 
 static bool xp_addr_crosses_non_contig_pg(struct xsk_buff_pool *pool,
 					  u64 addr)
