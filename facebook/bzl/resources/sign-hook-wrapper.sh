@@ -46,7 +46,12 @@ export PATH="/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH"
                    "$SPEC_TEMPLATE")
 
         SCUTIL_OUTPUT=$(scutil create "$SPEC" --await --follow-retries -v json)
+        # This will be the first instance ID. If it was retried, `scutil create` will
+        # follow the retries but return the **original** instance ID.
         INSTANCE_ID=$(echo "$SCUTIL_OUTPUT" | jq -r '.id')
+        # So get the final instance id from await. Because await will return the latest instance
+        INSTANCE_ID=$(scutil await --follow-retries -v json $INSTANCE_ID | jq -r '.[0].id')
+
         SIGNED_HANDLE=$(scutil get-log $INSTANCE_ID | awk '/==OUTPUT MARKER 0==/{print $NF}')
         clowder get $SIGNED_HANDLE $SIGN_TMPDIR/signed_modules.tar
         tar -xf $SIGN_TMPDIR/signed_modules.tar -C "$KERNEL_TREE"
