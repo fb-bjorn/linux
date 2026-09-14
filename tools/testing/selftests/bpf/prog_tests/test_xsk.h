@@ -103,6 +103,7 @@ struct xsk_umem_info {
 	struct xsk_ring_cons cq;
 	struct xsk_umem *umem;
 	u64 next_buffer;
+	u64 size;
 	u64 mmap_size;
 	u32 num_frames;
 	u32 frame_headroom;
@@ -111,6 +112,8 @@ struct xsk_umem_info {
 	u32 base_addr;
 	u32 fill_size;
 	u32 comp_size;
+	u32 invalid_fill_entries;
+	u32 dup_fill_entries;
 	bool unaligned_mode;
 };
 
@@ -246,9 +249,11 @@ int testapp_aligned_inv_desc(struct test_spec *test);
 int testapp_aligned_inv_desc_2k_frame(struct test_spec *test);
 int testapp_aligned_inv_desc_mb(struct test_spec *test);
 int testapp_bidirectional(struct test_spec *test);
+int testapp_dup_fill(struct test_spec *test);
 int testapp_headroom(struct test_spec *test);
 int testapp_hw_sw_max_ring_size(struct test_spec *test);
 int testapp_hw_sw_min_ring_size(struct test_spec *test);
+int testapp_invalid_fill(struct test_spec *test);
 int testapp_mb_headroom(struct test_spec *test);
 int testapp_poll_rx(struct test_spec *test);
 int testapp_poll_rxq_tmout(struct test_spec *test);
@@ -304,6 +309,8 @@ static const struct test_spec tests[] = {
 	{.name = "TOO_MANY_FRAGS", .test_func = testapp_too_many_frags},
 	{.name = "XDP_ADJUST_TAIL_SHRINK", .test_func = testapp_adjust_tail_shrink},
 	{.name = "TX_QUEUE_CONSUMER", .test_func = testapp_tx_queue_consumer},
+	{.name = "FILL_INVALID_BATCH", .test_func = testapp_invalid_fill},
+	{.name = "FILL_DUP_BATCH", .test_func = testapp_dup_fill},
 	};
 
 static const struct test_spec ci_skip_tests[] = {
