@@ -353,11 +353,10 @@ clear_flag_continue:
 	mutex_unlock(&bp->auxdev_lock);
 }
 
-void bnxt_ulp_irq_stop(struct bnxt *bp)
+static void __bnxt_ulp_irq_stop(struct bnxt *bp, bool reset)
 {
 	struct bnxt_en_dev *edev = bp->edev[BNXT_AUXDEV_RDMA];
 	struct bnxt_ulp_ops *ops;
-	bool reset = false;
 
 	if (!edev)
 		return;
@@ -371,10 +370,19 @@ void bnxt_ulp_irq_stop(struct bnxt *bp)
 		ops = netdev_lock_dereference(ulp->ulp_ops, bp->dev);
 		if (!ops || !ops->ulp_irq_stop)
 			return;
-		if (test_bit(BNXT_STATE_FW_RESET_DET, &bp->state))
-			reset = true;
 		ops->ulp_irq_stop(ulp->handle, reset);
 	}
+}
+
+void bnxt_ulp_irq_stop(struct bnxt *bp)
+{
+	__bnxt_ulp_irq_stop(bp,
+			    test_bit(BNXT_STATE_FW_RESET_DET, &bp->state));
+}
+
+void bnxt_ulp_irq_stop_reset(struct bnxt *bp)
+{
+	__bnxt_ulp_irq_stop(bp, true);
 }
 
 void bnxt_ulp_irq_restart(struct bnxt *bp, int err)

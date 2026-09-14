@@ -7658,7 +7658,7 @@ static int hwrm_ring_free_send_msg(struct bnxt *bp,
 	int rc;
 
 	if (BNXT_NO_FW_ACCESS(bp))
-		return 0;
+		return -ENODEV;
 
 	rc = hwrm_req_init(bp, req, HWRM_RING_FREE);
 	if (rc)
@@ -7681,50 +7681,59 @@ exit:
 	return 0;
 }
 
-static void bnxt_hwrm_tx_ring_free(struct bnxt *bp,
-				   struct bnxt_tx_ring_info *txr,
-				   bool close_path)
+static int bnxt_hwrm_tx_ring_free(struct bnxt *bp,
+				  struct bnxt_tx_ring_info *txr,
+				  bool close_path)
 {
 	struct bnxt_ring_struct *ring = &txr->tx_ring_struct;
 	u32 cmpl_ring_id;
+	int rc;
 
 	if (ring->fw_ring_id == INVALID_HW_RING_ID)
-		return;
+		return 0;
 
 	cmpl_ring_id = close_path && !txr->bnapi->in_queue_restart ?
 		       bnxt_cp_ring_for_tx(bp, txr) : INVALID_HW_RING_ID;
-	hwrm_ring_free_send_msg(bp, ring, RING_FREE_REQ_RING_TYPE_TX,
-				cmpl_ring_id);
+	rc = hwrm_ring_free_send_msg(bp, ring, RING_FREE_REQ_RING_TYPE_TX,
+				     cmpl_ring_id);
+	if (rc)
+		return rc;
 	ring->fw_ring_id = INVALID_HW_RING_ID;
+	return 0;
 }
 
-static void bnxt_hwrm_rx_ring_free(struct bnxt *bp,
-				   struct bnxt_rx_ring_info *rxr,
-				   bool close_path)
+static int bnxt_hwrm_rx_ring_free(struct bnxt *bp,
+				  struct bnxt_rx_ring_info *rxr,
+				  bool close_path)
 {
 	struct bnxt_ring_struct *ring = &rxr->rx_ring_struct;
 	u32 grp_idx = rxr->bnapi->index;
 	u32 cmpl_ring_id;
+	int rc;
 
 	if (ring->fw_ring_id == INVALID_HW_RING_ID)
-		return;
+		return 0;
 
 	cmpl_ring_id = bnxt_cp_ring_for_rx(bp, rxr);
-	hwrm_ring_free_send_msg(bp, ring,
-				RING_FREE_REQ_RING_TYPE_RX,
-				close_path ? cmpl_ring_id :
-				INVALID_HW_RING_ID);
+	rc = hwrm_ring_free_send_msg(bp, ring, RING_FREE_REQ_RING_TYPE_RX,
+				     close_path ? cmpl_ring_id :
+				     INVALID_HW_RING_ID);
+	if (rc)
+		return rc;
+
 	ring->fw_ring_id = INVALID_HW_RING_ID;
 	bp->grp_info[grp_idx].rx_fw_ring_id = INVALID_HW_RING_ID;
+	return 0;
 }
 
-static void bnxt_hwrm_rx_agg_ring_free(struct bnxt *bp,
-				       struct bnxt_rx_ring_info *rxr,
-				       bool close_path)
+static int bnxt_hwrm_rx_agg_ring_free(struct bnxt *bp,
+				      struct bnxt_rx_ring_info *rxr,
+				      bool close_path)
 {
 	struct bnxt_ring_struct *ring = &rxr->rx_agg_ring_struct;
 	u32 grp_idx = rxr->bnapi->index;
 	u32 type, cmpl_ring_id;
+	int rc;
 
 	if (bp->flags & BNXT_FLAG_CHIP_P5_PLUS)
 		type = RING_FREE_REQ_RING_TYPE_RX_AGG;
@@ -7732,28 +7741,38 @@ static void bnxt_hwrm_rx_agg_ring_free(struct bnxt *bp,
 		type = RING_FREE_REQ_RING_TYPE_RX;
 
 	if (ring->fw_ring_id == INVALID_HW_RING_ID)
-		return;
+		return 0;
 
 	cmpl_ring_id = bnxt_cp_ring_for_rx(bp, rxr);
-	hwrm_ring_free_send_msg(bp, ring, type,
-				close_path ? cmpl_ring_id :
-				INVALID_HW_RING_ID);
+	rc = hwrm_ring_free_send_msg(bp, ring, type,
+				     close_path ? cmpl_ring_id :
+				     INVALID_HW_RING_ID);
+	if (rc)
+		return rc;
+
 	ring->fw_ring_id = INVALID_HW_RING_ID;
 	bp->grp_info[grp_idx].agg_fw_ring_id = INVALID_HW_RING_ID;
+	return 0;
 }
 
-static void bnxt_hwrm_cp_ring_free(struct bnxt *bp,
-				   struct bnxt_cp_ring_info *cpr)
+static int bnxt_hwrm_cp_ring_free(struct bnxt *bp,
+				  struct bnxt_cp_ring_info *cpr)
 {
 	struct bnxt_ring_struct *ring;
+	int rc;
 
 	ring = &cpr->cp_ring_struct;
 	if (ring->fw_ring_id == INVALID_HW_RING_ID)
-		return;
+		return 0;
 
-	hwrm_ring_free_send_msg(bp, ring, RING_FREE_REQ_RING_TYPE_L2_CMPL,
-				INVALID_HW_RING_ID);
+	rc = hwrm_ring_free_send_msg(bp, ring,
+				     RING_FREE_REQ_RING_TYPE_L2_CMPL,
+				     INVALID_HW_RING_ID);
+	if (rc)
+		return rc;
+
 	ring->fw_ring_id = INVALID_HW_RING_ID;
+	return 0;
 }
 
 static void bnxt_clear_one_cp_ring(struct bnxt *bp, struct bnxt_cp_ring_info *cpr)
@@ -11143,6 +11162,7 @@ static bool bnxt_vnic_has_rx_ring(struct bnxt *bp, struct bnxt_vnic_info *vnic,
 static int bnxt_set_vnic_mru_p5(struct bnxt *bp, struct bnxt_vnic_info *vnic,
 				u16 mru, int rxr_id)
 {
+	u16 old_mru;
 	int rc;
 
 	if (!bnxt_vnic_has_rx_ring(bp, vnic, rxr_id))
@@ -11161,9 +11181,14 @@ static int bnxt_set_vnic_mru_p5(struct bnxt *bp, struct bnxt_vnic_info *vnic,
 				return rc;
 		}
 	}
+	old_mru = vnic->mru;
 	vnic->mru = mru;
-	bnxt_hwrm_vnic_update(bp, vnic,
-			      VNIC_UPDATE_REQ_ENABLES_MRU_VALID);
+	rc = bnxt_hwrm_vnic_update(bp, vnic,
+				   VNIC_UPDATE_REQ_ENABLES_MRU_VALID);
+	if (rc) {
+		vnic->mru = old_mru;
+		return rc;
+	}
 
 	return 0;
 }
@@ -11771,12 +11796,12 @@ int bnxt_reserve_rings(struct bnxt *bp, bool irq_re_init)
 	return 0;
 }
 
-static void bnxt_tx_queue_stop(struct bnxt *bp, int idx)
+static int bnxt_tx_queue_stop(struct bnxt *bp, int idx, bool close_path)
 {
 	struct bnxt_tx_ring_info *txr;
 	struct netdev_queue *txq;
 	struct bnxt_napi *bnapi;
-	int i;
+	int i, rc;
 
 	bnapi = bp->bnapi[idx];
 	bnxt_for_each_napi_tx(i, bnapi, txr) {
@@ -11799,9 +11824,35 @@ static void bnxt_tx_queue_stop(struct bnxt *bp, int idx)
 		if (!bp->tph_mode)
 			continue;
 
-		bnxt_hwrm_tx_ring_free(bp, txr, true);
-		bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
+		rc = bnxt_hwrm_tx_ring_free(bp, txr, close_path);
+		if (rc)
+			return rc;
 	}
+
+	return 0;
+}
+
+static int bnxt_tx_queue_cpr_free(struct bnxt *bp, int idx)
+{
+	struct bnxt_tx_ring_info *txr;
+	struct bnxt_napi *bnapi;
+	int i, rc;
+
+	bnapi = bp->bnapi[idx];
+	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		    txr == bnapi->tx_ring[0])
+			continue;
+
+		if (!bp->tph_mode)
+			continue;
+
+		rc = bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
+		if (rc)
+			return rc;
+	}
+
+	return 0;
 }
 
 /* NAPI must be disabled before software-owned TX buffers are released. */
@@ -11846,11 +11897,11 @@ static int bnxt_tx_queue_start(struct bnxt *bp, int idx)
 
 		rc = bnxt_hwrm_cp_ring_alloc_p5(bp, txr->tx_cpr);
 		if (rc)
-			goto err_free_rings;
+			return rc;
 
 		rc = bnxt_hwrm_tx_ring_alloc(bp, txr, false);
 		if (rc)
-			goto err_free_rings;
+			return rc;
 
 		txr->tx_prod = 0;
 		txr->tx_cons = 0;
@@ -11872,21 +11923,6 @@ static int bnxt_tx_queue_start(struct bnxt *bp, int idx)
 	}
 
 	return 0;
-
-err_free_rings:
-	bnxt_for_each_napi_tx(i, bnapi, txr) {
-		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
-		    txr == bnapi->tx_ring[0])
-			continue;
-
-		if (!bp->tph_mode)
-			continue;
-
-		bnxt_hwrm_tx_ring_free(bp, txr, false);
-		bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
-		bnxt_clear_one_cp_ring(bp, txr->tx_cpr);
-	}
-	return rc;
 }
 
 static void bnxt_irq_affinity_notify(struct irq_affinity_notify *notify,
@@ -14727,13 +14763,22 @@ static void bnxt_rx_ring_reset(struct bnxt *bp)
 	bnxt_rtnl_unlock_sp(bp);
 }
 
-static void bnxt_fw_fatal_close(struct bnxt *bp)
+static void bnxt_dma_disable(struct bnxt *bp)
 {
 	bnxt_tx_disable(bp);
+	bnxt_cancel_dim(bp);
 	bnxt_disable_napi(bp);
 	bnxt_disable_int_sync(bp);
 	bnxt_free_irq(bp);
 	bnxt_clear_int_mode(bp);
+	pci_clear_master(bp->pdev);
+	if (!pci_wait_for_pending_transaction(bp->pdev))
+		netdev_warn(bp->dev, "Timed out fencing PCI transactions\n");
+}
+
+static void bnxt_fw_fatal_close(struct bnxt *bp)
+{
+	bnxt_dma_disable(bp);
 	pci_disable_device(bp->pdev);
 }
 
@@ -14749,7 +14794,9 @@ static void bnxt_fw_reset_close(struct bnxt *bp)
 		pci_read_config_word(bp->pdev, PCI_SUBSYSTEM_ID, &val);
 		if (val == 0xffff)
 			bp->fw_reset_min_dsecs = 0;
-		bnxt_fw_fatal_close(bp);
+		if (!test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state) ||
+		    bp->pdev->is_busmaster)
+			bnxt_fw_fatal_close(bp);
 	}
 	__bnxt_close_nic(bp, true, false);
 	bnxt_vf_reps_free(bp);
@@ -14816,6 +14863,105 @@ static void bnxt_force_fw_reset(struct bnxt *bp)
 	bp->fw_reset_min_dsecs = fw_health->post_reset_wait_dsecs;
 	bp->fw_reset_max_dsecs = fw_health->post_reset_max_wait_dsecs;
 	bnxt_queue_fw_reset_work(bp, wait_dsecs * HZ / 10);
+}
+
+static int bnxt_queue_flr(struct bnxt *bp)
+{
+	int rc;
+
+	/* Reuse the known-good state saved at probe.  Config-space reads after
+	 * a fatal queue error may return all ones and corrupt a fresh snapshot.
+	 */
+	rc = pcie_reset_flr(bp->pdev, PCI_RESET_DO_RESET);
+	if (!rc) {
+		pci_restore_state(bp->pdev);
+		pci_clear_master(bp->pdev);
+	}
+	return rc;
+}
+
+static void bnxt_queue_recover(struct bnxt *bp)
+{
+	struct bnxt_ptp_cfg *ptp;
+	bool close = false;
+	bool restart_ulp = false;
+	int rc;
+
+	if (!test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state))
+		return;
+
+	/* ULP callbacks may acquire RTNL.  Let a concurrent close proceed
+	 * before invoking them, then serialize recovery with the netdev lock.
+	 */
+	clear_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
+	bnxt_ulp_stop(bp);
+	netdev_lock(bp->dev);
+	if (!test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state)) {
+		restart_ulp = true;
+		goto unlock;
+	}
+	/* An in-flight firmware reset already owns recovery and will clear the
+	 * queue state when it completes or aborts.
+	 */
+	if (test_bit(BNXT_STATE_IN_FW_RESET, &bp->state))
+		goto unlock;
+	if (!test_bit(BNXT_STATE_FW_RESET_DET, &bp->state)) {
+		rc = bnxt_queue_flr(bp);
+		if (rc) {
+			netdev_err(bp->dev,
+				   "Queue recovery function reset failed: %d; device remains disabled\n",
+				   rc);
+			close = true;
+			goto unlock;
+		}
+		set_bit(BNXT_STATE_FW_RESET_DET, &bp->state);
+	}
+
+	if (!test_bit(BNXT_STATE_OPEN, &bp->state)) {
+		/* The next open reinitializes firmware before it restarts
+		 * the ULPs.
+		 */
+		if (pci_is_enabled(bp->pdev) || !pci_enable_device(bp->pdev)) {
+			pci_set_master(bp->pdev);
+			clear_bit(BNXT_STATE_FW_FATAL_COND, &bp->state);
+			clear_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state);
+		} else {
+			netdev_err(bp->dev,
+				   "Cannot re-enable PCI device after queue recovery\n");
+		}
+		goto unlock;
+	}
+
+	ptp = bp->ptp_cfg;
+	if (ptp) {
+		unsigned long flags;
+
+		write_seqlock_irqsave(&ptp->ptp_lock, flags);
+		set_bit(BNXT_STATE_IN_FW_RESET, &bp->state);
+		write_sequnlock_irqrestore(&ptp->ptp_lock, flags);
+	} else {
+		set_bit(BNXT_STATE_IN_FW_RESET, &bp->state);
+	}
+
+	bnxt_fw_reset_close(bp);
+	bp->fw_reset_timestamp = jiffies;
+	bp->fw_reset_min_dsecs = BNXT_DFLT_FW_RST_MIN_DSECS;
+	bp->fw_reset_max_dsecs = BNXT_DFLT_FW_RST_MAX_DSECS;
+	bp->fw_reset_state = BNXT_FW_RESET_STATE_ENABLE_DEV;
+	bnxt_queue_fw_reset_work(bp, 0);
+unlock:
+	netdev_unlock(bp->dev);
+	if (close) {
+		rtnl_lock();
+		netdev_lock(bp->dev);
+		if (netif_running(bp->dev))
+			netif_close(bp->dev);
+		netdev_unlock(bp->dev);
+		rtnl_unlock();
+	}
+	if (restart_ulp)
+		bnxt_ulp_start(bp);
+	set_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 }
 
 void bnxt_fw_exception(struct bnxt *bp)
@@ -14984,8 +15130,13 @@ static void bnxt_fw_echo_reply(struct bnxt *bp)
 
 static void bnxt_ulp_restart(struct bnxt *bp)
 {
+	/* ULP callbacks may acquire RTNL.  A concurrent close can hold RTNL
+	 * while waiting for the special-task marker, so keep it clear here.
+	 */
+	clear_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 	bnxt_ulp_stop(bp);
 	bnxt_ulp_start(bp);
+	set_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 }
 
 static void bnxt_sp_task(struct work_struct *work)
@@ -14994,6 +15145,12 @@ static void bnxt_sp_task(struct work_struct *work)
 
 	set_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 	smp_mb__after_atomic();
+	if (test_and_clear_bit(BNXT_QUEUE_RECOVER_SP_EVENT, &bp->sp_event)) {
+		bnxt_queue_recover(bp);
+		if (READ_ONCE(bp->sp_event))
+			__bnxt_queue_sp_work(bp);
+		goto sp_task_done;
+	}
 	if (!test_bit(BNXT_STATE_OPEN, &bp->state)) {
 		clear_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 		return;
@@ -15096,6 +15253,7 @@ static void bnxt_sp_task(struct work_struct *work)
 	if (test_and_clear_bit(BNXT_TPH_UPDATE_SP_EVENT, &bp->sp_event))
 		bnxt_tph_update(bp);
 
+sp_task_done:
 	smp_mb__before_atomic();
 	clear_bit(BNXT_STATE_IN_SP_TASK, &bp->state);
 }
@@ -15512,10 +15670,12 @@ static bool bnxt_fw_reset_timeout(struct bnxt *bp)
 static void bnxt_fw_reset_abort(struct bnxt *bp, int rc)
 {
 	clear_bit(BNXT_STATE_IN_FW_RESET, &bp->state);
-	if (bp->fw_reset_state != BNXT_FW_RESET_STATE_POLL_VF)
+	if (bp->fw_health &&
+	    bp->fw_reset_state != BNXT_FW_RESET_STATE_POLL_VF)
 		bnxt_dl_health_fw_status_update(bp, false);
 	bp->fw_reset_state = BNXT_FW_RESET_STATE_ABORT;
 	netif_close(bp->dev);
+	clear_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state);
 }
 
 static void bnxt_fw_reset_task(struct work_struct *work)
@@ -15652,7 +15812,8 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 			goto ulp_start;
 		}
 
-		if ((bp->fw_cap & BNXT_FW_CAP_ERROR_RECOVERY) &&
+		if (bp->fw_health &&
+		    (bp->fw_cap & BNXT_FW_CAP_ERROR_RECOVERY) &&
 		    bp->fw_health->enabled) {
 			bp->fw_health->last_fw_reset_cnt =
 				bnxt_fw_health_readl(bp, BNXT_FW_RESET_CNT_REG);
@@ -15661,6 +15822,7 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 		/* Make sure fw_reset_state is 0 before clearing the flag */
 		smp_mb__before_atomic();
 		clear_bit(BNXT_STATE_IN_FW_RESET, &bp->state);
+		clear_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state);
 		bnxt_ptp_reapply_pps(bp);
 		clear_bit(BNXT_STATE_FW_ACTIVATE, &bp->state);
 		if (test_and_clear_bit(BNXT_STATE_RECOVER, &bp->state)) {
@@ -15677,11 +15839,14 @@ static void bnxt_fw_reset_task(struct work_struct *work)
 		netdev_unlock(bp->dev);
 		break;
 	}
+	if (READ_ONCE(bp->sp_event))
+		__bnxt_queue_sp_work(bp);
 	return;
 
 fw_reset_abort_status:
-	if (bp->fw_health->status_reliable ||
-	    (bp->fw_cap & BNXT_FW_CAP_ERROR_RECOVERY)) {
+	if (bp->fw_health &&
+	    (bp->fw_health->status_reliable ||
+	     (bp->fw_cap & BNXT_FW_CAP_ERROR_RECOVERY))) {
 		u32 sts = bnxt_fw_health_readl(bp, BNXT_FW_HEALTH_REG);
 
 		netdev_err(bp->dev, "fw_health_status 0x%x\n", sts);
@@ -16603,6 +16768,20 @@ static void bnxt_copy_rx_ring(struct bnxt *bp,
 	dst->rx_agg_bmap = src->rx_agg_bmap;
 }
 
+static void bnxt_queue_dma_fence(struct bnxt *bp, int err)
+{
+	if (test_and_set_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state))
+		return;
+	clear_bit(BNXT_STATE_FW_RESET_DET, &bp->state);
+
+	netdev_err(bp->dev,
+		   "Queue transaction failed: %d; disabling device DMA\n", err);
+	set_bit(BNXT_STATE_FW_FATAL_COND, &bp->state);
+	bnxt_ulp_irq_stop_reset(bp);
+	bnxt_dma_disable(bp);
+	bnxt_queue_sp_work(bp, BNXT_QUEUE_RECOVER_SP_EVENT);
+}
+
 static int bnxt_queue_start(struct net_device *dev,
 			    struct netdev_queue_config *qcfg,
 			    void *qmem, int idx)
@@ -16612,8 +16791,16 @@ static int bnxt_queue_start(struct net_device *dev,
 	struct bnxt_cp_ring_info *cpr;
 	struct bnxt_vnic_info *vnic;
 	struct bnxt_napi *bnapi;
+	bool alloc_error = false;
+	int err;
 	int i, rc;
 	u16 mru;
+
+	if (test_bit(BNXT_STATE_IN_FW_RESET, &bp->state))
+		return -EBUSY;
+	if (test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state) ||
+	    BNXT_NO_FW_ACCESS(bp))
+		return -ENETDOWN;
 
 	rxr = &bp->rx_ring[idx];
 	clone = qmem;
@@ -16638,18 +16825,24 @@ static int bnxt_queue_start(struct net_device *dev,
 	 * Reallocating with the same parameters should never fail.
 	 */
 	rc = bnxt_hwrm_rx_ring_alloc(bp, rxr);
-	if (rc)
+	if (rc) {
+		alloc_error = true;
 		goto err_reset;
+	}
 
 	if (bp->tph_mode) {
 		rc = bnxt_hwrm_cp_ring_alloc_p5(bp, rxr->rx_cpr);
-		if (rc)
+		if (rc) {
+			alloc_error = true;
 			goto err_reset;
+		}
 	}
 
 	rc = bnxt_hwrm_rx_agg_ring_alloc(bp, rxr, false);
-	if (rc)
+	if (rc) {
+		alloc_error = true;
 		goto err_reset;
+	}
 
 	mru = bp->dev->mtu + VLAN_ETH_HLEN;
 	for (i = 0; i < bp->nr_vnics; i++) {
@@ -16665,8 +16858,10 @@ static int bnxt_queue_start(struct net_device *dev,
 
 	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
 		rc = bnxt_tx_queue_start(bp, idx);
-		if (rc)
+		if (rc) {
+			alloc_error = true;
 			goto err_reset;
+		}
 	}
 
 	if (bp->flags & BNXT_FLAG_AGG_RINGS)
@@ -16682,17 +16877,55 @@ static int bnxt_queue_start(struct net_device *dev,
 err_reset:
 	netdev_err(bp->dev, "Unexpected HWRM error during queue start rc: %d\n",
 		   rc);
-	for (i = 0; i < bp->nr_vnics; i++)
-		bnxt_set_vnic_mru_p5(bp, &bp->vnic_info[i], 0, idx);
-	bnxt_set_rss_ctx_vnic_mru(bp, 0, idx);
-	bnxt_hwrm_rx_ring_free(bp, rxr, false);
-	bnxt_hwrm_rx_agg_ring_free(bp, rxr, false);
-	if (bp->tph_mode) {
-		bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
-		bnxt_clear_one_cp_ring(bp, rxr->rx_cpr);
+	if (alloc_error) {
+		err = rc;
+		goto err_fence;
 	}
+	for (i = 0; i < bp->nr_vnics; i++) {
+		err = bnxt_set_vnic_mru_p5(bp, &bp->vnic_info[i], 0, idx);
+		if (err)
+			goto err_fence;
+	}
+	err = bnxt_set_rss_ctx_vnic_mru(bp, 0, idx);
+	if (err)
+		goto err_fence;
+
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
+		err = bnxt_tx_queue_stop(bp, idx, false);
+		if (err)
+			goto err_fence;
+		err = bnxt_tx_queue_cpr_free(bp, idx);
+		if (err)
+			goto err_fence;
+	}
+	err = bnxt_hwrm_rx_ring_free(bp, rxr, false);
+	if (err)
+		goto err_fence;
+	err = bnxt_hwrm_rx_agg_ring_free(bp, rxr, false);
+	if (err)
+		goto err_fence;
+	if (bp->tph_mode) {
+		err = bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
+		if (err)
+			goto err_fence;
+	}
+	if (BNXT_NO_FW_ACCESS(bp)) {
+		err = -ENODEV;
+		goto err_fence;
+	}
+	goto err_clear;
+
+err_fence:
+	bnxt_queue_dma_fence(bp, err);
+
+err_clear:
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS)
+		bnxt_tx_queue_cleanup(bp, idx);
+	if (bp->tph_mode)
+		bnxt_clear_one_cp_ring(bp, rxr->rx_cpr);
 	bnxt_reset_rx_ring_struct(bp, rxr);
-	bnxt_queue_sp_work(bp, BNXT_RESET_TASK_SILENT_SP_EVENT);
+	if (!test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state))
+		bnxt_queue_sp_work(bp, BNXT_RESET_TASK_SILENT_SP_EVENT);
 	return rc;
 }
 
@@ -16734,44 +16967,73 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 	struct bnxt_napi *bnapi;
 	int i, rc;
 
+	if (test_bit(BNXT_STATE_IN_FW_RESET, &bp->state))
+		return -EBUSY;
+	if (test_bit(BNXT_STATE_QUEUE_RECOVER, &bp->state) ||
+	    BNXT_NO_FW_ACCESS(bp))
+		return -ENETDOWN;
+
 	rc = bnxt_xdp_tx_queue_quiesce(bp, idx);
 	if (rc)
 		return rc;
 
-	for (i = 0; i < bp->nr_vnics; i++) {
-		vnic = &bp->vnic_info[i];
-
-		bnxt_set_vnic_mru_p5(bp, vnic, 0, idx);
-	}
-	bnxt_set_rss_ctx_vnic_mru(bp, 0, idx);
-	/* Make sure NAPI sees that the VNIC is disabled */
-	synchronize_net();
 	rxr = &bp->rx_ring[idx];
 	bnapi = rxr->bnapi;
 	cpr = &bnapi->cp_ring;
+
+	for (i = 0; i < bp->nr_vnics; i++) {
+		vnic = &bp->vnic_info[i];
+
+		rc = bnxt_set_vnic_mru_p5(bp, vnic, 0, idx);
+		if (rc)
+			goto err_fence;
+	}
+	rc = bnxt_set_rss_ctx_vnic_mru(bp, 0, idx);
+	if (rc)
+		goto err_fence;
+	/* Make sure NAPI sees that the VNIC is disabled */
+	synchronize_net();
 	cancel_work_sync(&cpr->dim.work);
-	bnxt_hwrm_rx_ring_free(bp, rxr, false);
-	bnxt_hwrm_rx_agg_ring_free(bp, rxr, false);
+	rc = bnxt_hwrm_rx_ring_free(bp, rxr, false);
+	if (rc)
+		goto err_fence;
+	rc = bnxt_hwrm_rx_agg_ring_free(bp, rxr, false);
+	if (rc)
+		goto err_fence;
+
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
+		rc = bnxt_tx_queue_stop(bp, idx, false);
+		if (rc)
+			goto err_fence;
+	}
+	if (BNXT_NO_FW_ACCESS(bp)) {
+		rc = -ENODEV;
+		goto err_fence;
+	}
+
 	page_pool_disable_direct_recycling(rxr->page_pool);
 	if (bnxt_separate_head_pool(rxr))
 		page_pool_disable_direct_recycling(rxr->head_pool);
 
-	if (bp->flags & BNXT_FLAG_SHARED_RINGS)
-		bnxt_tx_queue_stop(bp, idx);
-
-	/* Disable NAPI now after freeing the rings because HWRM_RING_FREE
-	 * completion is handled in NAPI to guarantee no more DMA on that ring
-	 * after seeing the completion.
-	 */
 	napi_disable_locked(&bnapi->napi);
 	bnapi->in_queue_restart = true;
+
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS) {
+		rc = bnxt_tx_queue_cpr_free(bp, idx);
+		if (rc)
+			goto err_fence;
+	}
+	if (bp->tph_mode) {
+		rc = bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
+		if (rc)
+			goto err_fence;
+	}
+
 	if (bp->flags & BNXT_FLAG_SHARED_RINGS)
 		bnxt_tx_queue_cleanup(bp, idx);
 
-	if (bp->tph_mode) {
-		bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
+	if (bp->tph_mode)
 		bnxt_clear_one_cp_ring(bp, rxr->rx_cpr);
-	}
 	bnxt_db_nq(bp, &cpr->cp_db, cpr->cp_raw_cons);
 
 	memcpy(qmem, rxr, sizeof(*rxr));
@@ -16779,6 +17041,10 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 	bnxt_reset_rx_ring_struct(bp, rxr);
 
 	return 0;
+
+err_fence:
+	bnxt_queue_dma_fence(bp, rc);
+	return rc;
 }
 
 static const struct netdev_queue_mgmt_ops bnxt_queue_mgmt_ops = {
