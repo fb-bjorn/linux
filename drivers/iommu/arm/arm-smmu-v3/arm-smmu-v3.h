@@ -884,6 +884,8 @@ struct arm_smmu_device {
 	unsigned int			sid_bits;
 
 	struct arm_smmu_strtab_cfg	strtab_cfg;
+	/* Stream table was carried over from the previous kernel */
+	bool				strtab_inherited;
 
 	/* IOMMU core code handle */
 	struct iommu_device		iommu;

@@ -2056,15 +2056,45 @@ static void arm_smmu_init_initial_stes(struct arm_smmu_ste *strtab,
 	}
 }
 
+/*
+ * An inherited L1 descriptor already points at the L2 table the previous
+ * kernel's devices are translating through. Map that table and keep it:
+ * allocating a fresh one here would drop the entries for all 256 StreamIDs
+ * behind the descriptor, not just the one being probed.
+ */
+static struct arm_smmu_strtab_l2 *
+arm_smmu_inherit_l2_strtab(struct arm_smmu_device *smmu, u32 sid)
+{
+	struct arm_smmu_strtab_cfg *cfg = &smmu->strtab_cfg;
+	u64 l1d;
+
+	if (!smmu->strtab_inherited)
+		return NULL;
+
+	l1d = le64_to_cpu(cfg->l2.l1tab[arm_smmu_strtab_l1_idx(sid)].l2ptr);
+	if (!FIELD_GET(STRTAB_L1_DESC_SPAN, l1d))
+		return NULL;
+
+	return devm_memremap(smmu->dev, l1d & STRTAB_L1_DESC_L2PTR_MASK,
+			     sizeof(struct arm_smmu_strtab_l2), MEMREMAP_WB);
+}
+
 static int arm_smmu_init_l2_strtab(struct arm_smmu_device *smmu, u32 sid)
 {
 	dma_addr_t l2ptr_dma;
 	struct arm_smmu_strtab_cfg *cfg = &smmu->strtab_cfg;
 	struct arm_smmu_strtab_l2 **l2table;
+	struct arm_smmu_strtab_l2 *inherited;
 
 	l2table = &cfg->l2.l2ptrs[arm_smmu_strtab_l1_idx(sid)];
 	if (*l2table)
 		return 0;
+
+	inherited = arm_smmu_inherit_l2_strtab(smmu, sid);
+	if (!IS_ERR_OR_NULL(inherited)) {
+		*l2table = inherited;
+		return 0;
+	}
 
 	*l2table = dmam_alloc_coherent(smmu->dev, sizeof(**l2table),
 				       &l2ptr_dma, GFP_KERNEL);
@@ -4421,6 +4451,20 @@ static int arm_smmu_def_domain_type(struct device *dev)
 	return 0;
 }
 
+/*
+ * With an inherited stream table, attaching a default domain at probe would
+ * replace the entry the crashed kernel's devices are still translating
+ * through, and nothing in a capture kernel maps what they are asking for.
+ * Hold the inherited entry until a driver actually maps DMA, which is when
+ * the core calls iommu_deferred_attach().
+ */
+static bool arm_smmu_is_attach_deferred(struct device *dev)
+{
+	struct arm_smmu_master *master = dev_iommu_priv_get(dev);
+
+	return master->smmu->strtab_inherited;
+}
+
 static const struct iommu_ops arm_smmu_ops = {
 	.identity_domain	= &arm_smmu_identity_domain,
 	.blocked_domain		= &arm_smmu_blocked_domain,
@@ -4436,6 +4480,7 @@ static const struct iommu_ops arm_smmu_ops = {
 	.get_resv_regions	= arm_smmu_get_resv_regions,
 	.page_response		= arm_smmu_page_response,
 	.def_domain_type	= arm_smmu_def_domain_type,
+	.is_attach_deferred	= arm_smmu_is_attach_deferred,
 	.get_viommu_size	= arm_smmu_get_viommu_size,
 	.viommu_init		= arm_vsmmu_init,
 	.user_pasid_table	= 1,
@@ -4568,6 +4613,68 @@ static int arm_smmu_init_queues(struct arm_smmu_device *smmu)
 				       PRIQ_ENT_DWORDS, "priq");
 }
 
+/*
+ * A crash kexec does not run device_shutdown(), so the capture kernel comes up
+ * on a machine whose devices are still translating through the stream table the
+ * crashed kernel programmed. A fresh table has no entry for those StreamIDs, so
+ * their in-flight DMA raises C_BAD_STREAMID, and where the platform takes
+ * hardware errors to firmware first, firmware resets the machine before a dump
+ * can be written. Copy the previous L1 descriptors over instead. They still
+ * point at the previous kernel's L2 tables, so those streams keep translating.
+ */
+static void arm_smmu_inherit_strtab(struct arm_smmu_device *smmu, u32 l1size)
+{
+	struct arm_smmu_strtab_cfg *cfg = &smmu->strtab_cfg;
+	u32 base_cfg, gerror, gerrorn;
+	u64 base;
+	void *old;
+
+	if (!is_kdump_kernel())
+		return;
+
+	if (!(readl_relaxed(smmu->base + ARM_SMMU_CR0) & CR0_SMMUEN))
+		return;
+
+	/* Descriptors are written here without cache maintenance. */
+	if (!(smmu->features & ARM_SMMU_FEAT_COHERENCY))
+		return;
+
+	base_cfg = readl_relaxed(smmu->base + ARM_SMMU_STRTAB_BASE_CFG);
+	if (FIELD_GET(STRTAB_BASE_CFG_FMT, base_cfg) != STRTAB_BASE_CFG_FMT_2LVL ||
+	    FIELD_GET(STRTAB_BASE_CFG_SPLIT, base_cfg) != STRTAB_SPLIT ||
+	    FIELD_GET(STRTAB_BASE_CFG_LOG2SIZE, base_cfg) !=
+		    ilog2(cfg->l2.num_l1_ents) + STRTAB_SPLIT)
+		return;
+
+	/* Service Failure Mode means the tables cannot be trusted. */
+	gerror = readl_relaxed(smmu->base + ARM_SMMU_GERROR);
+	gerrorn = readl_relaxed(smmu->base + ARM_SMMU_GERRORN);
+	if ((gerror ^ gerrorn) & GERROR_SFM_ERR) {
+		dev_warn(smmu->dev, "SMMU in Service Failure Mode, resetting\n");
+		return;
+	}
+
+	base = readq_relaxed(smmu->base + ARM_SMMU_STRTAB_BASE) &
+	       STRTAB_BASE_ADDR_MASK;
+	old = devm_memremap(smmu->dev, base, l1size, MEMREMAP_WB);
+	if (IS_ERR_OR_NULL(old)) {
+		dev_warn(smmu->dev, "failed to map previous stream table\n");
+		return;
+	}
+
+	/*
+	 * Take the previous table over in place rather than copying it into the
+	 * one just allocated. STRTAB_BASE then already holds what we want, so
+	 * arm_smmu_device_reset() has no reason to clear SMMUEN, and the window
+	 * where everything aborts never opens. The allocated table is left to
+	 * devm to free.
+	 */
+	cfg->l2.l1tab = old;
+	cfg->l2.l1_dma = base;
+	smmu->strtab_inherited = true;
+	dev_info(smmu->dev, "inherited stream table from previous kernel\n");
+}
+
 static int arm_smmu_init_strtab_2lvl(struct arm_smmu_device *smmu)
 {
 	u32 l1size;
@@ -4597,6 +4704,8 @@ static int arm_smmu_init_strtab_2lvl(struct arm_smmu_device *smmu)
 				      sizeof(*cfg->l2.l2ptrs), GFP_KERNEL);
 	if (!cfg->l2.l2ptrs)
 		return -ENOMEM;
+
+	arm_smmu_inherit_strtab(smmu, l1size);
 
 	return 0;
 }
@@ -4875,46 +4984,73 @@ static void arm_smmu_write_strtab(struct arm_smmu_device *smmu)
 static int arm_smmu_device_reset(struct arm_smmu_device *smmu)
 {
 	int ret;
-	u32 reg, enables;
+	u32 reg, enables, cr1, cr2;
 	struct arm_smmu_cmdq_ent cmd;
+	/*
+	 * With the previous kernel's stream table taken over in place there is
+	 * nothing to reprogram in STRTAB_BASE, so SMMUEN can stay set. Clearing
+	 * it would abort every transaction until it went back on, and on a
+	 * firmware-first platform one aborted DMA from a device the crashed
+	 * kernel left running is enough to reset the machine. Nothing is logged
+	 * for it either, because the event queue is off while SMMUEN is clear.
+	 */
+	bool keep_enabled = smmu->strtab_inherited;
 
 	/* Clear CR0 and sync (disables SMMU and queue processing) */
 	reg = readl_relaxed(smmu->base + ARM_SMMU_CR0);
-	if (reg & CR0_SMMUEN) {
+	if ((reg & CR0_SMMUEN) && !keep_enabled) {
 		dev_warn(smmu->dev, "SMMU currently enabled! Resetting...\n");
 		arm_smmu_update_gbpa(smmu, GBPA_ABORT, 0);
 	}
 
-	ret = arm_smmu_device_disable(smmu);
+	if (keep_enabled) {
+		/* Queues need their enables clear to be reprogrammed; SMMUEN does not. */
+		ret = arm_smmu_write_reg_sync(smmu, CR0_SMMUEN, ARM_SMMU_CR0,
+					      ARM_SMMU_CR0ACK);
+		dev_info(smmu->dev, "keeping SMMU enabled across reset\n");
+	} else {
+		ret = arm_smmu_device_disable(smmu);
+	}
 	if (ret)
 		return ret;
 
 	/* CR1 (table and queue memory attributes) */
-	reg = FIELD_PREP(CR1_TABLE_SH, ARM_SMMU_SH_ISH) |
+	cr1 = FIELD_PREP(CR1_TABLE_SH, ARM_SMMU_SH_ISH) |
 	      FIELD_PREP(CR1_TABLE_OC, CR1_CACHE_WB) |
 	      FIELD_PREP(CR1_TABLE_IC, CR1_CACHE_WB) |
 	      FIELD_PREP(CR1_QUEUE_SH, ARM_SMMU_SH_ISH) |
 	      FIELD_PREP(CR1_QUEUE_OC, CR1_CACHE_WB) |
 	      FIELD_PREP(CR1_QUEUE_IC, CR1_CACHE_WB);
-	writel_relaxed(reg, smmu->base + ARM_SMMU_CR1);
 
 	/* CR2 (random crap) */
-	reg = CR2_PTM | CR2_RECINVSID;
+	cr2 = CR2_PTM | CR2_RECINVSID;
 
 	if (smmu->features & ARM_SMMU_FEAT_E2H)
-		reg |= CR2_E2H;
+		cr2 |= CR2_E2H;
 
-	writel_relaxed(reg, smmu->base + ARM_SMMU_CR2);
+	/*
+	 * Writing these with the SMMU enabled is not architecturally defined.
+	 * Read them back instead and only write when they differ, which they do
+	 * not when the previous kernel ran this same driver.
+	 */
+	if (!keep_enabled ||
+	    readl_relaxed(smmu->base + ARM_SMMU_CR1) != cr1)
+		writel_relaxed(cr1, smmu->base + ARM_SMMU_CR1);
+	if (!keep_enabled ||
+	    readl_relaxed(smmu->base + ARM_SMMU_CR2) != cr2)
+		writel_relaxed(cr2, smmu->base + ARM_SMMU_CR2);
 
 	/* Stream table */
-	arm_smmu_write_strtab(smmu);
+	if (!keep_enabled)
+		arm_smmu_write_strtab(smmu);
 
 	/* Command queue */
 	writeq_relaxed(smmu->cmdq.q.q_base, smmu->base + ARM_SMMU_CMDQ_BASE);
 	writel_relaxed(smmu->cmdq.q.llq.prod, smmu->base + ARM_SMMU_CMDQ_PROD);
 	writel_relaxed(smmu->cmdq.q.llq.cons, smmu->base + ARM_SMMU_CMDQ_CONS);
 
-	enables = CR0_CMDQEN;
+	/* Carry SMMUEN through so it is never momentarily clear. */
+	enables = CR0_CMDQEN | (keep_enabled ? CR0_SMMUEN : 0);
 	ret = arm_smmu_write_reg_sync(smmu, enables, ARM_SMMU_CR0,
 				      ARM_SMMU_CR0ACK);
 	if (ret) {
