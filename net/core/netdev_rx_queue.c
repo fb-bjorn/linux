@@ -82,8 +82,12 @@ __netif_get_rx_queue_lease(struct net_device **dev, unsigned int *rxq_idx,
 /* See also page_pool_is_unreadable() */
 bool netif_rxq_has_unreadable_mp(struct net_device *dev, unsigned int rxq_idx)
 {
-	if (rxq_idx < dev->real_num_rx_queues)
-		return __netif_get_rx_queue(dev, rxq_idx)->mp_params.mp_ops;
+	const struct memory_provider_ops *ops;
+
+	if (rxq_idx < dev->real_num_rx_queues) {
+		ops = __netif_get_rx_queue(dev, rxq_idx)->mp_params.mp_ops;
+		return ops && !ops->get_netmem_addr;
+	}
 	return false;
 }
 EXPORT_SYMBOL(netif_rxq_has_unreadable_mp);
@@ -92,6 +96,22 @@ bool netif_rxq_has_mp(struct net_device *dev, unsigned int rxq_idx)
 {
 	if (rxq_idx < dev->real_num_rx_queues)
 		return __netif_get_rx_queue(dev, rxq_idx)->mp_params.mp_priv;
+	return false;
+}
+
+bool netif_has_unreadable_mp(struct net_device *dev)
+{
+	const struct memory_provider_ops *ops;
+	int i;
+
+	netdev_assert_locked_ops_compat(dev);
+
+	for (i = dev->real_num_rx_queues - 1; i >= 0; i--) {
+		ops = dev->_rx[i].mp_params.mp_ops;
+		if (ops && !ops->get_netmem_addr)
+			return true;
+	}
+
 	return false;
 }
 
@@ -185,6 +205,18 @@ int netdev_rx_queue_restart(struct net_device *dev, unsigned int rxq_idx)
 }
 EXPORT_SYMBOL_NS_GPL(netdev_rx_queue_restart, "NETDEV_INTERNAL");
 
+static bool
+netif_mp_is_xsk(const struct netdev_rx_queue *rxq,
+		const struct pp_memory_provider_params *p)
+{
+#ifdef CONFIG_XDP_SOCKETS
+	/* AF_XDP registers the pool on the queue before driver setup. */
+	return rxq->pool && rxq->pool == p->mp_priv;
+#else
+	return false;
+#endif
+}
+
 static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 			       const struct pp_memory_provider_params *p,
 			       struct netlink_ext_ack *extack)
@@ -192,49 +224,59 @@ static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	const struct netdev_queue_mgmt_ops *qops = dev->queue_mgmt_ops;
 	struct netdev_queue_config qcfg[2];
 	struct netdev_rx_queue *rxq;
+	bool xsk;
 	int ret;
 
 	if (!qops)
 		return -EOPNOTSUPP;
 
-	if (dev->cfg->hds_config != ETHTOOL_TCP_DATA_SPLIT_ENABLED) {
-		NL_SET_ERR_MSG(extack, "tcp-data-split is disabled");
+	if ((dev->cfg->hds_config != ETHTOOL_TCP_DATA_SPLIT_ENABLED ||
+	     dev->cfg->hds_thresh) &&
+	    !p->mp_ops->get_netmem_addr) {
+		NL_SET_ERR_MSG(extack,
+			       "memory provider does not support current tcp-data-split configuration");
 		return -EINVAL;
 	}
-	if (dev->cfg->hds_thresh) {
-		NL_SET_ERR_MSG(extack, "hds-thresh is not zero");
-		return -EINVAL;
-	}
-	if (dev_xdp_prog_count(dev)) {
-		NL_SET_ERR_MSG(extack, "unable to custom memory provider to device with XDP program attached");
+	if (dev_xdp_prog_count(dev) && !p->mp_ops->get_netmem_addr) {
+		NL_SET_ERR_MSG(extack, "device has an XDP program attached");
 		return -EEXIST;
 	}
+
 	if (p->rx_page_size && !(qops->supported_params & QCFG_RX_PAGE_SIZE)) {
 		NL_SET_ERR_MSG(extack, "device does not support: rx_page_size");
 		return -EOPNOTSUPP;
 	}
 
 	rxq = __netif_get_rx_queue(dev, rxq_idx);
+	xsk = netif_mp_is_xsk(rxq, p);
 	if (rxq->mp_params.mp_ops) {
 		NL_SET_ERR_MSG(extack, "designated queue already memory provider bound");
 		return -EEXIST;
 	}
 #ifdef CONFIG_XDP_SOCKETS
-	if (rxq->pool) {
-		NL_SET_ERR_MSG(extack, "designated queue already in use by AF_XDP");
+	if (rxq->pool && !xsk) {
+		NL_SET_ERR_MSG(extack,
+			       "designated queue already in use by AF_XDP");
 		return -EBUSY;
 	}
 #endif
-
 	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
 	rxq->mp_params = *p;
 	ret = netdev_queue_config_validate(dev, rxq_idx, &qcfg[1], extack);
 	if (ret)
 		goto err_clear_mp;
+	if (xsk && !netif_running(dev))
+		return 0;
 
 	ret = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1]);
 	if (ret)
 		goto err_clear_mp;
+
+	/* Kick the replacement queue once after installing an XSK provider.
+	 * Its fill ring may have changed while queue memory was allocated.
+	 */
+	if (xsk && rxq->napi)
+		napi_schedule(rxq->napi);
 
 	return 0;
 
@@ -247,6 +289,7 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 		      const struct pp_memory_provider_params *p,
 		      struct netlink_ext_ack *extack)
 {
+	struct netdev_rx_queue *rxq;
 	int ret;
 
 	if (!netdev_need_ops_lock(dev))
@@ -257,6 +300,13 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 		return -ERANGE;
 	}
 	rxq_idx = array_index_nospec(rxq_idx, dev->real_num_rx_queues);
+	rxq = __netif_get_rx_queue(dev, rxq_idx);
+
+	if (netif_mp_is_xsk(rxq, p) && netif_rxq_is_leased(dev, rxq_idx)) {
+		NL_SET_ERR_MSG(extack,
+			       "XSK memory providers do not support queue leases");
+		return -EOPNOTSUPP;
+	}
 
 	if (!netif_rxq_is_leased(dev, rxq_idx))
 		return __netif_mp_open_rxq(dev, rxq_idx, p, extack);
@@ -276,49 +326,80 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	return ret;
 }
 
-static void __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
-				 const struct pp_memory_provider_params *old_p)
+static int
+__netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
+		     const struct pp_memory_provider_params *old_p)
 {
+	struct pp_memory_provider_params saved;
 	struct netdev_queue_config qcfg[2];
 	struct netdev_rx_queue *rxq;
+	bool xsk;
 	int err;
 
 	rxq = __netif_get_rx_queue(dev, rxq_idx);
+	xsk = netif_mp_is_xsk(rxq, old_p);
 
 	/* Callers holding a netdev ref may get here after we already
 	 * went thru shutdown via dev_memory_provider_uninstall().
 	 */
 	if (dev->reg_state > NETREG_REGISTERED &&
 	    !rxq->mp_params.mp_ops)
-		return;
+		return 0;
 
 	if (WARN_ON_ONCE(rxq->mp_params.mp_ops != old_p->mp_ops ||
 			 rxq->mp_params.mp_priv != old_p->mp_priv))
-		return;
+		return -EINVAL;
+	if (!netif_running(dev)) {
+		memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+		return 0;
+	}
 
+	saved = rxq->mp_params;
 	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
 	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
 	netdev_queue_config(dev, rxq_idx, &qcfg[1]);
 
 	err = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1]);
-	WARN_ON(err && err != -ENETDOWN);
+	/* Existing providers cannot defer destruction after close. Preserve
+	 * their established best-effort teardown semantics. AF_XDP retains the
+	 * socket pool and can retry while the old queue remains operational.
+	 */
+	if (xsk && err && err != -ENETDOWN)
+		rxq->mp_params = saved;
+
+	return xsk && err == -ENETDOWN ? 0 : err;
 }
 
-void netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
-			const struct pp_memory_provider_params *old_p)
+int netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
+		       const struct pp_memory_provider_params *old_p)
 {
+	struct netdev_rx_queue *rxq;
+	bool xsk;
+	int err;
+
 	if (WARN_ON_ONCE(rxq_idx >= dev->real_num_rx_queues))
-		return;
-	if (!netif_rxq_is_leased(dev, rxq_idx))
-		return __netif_mp_close_rxq(dev, rxq_idx, old_p);
+		return -ERANGE;
+	rxq = __netif_get_rx_queue(dev, rxq_idx);
+	xsk = netif_mp_is_xsk(rxq, old_p);
+	if (WARN_ON_ONCE(xsk && netif_rxq_is_leased(dev, rxq_idx)))
+		return -EOPNOTSUPP;
+
+	if (!netif_rxq_is_leased(dev, rxq_idx)) {
+		err = __netif_mp_close_rxq(dev, rxq_idx, old_p);
+		if (!xsk)
+			WARN_ON(err && err != -ENETDOWN);
+		return err;
+	}
 
 	if (!__netif_get_rx_queue_lease(&dev, &rxq_idx, NETIF_VIRT_TO_PHYS)) {
 		WARN_ON_ONCE(1);
-		return;
+		return -EBUSY;
 	}
 	netdev_lock(dev);
-	__netif_mp_close_rxq(dev, rxq_idx, old_p);
+	err = __netif_mp_close_rxq(dev, rxq_idx, old_p);
 	netdev_unlock(dev);
+	WARN_ON(err && err != -ENETDOWN);
+	return err;
 }
 
 void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
@@ -341,10 +422,12 @@ void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq,
 {
 	unsigned int rxq_idx = get_netdev_rx_queue_index(phys_rxq);
 	struct pp_memory_provider_params p = phys_rxq->mp_params;
+	int err;
 
 	if (!p.mp_ops)
 		return;
 
-	__netif_mp_close_rxq(phys_rxq->dev, rxq_idx, &p);
+	err = __netif_mp_close_rxq(phys_rxq->dev, rxq_idx, &p);
+	WARN_ON_ONCE(err && err != -ENETDOWN);
 	__netif_mp_uninstall_rxq(virt_rxq, &p);
 }
