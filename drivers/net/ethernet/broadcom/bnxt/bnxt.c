@@ -11801,6 +11801,25 @@ static void bnxt_tx_queue_stop(struct bnxt *bp, int idx)
 
 		bnxt_hwrm_tx_ring_free(bp, txr, true);
 		bnxt_hwrm_cp_ring_free(bp, txr->tx_cpr);
+	}
+}
+
+/* NAPI must be disabled before software-owned TX buffers are released. */
+static void bnxt_tx_queue_cleanup(struct bnxt *bp, int idx)
+{
+	struct bnxt_tx_ring_info *txr;
+	struct bnxt_napi *bnapi;
+	int i;
+
+	bnapi = bp->bnapi[idx];
+	bnxt_for_each_napi_tx(i, bnapi, txr) {
+		if ((bnapi->flags & BNXT_NAPI_FLAG_XDP) &&
+		    txr == bnapi->tx_ring[0])
+			continue;
+
+		if (!bp->tph_mode)
+			continue;
+
 		bnxt_free_one_tx_ring_skbs(bp, txr);
 		bnxt_clear_one_cp_ring(bp, txr->tx_cpr);
 	}
@@ -16746,6 +16765,8 @@ static int bnxt_queue_stop(struct net_device *dev, void *qmem, int idx)
 	 */
 	napi_disable_locked(&bnapi->napi);
 	bnapi->in_queue_restart = true;
+	if (bp->flags & BNXT_FLAG_SHARED_RINGS)
+		bnxt_tx_queue_cleanup(bp, idx);
 
 	if (bp->tph_mode) {
 		bnxt_hwrm_cp_ring_free(bp, rxr->rx_cpr);
