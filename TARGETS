@@ -1,10 +1,12 @@
 load("//facebook/bzl:kernel.bzl", "buildinfo", "kernel", "validate_config")
 load("//facebook/bzl:flavors.td.bzl", "ARCH_X86_64", "ARCHITECTURES", "ARCH_FLAVORS")
 load("//facebook/bzl:modules.bzl", "standalone_module")
+load("//facebook/bzl:external_module_build.bzl", "standalone_external_module")
 load("//facebook/bzl:klp.bzl", "klp")
 
 validate_config()
 standalone_module()
+standalone_external_module()
 
 # hack to just bind the repo root into the container - this is somewhat
 # against buck's idea of explicit dependencies, but we can reasonably
