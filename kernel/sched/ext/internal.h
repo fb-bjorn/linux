@@ -259,6 +259,9 @@ struct scx_cgroup_init_args {
 	u64			bw_period_us;
 	u64			bw_quota_us;
 	u64			bw_burst_us;
+
+	/* whether the cgroup is configured SCHED_IDLE via cpu.idle */
+	bool			sched_idle;
 };
 
 enum scx_cpu_preempt_reason {
@@ -442,7 +445,7 @@ struct sched_ext_ops {
 	 *
 	 * Note that this callback may be called from a CPU other than the
 	 * one the task is going to run on. This can happen when a task
-	 * property is changed (i.e., affinity), since scx_next_task_scx(),
+	 * property is changed (i.e., affinity), since set_next_task_scx(),
 	 * which triggers this callback, may run on a CPU different from
 	 * the task's assigned CPU.
 	 *
@@ -569,6 +572,12 @@ struct sched_ext_ops {
 	 *
 	 * Specify the %SCX_OPS_KEEP_BUILTIN_IDLE flag to keep the built-in idle
 	 * tracking.
+	 *
+	 * Only actual transitions are reported. A CPU that is claimed with an
+	 * idle pick and kicked but dispatches no task returns to idle without a
+	 * transition. A scheduler tracking idle CPUs itself must restore the
+	 * idle state from ops.dispatch() when it returns without the next task
+	 * to run.
 	 */
 	void (*update_idle)(s32 cpu, bool idle);
 
@@ -1552,6 +1561,7 @@ struct scx_sched {
 	 * and passes it to the callback's __arena argument.
 	 */
 	struct scx_cmask * __percpu *set_cmask_scratch;
+	struct scx_cmask *online_cmask;
 
 	DECLARE_BITMAP(has_op, SCX_OPI_END);
 
@@ -2079,7 +2089,7 @@ void scx_disable_and_exit_task(struct scx_sched *sch, struct task_struct *p);
 void scx_cgroup_lock(void);
 void scx_cgroup_unlock(void);
 #endif
-s32 scx_set_cmask_scratch_alloc(struct scx_sched *sch);
+s32 scx_alloc_kern_arena_objs(struct scx_sched *sch);
 void scx_disable_bypass_dsp(struct scx_sched *sch);
 void scx_bypass(struct scx_sched *sch, bool bypass);
 s32 scx_link_sched(struct scx_sched *sch);
@@ -2112,6 +2122,22 @@ extern struct scx_sched *scx_enabling_sub_sched;
 	__scx_exit(sch, kind, exit_code, raw_smp_processor_id(), fmt, ##args)
 #define scx_error(sch, fmt, args...)						\
 	scx_exit((sch), SCX_EXIT_ERROR, 0, fmt, ##args)
+
+/*
+ * Tracing progs can call kfuncs from NMI. Kfuncs that take scheduler locks or
+ * touch the kick lists, which are only protected by irq masking, can't run
+ * there, so abort the scheduler instead. scx_error() is NMI-safe.
+ */
+static __always_inline bool __scx_kf_allowed_ctx(struct scx_sched *sch, const char *who)
+{
+	if (unlikely(in_nmi())) {
+		scx_error(sch, "%s called from NMI", who);
+		return false;
+	}
+	return true;
+}
+
+#define scx_kf_allowed_ctx(sch)	__scx_kf_allowed_ctx((sch), __func__)
 
 /**
  * scx_root_protected_live - Root sched for paths that only run while live
@@ -2203,6 +2229,15 @@ static inline void scx_schedule_reenq_local(struct rq *rq, u64 reenq_flags)
  */
 static inline struct rq *scx_locked_rq(void)
 {
+	/*
+	 * Tracing progs can call kfuncs from NMI. scx_locked_rq_state tracks
+	 * the rq locked by the interrupted context, so a non-NULL read from
+	 * NMI would falsely claim its lock. Return NULL from NMI so that
+	 * callers take their unlocked paths.
+	 */
+	if (unlikely(in_nmi()))
+		return NULL;
+
 	return __this_cpu_read(scx_locked_rq_state);
 }
 
