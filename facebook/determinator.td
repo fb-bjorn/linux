@@ -27,7 +27,7 @@ BPF_SELFTESTS_ARCH = "x86_64" # for now the only suported arch for bpf selftests
 # v7.1-fb pins carries, so on older branches it does not compile and is dropped
 # from the bundle entirely. Its runner gates on the kernel version and exits
 # green below 7.1, so adding it to build_machinery/master would be safe but
-# would boot a 16 GiB VM on every older branch's diffs only to skip.
+# would boot a 32 GiB VM on every older branch's diffs only to skip.
 SELFTESTS_ARCH = "x86_64"
 SELFTEST_SUITES = ["cgroup", "cachestat", "mm"]
 
