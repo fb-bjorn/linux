@@ -36,17 +36,17 @@ def _fragments(carch, flavor):
     return frags
 
 _MERGE_CONFIG = """set -e
-cd /ro/source
+cd /rw/source
 export LLVM=1
 export ARCH={carch}
 export KCONFIG_WARN_UNKNOWN_SYMBOLS=1
 export KCONFIG_CONFIG=/rw/out/.config
 ret=0
-./scripts/kconfig/merge_config.sh -O /rw/work {fragments} > /rw/work/merge.log 2>&1 || ret=$?
+./scripts/kconfig/merge_config.sh {fragments} > merge.log 2>&1 || ret=$?
 
 # TODO: some of the warnings from merge_config.sh should be fatal,
 # but for now just print the warnings and exit.
-cat /rw/work/merge.log >&2
+cat merge.log >&2
 
 exit $ret
 """
@@ -72,12 +72,15 @@ def generated_config(arch, flavor = None):
             fragments = " ".join(["/ro/frags/" + f for f in fragments]),
         ),
         bind_ro = [
-            ("//:sources", "/ro/source"),
             ("//facebook/config:files", "/ro/frags"),
+        ],
+        # merge_config.sh before v7.3 requires a writable tree. Writes go to
+        # the $TMP overlay so the tree remains pristine outside the container.
+        overlay_rw = [
+            ("//:sources", "$TMP", "/rw/source"),
         ],
         bind_rw = [
             ("$OUT", "/rw/out"),
-            ("$TMP", "/rw/work"),
         ],
         cacheable = True,
     )
