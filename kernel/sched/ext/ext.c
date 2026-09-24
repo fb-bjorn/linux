@@ -1832,10 +1832,10 @@ void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p)
 			list_del_init(&p->scx.dsq_list.node);
 
 		/*
-		 * When dispatching directly from the BPF scheduler to a local
-		 * DSQ, the task isn't associated with any DSQ but
-		 * @p->scx.holding_cpu may be set under the protection of
-		 * %SCX_OPSS_DISPATCHING.
+		 * When dispatch_to_local_dsq() or remote consumption moves a
+		 * task to a local DSQ, the task isn't associated with any DSQ
+		 * but @p->scx.holding_cpu may be set. Clearing holding_cpu
+		 * tells dispatch_to_local_dsq() that it lost to a dequeue.
 		 */
 		if (p->scx.holding_cpu >= 0)
 			p->scx.holding_cpu = -1;
@@ -1855,10 +1855,10 @@ void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p)
 		scx_task_unlink_from_dsq(p, dsq);
 	} else {
 		/*
-		 * We're racing against dispatch_to_local_dsq() which already
-		 * removed @p from @dsq and set @p->scx.holding_cpu. Clear the
-		 * holding_cpu which tells dispatch_to_local_dsq() that it lost
-		 * the race.
+		 * We're racing against unlink_dsq_and_switch_rq_lock(),
+		 * which already removed @p from @dsq and set
+		 * @p->scx.holding_cpu. Clear holding_cpu to tell
+		 * unlink_dsq_and_switch_rq_lock() that it lost the race.
 		 */
 		WARN_ON_ONCE(!list_empty(&p->scx.dsq_list.node));
 		p->scx.holding_cpu = -1;
@@ -2612,7 +2612,7 @@ static bool task_can_run_on_remote_rq(struct scx_sched *sch,
  * points to this CPU. See scx_dispatch_dequeue() for the counterpart.
  *
  * On return, @dsq is unlocked and @src_rq is locked. Returns %true if @p is
- * still valid. %false if lost to dequeue.
+ * still valid and detached from @dsq. %false if lost to dequeue.
  */
 static bool unlink_dsq_and_switch_rq_lock(struct task_struct *p,
 					  struct scx_dispatch_q *dsq,
@@ -2632,8 +2632,18 @@ static bool unlink_dsq_and_switch_rq_lock(struct task_struct *p,
 	switch_rq_lock(locked_rq, src_rq);
 
 	/* task_rq couldn't have changed if we're still the holding cpu */
-	return likely(p->scx.holding_cpu == cpu) &&
-		!WARN_ON_ONCE(src_rq != task_rq(p));
+	if (likely(p->scx.holding_cpu == cpu) && !WARN_ON_ONCE(src_rq != task_rq(p))) {
+		/*
+		 * Keep ->dsq set until we own @src_rq so that a racing dequeue
+		 * can find @dsq and clear holding_cpu. Once ownership is
+		 * confirmed, clear it under @src_rq so that deactivate_task()
+		 * takes the !dsq path instead of retaking @dsq->lock.
+		 */
+		p->scx.dsq = NULL;
+		return true;
+	}
+
+	return false;
 }
 
 static bool consume_remote_task(struct scx_sched *sch, struct rq *this_rq,
@@ -2700,6 +2710,7 @@ static struct rq *move_task_between_dsqs(struct scx_sched *sch,
 			raw_spin_unlock(&src_dsq->lock);
 			scx_move_local_task_to_local_dsq(sch, p, enq_flags, dst_rq);
 		} else {
+			dispatch_dequeue_locked(p, src_dsq);
 			raw_spin_unlock(&src_dsq->lock);
 			move_remote_task_to_local_dsq(sch, p, enq_flags, src_rq, dst_rq);
 		}
