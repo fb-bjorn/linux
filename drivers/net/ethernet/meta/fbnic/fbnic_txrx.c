@@ -3129,6 +3129,12 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 	return 0;
 
 err_restart:
+	/* The disabled vector still owns its buffers and transmit work.
+	 * Return them before enabling resets the ring indices, as
+	 * fbnic_down() does after an idle timeout.
+	 */
+	fbnic_synchronize_irq(fbn->fbd, nv->v_idx);
+	fbnic_nv_flush(nv);
 	__fbnic_nv_restart(fbn, nv);
 	return err;
 }
