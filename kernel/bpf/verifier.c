@@ -6850,7 +6850,7 @@ static int check_stack_range_initialized(
 	 */
 	bool allow_poison = access_size < 0 || clobber;
 	/* The call will initialize the memory; uninitialized stack allowed */
-	bool raw_mode = meta && meta->arg_raw_mem.regno == abs(argno.argno);
+	bool raw_mode = meta && meta->arg_raw_mem.regno == reg_from_argno(argno);
 
 	access_size = abs(access_size);
 
@@ -7161,36 +7161,6 @@ static int check_mem_reg(struct bpf_verifier_env *env, struct bpf_reg_state *reg
 					      known_memory);
 
 	return err;
-}
-
-/*
- * Mark the stack range of a raw mode output argument as initialized. Call this
- * only after every argument has been checked: an input argument may alias the
- * output buffer, and marking the output first would make an uninitialized
- * input appear valid. Use the normal stack write checks so that stale spills
- * are discarded and the rules for special stack objects are preserved.
- */
-static int mark_raw_stack(struct bpf_verifier_env *env, struct bpf_call_arg_meta *meta,
-			  int insn_idx)
-{
-	struct bpf_func_state *caller = cur_func(env);
-	struct bpf_reg_state *reg;
-	u32 slot;
-	int i, err;
-
-	if (!meta->arg_raw_mem.size)
-		return 0;
-
-	slot = meta->arg_raw_mem.regno - 1;
-	reg = get_func_arg_reg(caller, cur_regs(env), slot);
-	for (i = 0; i < meta->arg_raw_mem.size; i++) {
-		err = check_mem_access(env, insn_idx, reg, argno_from_arg(slot + 1), i, BPF_B,
-				       BPF_WRITE, -1, false, false);
-		if (err)
-			return err;
-	}
-
-	return 0;
 }
 
 static int process_const_alloc_mem_size(struct bpf_verifier_env *env, struct bpf_reg_state *reg,
@@ -10863,9 +10833,16 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 
 	regs = cur_regs(env);
 
-	err = mark_raw_stack(env, &meta, insn_idx);
-	if (err)
-		return err;
+	/* Mark slots with STACK_MISC in case of raw mode, stack offset
+	 * is inferred from register state.
+	 */
+	for (i = 0; i < meta.arg_raw_mem.size; i++) {
+		err = check_mem_access(env, insn_idx, regs + meta.arg_raw_mem.regno,
+				       argno_from_reg(meta.arg_raw_mem.regno), i, BPF_B,
+				       BPF_WRITE, -1, false, false);
+		if (err)
+			return err;
+	}
 
 	if (meta.release_regno) {
 		struct bpf_reg_state *reg = &regs[meta.release_regno];
@@ -11982,16 +11959,6 @@ get_kfunc_arg_type(struct bpf_verifier_env *env, struct bpf_call_arg_meta *meta,
 	if (is_kfunc_arg_nullable(meta->btf, &args[arg]))
 		arg_type |= PTR_MAYBE_NULL;
 
-	/*
-	 * A generic __uninit memory argument is an output buffer that the kfunc
-	 * initializes without reading. A struct pointer is included because it may
-	 * be resolved to fixed-size memory during call argument checking.
-	 */
-	if ((base_type(arg_type) == KF_ARG_PTR_TO_MEM ||
-	     base_type(arg_type) == KF_ARG_PTR_TO_BTF_ID) &&
-	    is_kfunc_arg_uninit(meta->btf, &args[arg]))
-		arg_type |= MEM_UNINIT;
-
 	return arg_type;
 }
 
@@ -12000,7 +11967,6 @@ static int gen_kfunc_arg_proto(struct bpf_verifier_env *env, struct bpf_call_arg
 {
 	const struct btf *btf = meta->btf;
 	const struct btf_param *args;
-	bool raw_mem = false;
 	u32 i, nargs;
 	int arg_type;
 
@@ -12026,15 +11992,6 @@ static int gen_kfunc_arg_proto(struct bpf_verifier_env *env, struct bpf_call_arg
 		arg_type = get_kfunc_arg_type(env, meta, args, i, nargs);
 		if (arg_type < 0)
 			return arg_type;
-
-		/* Only a single generic output buffer is tracked per call. */
-		if (arg_type & MEM_UNINIT) {
-			if (raw_mem) {
-				verbose(env, "multiple __uninit buffers are not supported\n");
-				return -EINVAL;
-			}
-			raw_mem = true;
-		}
 
 		proto->arg_type[i] = arg_type;
 	}
@@ -12604,15 +12561,6 @@ static bool check_css_task_iter_allowlist(struct bpf_verifier_env *env)
 	}
 }
 
-/*
- * A kfunc may read and write a generic memory argument, except for an
- * __uninit output buffer, which it initializes without reading.
- */
-static enum bpf_access_type kfunc_mem_access_type(int kf_arg_type)
-{
-	return kf_arg_type & MEM_UNINIT ? BPF_WRITE : BPF_READ | BPF_WRITE;
-}
-
 static int check_kfunc_args(struct bpf_verifier_env *env, struct bpf_call_arg_meta *meta,
 			    int insn_idx)
 {
@@ -13079,17 +13027,9 @@ check_ok:
 			 * If the register does not contain btf id but the argument type is a pointer to
 			 * scalar-only struct, allow verifying it as a fixed size memory.
 			 */
-			kf_arg_type = KF_ARG_PTR_TO_MEM | MEM_FIXED_SIZE |
-				      (kf_arg_type & MEM_UNINIT);
+			kf_arg_type = KF_ARG_PTR_TO_MEM | MEM_FIXED_SIZE;
 			fallthrough;
 		case KF_ARG_PTR_TO_MEM:
-			/*
-			 * Check an output buffer in raw mode: a stack range with a constant
-			 * offset and size may be uninitialized before the call, and is marked
-			 * initialized by mark_raw_stack() once all arguments are checked.
-			 */
-			if (kf_arg_type & MEM_UNINIT)
-				meta->arg_raw_mem.regno = i + 1;
 			if (kf_arg_type & MEM_FIXED_SIZE) {
 				bool known_memory;
 
@@ -13100,9 +13040,8 @@ check_ok:
 						ref_tname, PTR_ERR(resolve_ret));
 					return -EINVAL;
 				}
-				ret = check_mem_reg(env, reg, argno, type_size,
-						    kfunc_mem_access_type(kf_arg_type), meta,
-						    &known_memory);
+				ret = check_mem_reg(env, reg, argno, type_size, BPF_READ | BPF_WRITE,
+						    meta, &known_memory);
 				if (ret < 0) {
 					const char *expected_type;
 
@@ -13157,8 +13096,7 @@ check_ok:
 				break;
 
 			ret = check_mem_size_reg(env, buff_reg, size_reg, buff_argno, argno,
-						 kfunc_mem_access_type(meta->fn->arg_type[i - 1]),
-						 true, meta, &failure);
+						 BPF_READ | BPF_WRITE, true, meta, &failure);
 			if (ret < 0) {
 				const char *buff_arg, *size_arg;
 
@@ -13808,10 +13746,6 @@ static int check_kfunc_call(struct bpf_verifier_env *env, struct bpf_insn *insn,
 	/* Check the arguments */
 	err = check_kfunc_args(env, &meta, insn_idx);
 	if (err < 0)
-		return err;
-
-	err = mark_raw_stack(env, &meta, insn_idx);
-	if (err)
 		return err;
 
 	if ((is_bpf_obj_drop_kfunc(meta.func_id) ||
