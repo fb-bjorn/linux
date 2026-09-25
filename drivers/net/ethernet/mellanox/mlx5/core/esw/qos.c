@@ -1489,45 +1489,17 @@ out:
 	return err;
 }
 
-static u32 mlx5_esw_qos_lag_link_speed_get(struct mlx5_core_dev *mdev,
-					   bool take_rtnl)
-{
-	struct ethtool_link_ksettings lksettings;
-	struct net_device *slave, *master;
-	u32 speed = SPEED_UNKNOWN;
-
-	slave = mlx5_uplink_netdev_get(mdev);
-	if (!slave)
-		goto out;
-
-	if (take_rtnl)
-		rtnl_lock();
-	master = netdev_master_upper_dev_get(slave);
-	if (master && !__ethtool_get_link_ksettings(master, &lksettings))
-		speed = lksettings.base.speed;
-	if (take_rtnl)
-		rtnl_unlock();
-
-out:
-	mlx5_uplink_netdev_put(mdev, slave);
-	return speed;
-}
-
 static int mlx5_esw_qos_max_link_speed_get(struct mlx5_core_dev *mdev, u32 *link_speed_max,
-					   bool take_rtnl,
 					   struct netlink_ext_ack *extack)
 {
 	int err;
 
-	if (!mlx5_lag_is_active(mdev))
-		goto skip_lag;
-
-	*link_speed_max = mlx5_esw_qos_lag_link_speed_get(mdev, take_rtnl);
-
-	if (*link_speed_max != (u32)SPEED_UNKNOWN)
+	/* Speed of the LAG ports able to transmit, if any */
+	if (mlx5_lag_is_active(mdev) &&
+	    !mlx5_lag_query_aggregated_speed(mdev, link_speed_max) &&
+	    *link_speed_max)
 		return 0;
 
-skip_lag:
 	err = mlx5_port_max_linkspeed(mdev, link_speed_max);
 	if (err)
 		NL_SET_ERR_MSG_MOD(extack, "Failed to get link maximum speed");
@@ -1560,7 +1532,7 @@ int mlx5_esw_qos_modify_vport_rate(struct mlx5_eswitch *esw, u16 vport_num, u32 
 		return PTR_ERR(vport);
 
 	if (rate_mbps) {
-		err = mlx5_esw_qos_max_link_speed_get(esw->dev, &link_speed_max, false, NULL);
+		err = mlx5_esw_qos_max_link_speed_get(esw->dev, &link_speed_max, NULL);
 		if (err)
 			return err;
 
@@ -1598,7 +1570,7 @@ static int esw_qos_devlink_rate_to_mbps(struct mlx5_core_dev *mdev, const char *
 		return -EINVAL;
 	}
 
-	err = mlx5_esw_qos_max_link_speed_get(mdev, &link_speed_max, true, extack);
+	err = mlx5_esw_qos_max_link_speed_get(mdev, &link_speed_max, extack);
 	if (err)
 		return err;
 
