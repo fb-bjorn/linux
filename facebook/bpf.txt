@@ -1,5 +1,5 @@
-bpf: a13307e97d5c ("Merge tag 'bpf-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf")
-bpf-next: f79066c78402 ("selftests/bpf: Add tests for a store on a fault prone qdisc pointer")
+bpf: 5fc5768c7ca9 ("Merge tag 'bpf-fixes' of git://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf")
+bpf-next: ba5cb7d17288 ("Merge branch 'bpf-fixes-for-may_goto-insn-patching-and-iterator-loops'")
 
 # v7.1-fb BPF sync, 2026-08-19. Range: bpf-next from the v7.1 merge window
 # (2026-06-16) through 2026-08-17. bpf/master was fully contained in bpf-next at
@@ -31,3 +31,64 @@ f3f34ca45b96 bpf, sockmap: Fix wrong rsge offset in bpf_msg_push_data()
 # is not in our base; without it the build fails on struct simple_xattr_cache.
 9722955b5430 bpf: Add simple xattr support to bpffs
 28254722a459 selinux: bpf: check SBLABEL_MNT before isec init
+
+# v7.1-fb BPF sync, 2026-09-25. Range: bpf-next from the previous sync point
+# f79066c78402 (the bpf-next-7.3 tag) through ba5cb7d17288 (2026-09-25).
+# bpf/master (5fc5768c7ca9) was fully contained in bpf-next at the time of
+# this sync, so the bpf tree needed no separate sweep.
+#
+# Commits below were not backported.
+
+# Already in v7.1-fb: 63b13537e6b2 via c15560efc7b0, the three xsk fixes via
+# the net backports (c99212f87ab4, cd6d6adad549, 6e2e7b78b606).
+63b13537e6b2 bpf: Speed up htab lookups for u32/u64 keys
+e37b2abca804 xsk: fix NULL pointer dereference in __xsk_rcv()
+71283aaa6c65 xdp: fix zero-copy frame layout
+a6e4b9a6deb9 xsk: honor XDP_TX_METADATA in zero-copy path
+
+# net-next xsk changes that happen to touch BPF paths; left to the net syncs.
+333289d1690d selftests/xsk: Preserve UMEM view in BIDIRECTIONAL test
+b0057c68df71 xsk: account ring allocations to memcg
+
+# tip tree: x86 optimized uprobes moved from nop5 to nop10 (554ba38456da),
+# which v7.1-fb does not have. libbpf and the selftests must keep matching the
+# nop5 kernel, so the userspace half and its bpf-tree follow-ups stay out.
+ee2862439e5c libbpf: Change has_nop_combo to work on top of nop10
+8cae54c58608 libbpf: Detect uprobe syscall with new error
+28d57db3e8d4 selftests/bpf: Add reattach tests for uprobe syscall
+d7ebbae57de3 selftests/bpf: Add tests for forked/cloned optimized uprobes
+eccf368562bb selftests/bpf: Add tests for uprobe nop10 red zone clobbering
+ec0596a02083 selftests/bpf: Change uprobe syscall tests to use nop10
+b2cf7c41e4f1 selftests/bpf: Change uprobe/usdt trigger bench code to use nop10
+6d91200bcbb5 selftests/bpf: Emit nop,nop10 instructions combo for x86_64 arch
+8b94878b2572 libbpf: Fix usdt attach failure when nop10 crosses page boundary
+1555de33018f selftests/bpf: Add test for usdt probe with page-crossing nop10
+
+# tip tree: preempt_count layout change (HARDIRQ_DISABLE_BITS, NMI_BITS=1).
+# bpf_experimental.h mirrors the running kernel's layout, unchanged here.
+9634d860ac15 preempt: Introduce HARDIRQ_DISABLE_BITS
+b54aa0edf059 preempt: Track NMI nesting to separate per-CPU counter
+
+# tracing tree: the tracefs tracepoint btf_ids file is not in v7.1-fb.
+f8c9b3051ded bpf: Make btf_get_module_btf() and btf_relocate_id() non-static
+74ae53cb7c6a selftests/bpf: Add test for tracepoint btf_ids tracefs file
+
+# vfs tree: the bpf_sock_read_xattr() kfunc is not in v7.1-fb, and cachefiles
+# ondemand mode still exists here.
+d717b7e84f53 selftests/bpf: Add test for bpf_sock_read_xattr() kfunc
+949eb95d5bcc cachefiles,netfs: sunset ondemand mode
+
+# perf tree: tools/build toolchain cleanups.
+738d0cc77e4e tools/build: Allow versioning LLVM readelf
+b2d4225695e6 tools/build: selftests: Remove some duplicate toolchain definitions
+
+# LoongArch tree.
+6afb03599653 selftests/bpf: Enable kptr_xchg_inline test on LoongArch
+
+# Treewide; only its kernel/bpf hunks were applied.
+3a2c4d55e32a treewide: refresh kmalloc_obj() conversions
+
+# Needs the 7.3 lib/crypto AES-CBC and AES-ECB libraries (3cbcf6a2d18e and
+# friends), which are not in our base; bpf crypto stays on the lskcipher
+# backend.
+d5c101840af8 bpf: crypto: Use AES-CBC and AES-ECB libraries
