@@ -4,9 +4,8 @@
 #include <libarena/asan.h>
 #include <libarena/buddy.h>
 
+struct buddy __arena buddy;
 volatile u32 zero = 0;
-
-buddy_t buddy;
 
 /*
  * Storage for the queue nodes declared by bpf_arena_spin_lock.h. Each program
@@ -51,14 +50,14 @@ __weak int arena_buddy_destroy(void)
 	return buddy_destroy(&buddy);
 }
 
-__weak u64 arena_malloc_internal(size_t size)
+__weak void __arena *arena_malloc(size_t size)
 {
-	return buddy_alloc_internal(&buddy, size);
+	return buddy_alloc(&buddy, size);
 }
 
-__weak void arena_free(void __arg_arena __arena *ptr)
+__weak void arena_free(void __arena *ptr)
 {
-	buddy_free_internal(&buddy, (u64)ptr);
+	buddy_free(&buddy, ptr);
 }
 
 
