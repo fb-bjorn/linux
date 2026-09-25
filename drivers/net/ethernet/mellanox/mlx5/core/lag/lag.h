@@ -249,6 +249,7 @@ int mlx5_lag_dev_get_netdev_idx(struct mlx5_lag *ldev,
 char *mlx5_get_str_port_sel_mode(enum mlx5_lag_mode mode, unsigned long flags);
 void mlx5_infer_tx_enabled(struct lag_tracker *tracker, struct mlx5_lag *ldev,
 			   u8 *ports, int *num_enabled);
+void mlx5_lag_get_tracker(struct mlx5_lag *ldev, struct lag_tracker *tracker);
 
 void mlx5_ldev_add_debugfs(struct mlx5_core_dev *dev);
 void mlx5_ldev_remove_debugfs(struct dentry *dbg);
