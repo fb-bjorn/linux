@@ -590,7 +590,7 @@ struct extent_map *btrfs_search_extent_mapping(struct extent_map_tree *tree,
  * Remove @em from the extent tree of @inode.  No reference counts are dropped,
  * and no checks are done to see if the range is in use.
  */
-void btrfs_remove_extent_mapping(struct btrfs_inode *inode, struct extent_map *em)
+noinline void btrfs_remove_extent_mapping(struct btrfs_inode *inode, struct extent_map *em)
 {
 	struct extent_map_tree *tree = &inode->extent_tree;
 
