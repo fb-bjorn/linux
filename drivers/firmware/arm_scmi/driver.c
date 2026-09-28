@@ -17,8 +17,6 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/bitmap.h>
-#include <linux/cleanup.h>
-#include <linux/dcache.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/export.h>
@@ -31,9 +29,9 @@
 #include <linux/hashtable.h>
 #include <linux/list.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/processor.h>
-#include <linux/property.h>
 #include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
@@ -100,11 +98,9 @@ struct scmi_xfers_info {
  *			has completed.
  * @ph: An embedded protocol handle that will be passed down to protocol
  *	initialization code to identify this instance.
- * @dbg: An optional reference to this protocol top debugfs directory; it will
- *	 be automatically recursively removed on protocol de-initialization.
  *
  * Each protocol is initialized independently once for each SCMI platform in
- * which is defined by fwnode and implemented by the SCMI server fw.
+ * which is defined by DT and implemented by the SCMI server fw.
  */
 struct scmi_protocol_instance {
 	const struct scmi_handle	*handle;
@@ -115,7 +111,6 @@ struct scmi_protocol_instance {
 	unsigned int			version;
 	unsigned int			negotiated_version;
 	struct scmi_protocol_handle	ph;
-	struct dentry			*dbg;
 };
 
 #define ph_to_pi(h)	container_of(h, struct scmi_protocol_instance, ph)
@@ -141,7 +136,7 @@ struct scmi_protocol_instance {
  *		   scmi_revision_info.num_protocols elements allocated by the
  *		   base protocol
  * @active_protocols: IDR storing device_nodes for protocols actually defined
- *		      in the fwnode and confirmed as implemented by fw.
+ *		      in the DT and confirmed as implemented by fw.
  * @notify_priv: Pointer to private data structure specific to notifications.
  * @node: List head
  * @users: Number of users of this instance
@@ -419,19 +414,19 @@ EXPORT_SYMBOL_GPL(scmi_protocol_unregister);
  * scmi_create_protocol_devices  - Create devices for all pending requests for
  * this SCMI instance.
  *
- * @fwnode: The device node describing the protocol
+ * @np: The device node describing the protocol
  * @info: The SCMI instance descriptor
  * @prot_id: The protocol ID
  * @name: The optional name of the device to be created: if not provided this
  *	  call will lead to the creation of all the devices currently requested
  *	  for the specified protocol.
  */
-static void scmi_create_protocol_devices(struct fwnode_handle *fwnode,
+static void scmi_create_protocol_devices(struct device_node *np,
 					 struct scmi_info *info,
 					 int prot_id, const char *name)
 {
 	mutex_lock(&info->devreq_mtx);
-	scmi_device_create(fwnode, info->dev, prot_id, name);
+	scmi_device_create(np, info->dev, prot_id, name);
 	mutex_unlock(&info->devreq_mtx);
 }
 
@@ -755,9 +750,9 @@ struct scmi_xfer *scmi_xfer_raw_get(const struct scmi_handle *handle)
  * @protocol_id: Identifier of the protocol
  *
  * Note that in a regular SCMI stack, usually, a protocol has to be defined in
- * the fwnode to have an associated channel and be usable; but in Raw mode any
+ * the DT to have an associated channel and be usable; but in Raw mode any
  * protocol in range is allowed, re-using the Base channel, so as to enable
- * fuzzing on any protocol without the need of a fully compiled device node.
+ * fuzzing on any protocol without the need of a fully compiled DT.
  *
  * Return: A reference to the channel to use, or an ERR_PTR
  */
@@ -771,7 +766,7 @@ scmi_xfer_raw_channel_get(const struct scmi_handle *handle, u8 protocol_id)
 	if (!cinfo) {
 		if (protocol_id == SCMI_PROTOCOL_BASE)
 			return ERR_PTR(-EINVAL);
-		/* Use Base channel for protocols not defined for fwnode */
+		/* Use Base channel for protocols not defined for DT */
 		cinfo = idr_find(&info->tx_idr, SCMI_PROTOCOL_BASE);
 		if (!cinfo)
 			return ERR_PTR(-EINVAL);
@@ -1659,17 +1654,6 @@ static void *scmi_get_protocol_priv(const struct scmi_protocol_handle *ph)
 	return pi->priv;
 }
 
-static int
-scmi_register_instance_notifier(const struct scmi_protocol_handle *ph,
-				u8 evt_id, const u32 *src_id,
-				struct notifier_block *nb)
-{
-	const struct scmi_protocol_instance *pi = ph_to_pi(ph);
-
-	return scmi_notifier_register(pi->handle, pi->proto->id,
-				      evt_id, src_id, nb);
-}
-
 static const struct scmi_xfer_ops xfer_ops = {
 	.xfer_get_init = xfer_get_init,
 	.reset_rx_to_maxsz = reset_rx_to_maxsz,
@@ -2058,25 +2042,6 @@ static void scmi_common_fastchannel_db_ring(struct scmi_fc_db_info *db)
 		SCMI_PROTO_FC_RING_DB(64);
 }
 
-static struct dentry *
-scmi_debugfs_proto_dentry_get(const struct scmi_protocol_handle *ph)
-{
-	struct scmi_protocol_instance *pi = ph_to_pi(ph);
-	struct scmi_info *info = handle_to_scmi_info(pi->handle);
-
-	if (!IS_ENABLED(CONFIG_ARM_SCMI_DEBUG_PROTOCOLS))
-		return ERR_PTR(-ENODEV);
-
-	if (!pi->dbg) {
-		char proto_dir[8];
-
-		snprintf(proto_dir, 8, "0x%02X", pi->proto->id);
-		pi->dbg = debugfs_create_dir(proto_dir, info->dbg->protos);
-	}
-
-	return pi->dbg;
-}
-
 static const struct scmi_proto_helpers_ops helpers_ops = {
 	.extended_name_get = scmi_common_extended_name_get,
 	.get_max_msg_size = scmi_common_get_max_msg_size,
@@ -2085,7 +2050,6 @@ static const struct scmi_proto_helpers_ops helpers_ops = {
 	.protocol_msg_check = scmi_protocol_msg_check,
 	.fastchannel_init = scmi_common_fastchannel_init,
 	.fastchannel_db_ring = scmi_common_fastchannel_db_ring,
-	.debugfs_proto_dentry_get = scmi_debugfs_proto_dentry_get,
 };
 
 /**
@@ -2226,6 +2190,7 @@ best_effort:
  * all resources management is handled via a dedicated per-protocol devres
  * group.
  *
+ * Context: Assumes to be called with @protocols_mtx already acquired.
  * Return: A reference to a freshly allocated and initialized protocol instance
  *	   or ERR_PTR on failure. On failure the @proto reference is at first
  *	   put using @scmi_protocol_put() before releasing all the devres group.
@@ -2258,7 +2223,6 @@ scmi_alloc_init_protocol_instance(struct scmi_info *info,
 	pi->ph.hops = &helpers_ops;
 	pi->ph.set_priv = scmi_set_protocol_priv;
 	pi->ph.get_priv = scmi_get_protocol_priv;
-	pi->ph.notifier_register = scmi_register_instance_notifier;
 	refcount_set(&pi->users, 1);
 
 	/*
@@ -2272,10 +2236,8 @@ scmi_alloc_init_protocol_instance(struct scmi_info *info,
 	if (ret)
 		goto clean;
 
-	/* Finally register the initialized protocol */
-	mutex_lock(&info->protocols_mtx);
-	ret = idr_alloc(&info->protocols, pi, proto->id, proto->id + 1, GFP_KERNEL);
-	mutex_unlock(&info->protocols_mtx);
+	ret = idr_alloc(&info->protocols, pi, proto->id, proto->id + 1,
+			GFP_KERNEL);
 	if (ret != proto->id)
 		goto clean;
 
@@ -2322,25 +2284,27 @@ out:
 static struct scmi_protocol_instance * __must_check
 scmi_get_protocol_instance(const struct scmi_handle *handle, u8 protocol_id)
 {
+	struct scmi_protocol_instance *pi;
 	struct scmi_info *info = handle_to_scmi_info(handle);
-	const struct scmi_protocol *proto;
 
-	scoped_guard(mutex, &info->protocols_mtx) {
-		struct scmi_protocol_instance *pi;
+	mutex_lock(&info->protocols_mtx);
+	pi = idr_find(&info->protocols, protocol_id);
 
-		pi = idr_find(&info->protocols, protocol_id);
-		if (pi) {
-			refcount_inc(&pi->users);
-			return pi;
-		}
+	if (pi) {
+		refcount_inc(&pi->users);
+	} else {
+		const struct scmi_protocol *proto;
+
+		/* Fails if protocol not registered on bus */
+		proto = scmi_protocol_get(protocol_id, &info->version);
+		if (proto)
+			pi = scmi_alloc_init_protocol_instance(info, proto);
+		else
+			pi = ERR_PTR(-EPROBE_DEFER);
 	}
+	mutex_unlock(&info->protocols_mtx);
 
-	/* Fails if protocol not registered on bus */
-	proto = scmi_protocol_get(protocol_id, &info->version);
-	if (!proto)
-		return ERR_PTR(-EPROBE_DEFER);
-
-	return scmi_alloc_init_protocol_instance(info, proto);
+	return pi;
 }
 
 /**
@@ -2371,16 +2335,13 @@ void scmi_protocol_release(const struct scmi_handle *handle, u8 protocol_id)
 	struct scmi_info *info = handle_to_scmi_info(handle);
 	struct scmi_protocol_instance *pi;
 
-	scoped_guard(mutex, &info->protocols_mtx) {
-		pi = idr_find(&info->protocols, protocol_id);
-		if (WARN_ON(!pi))
-			return;
-	}
+	mutex_lock(&info->protocols_mtx);
+	pi = idr_find(&info->protocols, protocol_id);
+	if (WARN_ON(!pi))
+		goto out;
 
 	if (refcount_dec_and_test(&pi->users)) {
 		void *gid = pi->gid;
-
-		debugfs_remove_recursive(pi->dbg);
 
 		if (pi->proto->events)
 			scmi_deregister_protocol_events(handle, protocol_id);
@@ -2396,6 +2357,9 @@ void scmi_protocol_release(const struct scmi_handle *handle, u8 protocol_id)
 		dev_dbg(handle->dev, "De-Initialized protocol: 0x%X\n",
 			protocol_id);
 	}
+
+out:
+	mutex_unlock(&info->protocols_mtx);
 }
 
 void scmi_setup_protocol_implemented(const struct scmi_protocol_handle *ph,
@@ -2744,7 +2708,7 @@ static int scmi_xfer_info_init(struct scmi_info *sinfo)
 	return ret;
 }
 
-static int scmi_chan_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
+static int scmi_chan_setup(struct scmi_info *info, struct device_node *of_node,
 			   int prot_id, bool tx)
 {
 	int ret, idx;
@@ -2757,7 +2721,7 @@ static int scmi_chan_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
 	idx = tx ? 0 : 1;
 	idr = tx ? &info->tx_idr : &info->rx_idr;
 
-	if (!info->desc->ops->chan_available(fwnode, prot_id, idx)) {
+	if (!info->desc->ops->chan_available(of_node, idx)) {
 		cinfo = idr_find(idr, SCMI_PROTOCOL_BASE);
 		if (unlikely(!cinfo)) /* Possible only if platform has no Rx */
 			return -EINVAL;
@@ -2777,20 +2741,20 @@ static int scmi_chan_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
 	snprintf(name, 32, "__scmi_transport_device_%s_%02X",
 		 idx ? "rx" : "tx", prot_id);
 	/* Create a uniquely named, dedicated transport device for this chan */
-	tdev = scmi_device_create(fwnode, info->dev, prot_id, name);
+	tdev = scmi_device_create(of_node, info->dev, prot_id, name);
 	if (!tdev) {
 		dev_err(info->dev,
 			"failed to create transport device (%s)\n", name);
 		devm_kfree(info->dev, cinfo);
 		return -EINVAL;
 	}
+	of_node_get(of_node);
 
 	cinfo->id = prot_id;
 	cinfo->dev = &tdev->dev;
-	fwnode_handle_get(fwnode);
 	ret = info->desc->ops->chan_setup(cinfo, info->dev, tx);
 	if (ret) {
-		fwnode_handle_put(fwnode);
+		of_node_put(of_node);
 		scmi_device_destroy(info->dev, prot_id, name);
 		devm_kfree(info->dev, cinfo);
 		return ret;
@@ -2813,7 +2777,7 @@ idr_alloc:
 			"unable to allocate SCMI idr slot err %d\n", ret);
 		/* Destroy channel and device only if created by this call. */
 		if (tdev) {
-			fwnode_handle_put(fwnode);
+			of_node_put(of_node);
 			scmi_device_destroy(info->dev, prot_id, name);
 			devm_kfree(info->dev, cinfo);
 		}
@@ -2825,14 +2789,14 @@ idr_alloc:
 }
 
 static inline int
-scmi_txrx_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
+scmi_txrx_setup(struct scmi_info *info, struct device_node *of_node,
 		int prot_id)
 {
-	int ret = scmi_chan_setup(info, fwnode, prot_id, true);
+	int ret = scmi_chan_setup(info, of_node, prot_id, true);
 
 	if (!ret) {
 		/* Rx is optional, report only memory errors */
-		ret = scmi_chan_setup(info, fwnode, prot_id, false);
+		ret = scmi_chan_setup(info, of_node, prot_id, false);
 		if (ret && ret != -ENOMEM)
 			ret = 0;
 	}
@@ -2849,33 +2813,33 @@ scmi_txrx_setup(struct scmi_info *info, struct fwnode_handle *fwnode,
  *
  * @info: The SCMI instance descriptor.
  *
- * Initialize all the channels found described in fwnode against the underlying
+ * Initialize all the channels found described in the DT against the underlying
  * configured transport using custom defined dedicated devices instead of
  * borrowing devices from the SCMI drivers; this way channels are initialized
  * upfront during core SCMI stack probing and are no more coupled with SCMI
  * devices used by SCMI drivers.
  *
  * Note that, even though a pair of TX/RX channels is associated to each
- * protocol defined in the fwnode, a distinct freshly initialized channel is
- * created only if the fwnode for the protocol at hand describes a dedicated
+ * protocol defined in the DT, a distinct freshly initialized channel is
+ * created only if the DT node for the protocol at hand describes a dedicated
  * channel: in all the other cases the common BASE protocol channel is reused.
  *
  * Return: 0 on Success
  */
 static int scmi_channels_setup(struct scmi_info *info)
 {
-	int ret, idx;
-	struct fwnode_handle *child, *fwnode = dev_fwnode(info->dev);
+	int ret;
+	struct device_node *top_np = info->dev->of_node;
 
 	/* Initialize a common generic channel at first */
-	ret = scmi_txrx_setup(info, fwnode, SCMI_PROTOCOL_BASE);
+	ret = scmi_txrx_setup(info, top_np, SCMI_PROTOCOL_BASE);
 	if (ret)
 		return ret;
 
-	fwnode_for_each_available_child_node(fwnode, child) {
+	for_each_available_child_of_node_scoped(top_np, child) {
 		u32 prot_id;
 
-		if (fwnode_property_read_u32(child, "reg", &prot_id))
+		if (of_property_read_u32(child, "reg", &prot_id))
 			continue;
 
 		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id))
@@ -2883,17 +2847,6 @@ static int scmi_channels_setup(struct scmi_info *info)
 				"Out of range protocol %d\n", prot_id);
 
 		ret = scmi_txrx_setup(info, child, prot_id);
-		if (ret)
-			return ret;
-	}
-
-	if (acpi_disabled)
-		return 0;
-
-	for (idx = 1; idx < ARRAY_SIZE(scmi_dsd_info_list); idx++) {
-		int prot_id = scmi_dsd_info_list[idx].protocol_id;
-
-		ret = scmi_txrx_setup(info, fwnode, prot_id);
 		if (ret)
 			return ret;
 	}
@@ -2909,7 +2862,7 @@ static int scmi_chan_destroy(int id, void *p, void *idr)
 		struct scmi_info *info = handle_to_scmi_info(cinfo->handle);
 		struct scmi_device *sdev = to_scmi_dev(cinfo->dev);
 
-		fwnode_handle_put(dev_fwnode(cinfo->dev));
+		of_node_put(cinfo->dev->of_node);
 		scmi_device_destroy(info->dev, id, sdev->name);
 		cinfo->dev = NULL;
 	}
@@ -2970,12 +2923,12 @@ static int scmi_bus_notifier(struct notifier_block *nb,
 static int scmi_device_request_notifier(struct notifier_block *nb,
 					unsigned long action, void *data)
 {
-	struct fwnode_handle *fwnode;
+	struct device_node *np;
 	struct scmi_device_id *id_table = data;
 	struct scmi_info *info = req_nb_to_scmi_info(nb);
 
-	fwnode = idr_find(&info->active_protocols, id_table->protocol_id);
-	if (!fwnode)
+	np = idr_find(&info->active_protocols, id_table->protocol_id);
+	if (!np)
 		return NOTIFY_DONE;
 
 	dev_dbg(info->dev, "%sRequested device (%s) for protocol 0x%x\n",
@@ -2984,7 +2937,7 @@ static int scmi_device_request_notifier(struct notifier_block *nb,
 
 	switch (action) {
 	case SCMI_BUS_NOTIFY_DEVICE_REQUEST:
-		scmi_create_protocol_devices(fwnode, info, id_table->protocol_id,
+		scmi_create_protocol_devices(np, info, id_table->protocol_id,
 					     id_table->name);
 		break;
 	case SCMI_BUS_NOTIFY_DEVICE_UNREQUEST:
@@ -3071,15 +3024,13 @@ static struct scmi_debug_info *scmi_debugfs_common_setup(struct scmi_info *info)
 	if (!dbg)
 		return NULL;
 
-	dbg->name = kstrdup(fwnode_get_name(dev_fwnode(info->dev)), GFP_KERNEL);
+	dbg->name = kstrdup(of_node_full_name(info->dev->of_node), GFP_KERNEL);
 	if (!dbg->name) {
 		devm_kfree(info->dev, dbg);
 		return NULL;
 	}
 
-	if (fwnode_property_read_string(dev_fwnode(info->dev), "compatible",
-					&c_ptr))
-		c_ptr = acpi_device_hid(ACPI_COMPANION(info->dev)) ?: "unknown";
+	of_property_read_string(info->dev->of_node, "compatible", &c_ptr);
 	dbg->type = kstrdup(c_ptr, GFP_KERNEL);
 	if (!dbg->type) {
 		kfree(dbg->name);
@@ -3118,9 +3069,6 @@ static struct scmi_debug_info *scmi_debugfs_common_setup(struct scmi_info *info)
 
 	if (IS_ENABLED(CONFIG_ARM_SCMI_DEBUG_COUNTERS))
 		scmi_debugfs_counters_setup(dbg, trans);
-
-	if (IS_ENABLED(CONFIG_ARM_SCMI_DEBUG_PROTOCOLS))
-		dbg->protos = debugfs_create_dir("protocols", top_dentry);
 
 	dbg->top_dentry = top_dentry;
 
@@ -3188,24 +3136,23 @@ static const struct scmi_desc *scmi_transport_setup(struct device *dev)
 
 	dev_info(dev, "Using %s\n", dev_driver_string(trans->supplier));
 
-	ret = fwnode_property_read_u32(dev_fwnode(dev), "arm,max-rx-timeout-ms",
-				       &trans->desc.max_rx_timeout_ms);
+	ret = of_property_read_u32(dev->of_node, "arm,max-rx-timeout-ms",
+				   &trans->desc.max_rx_timeout_ms);
 	if (ret && ret != -EINVAL)
-		dev_err(dev, "Malformed arm,max-rx-timeout-ms property.\n");
+		dev_err(dev, "Malformed arm,max-rx-timeout-ms DT property.\n");
 
-	ret = fwnode_property_read_u32(dev_fwnode(dev), "arm,max-msg-size",
-				       &trans->desc.max_msg_size);
+	ret = of_property_read_u32(dev->of_node, "arm,max-msg-size",
+				   &trans->desc.max_msg_size);
 	if (ret && ret != -EINVAL)
-		dev_err(dev, "Malformed arm,max-msg-size property.\n");
+		dev_err(dev, "Malformed arm,max-msg-size DT property.\n");
 
-	ret = fwnode_property_read_u32(dev_fwnode(dev), "arm,max-msg",
-				       &trans->desc.max_msg);
+	ret = of_property_read_u32(dev->of_node, "arm,max-msg",
+				   &trans->desc.max_msg);
 	if (ret && ret != -EINVAL)
-		dev_err(dev, "Malformed arm,max-msg property.\n");
+		dev_err(dev, "Malformed arm,max-msg DT property.\n");
 
-	trans->desc.no_completion_irq =
-		fwnode_property_read_bool(dev_fwnode(dev),
-					  "arm,no-completion-irq");
+	trans->desc.no_completion_irq = of_property_read_bool(dev->of_node,
+							      "arm,no-completion-irq");
 
 	dev_info(dev,
 		 "SCMI max-rx-timeout: %dms / max-msg-size: %dbytes / max-msg: %d\n",
@@ -3213,8 +3160,8 @@ static const struct scmi_desc *scmi_transport_setup(struct device *dev)
 		 trans->desc.max_msg);
 
 	/* System wide atomic threshold for atomic ops .. if any */
-	if (!fwnode_property_read_u32(dev_fwnode(dev), "atomic-threshold-us",
-				      &trans->desc.atomic_threshold))
+	if (!of_property_read_u32(dev->of_node, "atomic-threshold-us",
+				  &trans->desc.atomic_threshold))
 		dev_info(dev,
 			 "SCMI System wide atomic threshold set to %u us\n",
 			 trans->desc.atomic_threshold);
@@ -3234,48 +3181,16 @@ static void scmi_enable_matching_quirks(struct scmi_info *info)
 			   rev->sub_vendor_id, rev->impl_ver);
 }
 
-static void scmi_device_check_create(struct fwnode_handle *fwnode, int prot_id,
-				     struct scmi_info *info)
-{
-	int ret;
-	struct device *dev = info->dev;
-	struct scmi_handle *handle = &info->handle;
-
-	if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id))
-		dev_err(dev, "Out of range protocol %d\n", prot_id);
-
-	if (!scmi_is_protocol_implemented(handle, prot_id)) {
-		dev_err(dev, "SCMI protocol %d not implemented\n",
-			prot_id);
-		return;
-	}
-
-	/*
-	 * Save this valid fwnode protocol descriptor amongst
-	 * @active_protocols for this SCMI instance/
-	 */
-	ret = idr_alloc(&info->active_protocols,
-			fwnode_handle_get(fwnode),
-			prot_id, prot_id + 1, GFP_KERNEL);
-	if (ret != prot_id) {
-		dev_err(dev, "SCMI protocol %d already activated. Skip\n",
-			prot_id);
-		return;
-	}
-
-	scmi_create_protocol_devices(fwnode, info, prot_id, NULL);
-}
-
 static int scmi_probe(struct platform_device *pdev)
 {
-	int ret, idx;
+	int ret;
 	char *err_str = "probe failure\n";
 	struct scmi_handle *handle;
 	const struct scmi_desc *desc;
 	struct scmi_info *info;
-	struct fwnode_handle *child;
 	bool coex = IS_ENABLED(CONFIG_ARM_SCMI_RAW_MODE_SUPPORT_COEX);
 	struct device *dev = &pdev->dev;
+	struct device_node *child, *np = dev->of_node;
 
 	desc = scmi_transport_setup(dev);
 	if (!desc) {
@@ -3314,7 +3229,7 @@ static int scmi_probe(struct platform_device *pdev)
 	handle->devm_protocol_put = scmi_devm_protocol_put;
 	handle->is_transport_atomic = scmi_is_transport_atomic;
 
-	/* Setup all channels described in the fwnode at first */
+	/* Setup all channels described in the DT at first */
 	ret = scmi_channels_setup(info);
 	if (ret) {
 		err_str = "failed to setup channels\n";
@@ -3389,22 +3304,35 @@ static int scmi_probe(struct platform_device *pdev)
 
 	scmi_enable_matching_quirks(info);
 
-	fwnode_for_each_available_child_node(dev_fwnode(dev), child) {
+	for_each_available_child_of_node(np, child) {
 		u32 prot_id;
 
-		if (fwnode_property_read_u32(child, "reg", &prot_id))
+		if (of_property_read_u32(child, "reg", &prot_id))
 			continue;
 
-		scmi_device_check_create(child, prot_id, info);
-	}
+		if (!FIELD_FIT(MSG_PROTOCOL_ID_MASK, prot_id))
+			dev_err(dev, "Out of range protocol %d\n", prot_id);
 
-	if (acpi_disabled)
-		return 0;
+		if (!scmi_is_protocol_implemented(handle, prot_id)) {
+			dev_err(dev, "SCMI protocol %d not implemented\n",
+				prot_id);
+			continue;
+		}
 
-	for (idx = 1; idx < ARRAY_SIZE(scmi_dsd_info_list); idx++) {
-		int prot_id = scmi_dsd_info_list[idx].protocol_id;
+		/*
+		 * Save this valid DT protocol descriptor amongst
+		 * @active_protocols for this SCMI instance/
+		 */
+		ret = idr_alloc(&info->active_protocols, child,
+				prot_id, prot_id + 1, GFP_KERNEL);
+		if (ret != prot_id) {
+			dev_err(dev, "SCMI protocol %d already activated. Skip\n",
+				prot_id);
+			continue;
+		}
 
-		scmi_device_check_create(dev_fwnode(dev), prot_id, info);
+		of_node_get(child);
+		scmi_create_protocol_devices(child, info, prot_id, NULL);
 	}
 
 	return 0;
@@ -3431,7 +3359,7 @@ static void scmi_remove(struct platform_device *pdev)
 {
 	int id;
 	struct scmi_info *info = platform_get_drvdata(pdev);
-	struct fwnode_handle *child;
+	struct device_node *child;
 
 	if (IS_ENABLED(CONFIG_ARM_SCMI_RAW_MODE_SUPPORT))
 		scmi_raw_mode_cleanup(info->raw);
@@ -3450,7 +3378,7 @@ static void scmi_remove(struct platform_device *pdev)
 	mutex_unlock(&info->protocols_mtx);
 
 	idr_for_each_entry(&info->active_protocols, child, id)
-		fwnode_handle_put(child);
+		of_node_put(child);
 	idr_destroy(&info->active_protocols);
 
 	blocking_notifier_chain_unregister(&scmi_requested_devices_nh,
@@ -3574,7 +3502,6 @@ static int __init scmi_driver_init(void)
 	scmi_system_register();
 	scmi_powercap_register();
 	scmi_pinctrl_register();
-	scmi_telemetry_register();
 
 	return platform_driver_register(&scmi_driver);
 }
@@ -3593,7 +3520,6 @@ static void __exit scmi_driver_exit(void)
 	scmi_system_unregister();
 	scmi_powercap_unregister();
 	scmi_pinctrl_unregister();
-	scmi_telemetry_unregister();
 
 	platform_driver_unregister(&scmi_driver);
 

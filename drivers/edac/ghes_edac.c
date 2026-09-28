@@ -412,7 +412,7 @@ static int ghes_edac_register(struct device *dev)
 		ghes_hw.num_dimms = 1;
 	}
 
-	layers[0].type = EDAC_MC_LAYER_SLOT;
+	layers[0].type = EDAC_MC_LAYER_ALL_MEM;
 	layers[0].size = ghes_hw.num_dimms;
 	layers[0].is_virt_csrow = true;
 

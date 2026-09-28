@@ -43,13 +43,13 @@
 
 /* Default event format */
 #define ARM_CSPMU_FORMAT_EVENT_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(event, "config:0-63")
+	ARM_CSPMU_FORMAT_ATTR(event, "config:0-32")
 
 /* Default filter format */
 #define ARM_CSPMU_FORMAT_FILTER_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(filter, "config1:0-63")
+	ARM_CSPMU_FORMAT_ATTR(filter, "config1:0-31")
 #define ARM_CSPMU_FORMAT_FILTER2_ATTR	\
-	ARM_CSPMU_FORMAT_ATTR(filter2, "config2:0-63")
+	ARM_CSPMU_FORMAT_ATTR(filter2, "config2:0-31")
 
 /*
  * This is the default event number for cycle count, if supported, since the
@@ -74,12 +74,10 @@
 #define PMEVCNTR_LO			0x0
 #define PMEVCNTR_HI			0x4
 #define PMEVTYPER			0x400
-#define PMCCFILTR_32			0x47C
-#define PMCCFILTR_64			0x4F8
+#define PMCCFILTR			0x47C
 #define PMEVFILT2R			0x800
 #define PMEVFILTR			0xA00
 #define PMCNTENSET			0xC00
-#define PMCNTEN				0xC10
 #define PMCNTENCLR			0xC20
 #define PMINTENSET			0xC40
 #define PMINTENCLR			0xC60
@@ -87,16 +85,15 @@
 #define PMOVSSET			0xCC0
 #define PMIMPDEF			0xD80
 #define PMCFGR				0xE00
-#define PMCR_32				0xE04
+#define PMCR				0xE04
 #define PMIIDR				0xE08
-#define PMCR_64				0xE10
-#define PMDEVARCH			0xFBC
 #define PMPIDR0				0xFE0
 #define PMPIDR1				0xFE4
 #define PMPIDR2				0xFE8
 #define PMPIDR3				0xFEC
 #define PMPIDR4				0xFD0
 
+/* PMCFGR register field */
 #define PMCFGR_NCG			GENMASK(31, 28)
 #define PMCFGR_HDBG			BIT(24)
 #define PMCFGR_TRO			BIT(23)
@@ -155,12 +152,7 @@
 
 /* JEDEC-assigned JEP106 identification code */
 #define ARM_CSPMU_IMPL_ID_NVIDIA	0x36B
-#define ARM_CSPMU_IMPL_ID_ARM		0x43B
 #define ARM_CSPMU_IMPL_ID_AMPERE	0xA16
-
-/* PMDEVARCH */
-#define ARM_CSPMU_PMDEVARCH_PRESENT	BIT(20)
-#define ARM_CSPMU_PMDEVARCH_ARCHPART	GENMASK(11, 0)
 
 struct arm_cspmu;
 
@@ -191,7 +183,7 @@ struct arm_cspmu_impl_ops {
 	/* Check if the event corresponds to cycle count event */
 	bool (*is_cycle_counter_event)(const struct perf_event *event);
 	/* Decode event type/id from configs */
-	u64 (*event_type)(const struct perf_event *event);
+	u32 (*event_type)(const struct perf_event *event);
 	/* Set/reset event filters */
 	void (*set_cc_filter)(struct arm_cspmu *cspmu,
 			      const struct perf_event *event);
@@ -242,7 +234,6 @@ struct arm_cspmu {
 	int irq;
 
 	bool has_atomic_dword;
-	bool has_64bit_pmext;
 	u32 pmcfgr;
 	u32 num_logical_ctrs;
 	u32 num_set_clr_reg;

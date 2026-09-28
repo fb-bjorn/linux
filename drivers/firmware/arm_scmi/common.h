@@ -9,7 +9,6 @@
 #ifndef _SCMI_COMMON_H
 #define _SCMI_COMMON_H
 
-#include <linux/acpi.h>
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/device.h>
@@ -18,7 +17,6 @@
 #include <linux/hashtable.h>
 #include <linux/list.h>
 #include <linux/module.h>
-#include <linux/notifier.h>
 #include <linux/refcount.h>
 #include <linux/scmi_protocol.h>
 #include <linux/spinlock.h>
@@ -47,8 +45,6 @@ enum scmi_error_codes {
 	SCMI_ERR_GENERIC = -8,	/* Generic Error */
 	SCMI_ERR_HARDWARE = -9,	/* Hardware Error */
 	SCMI_ERR_PROTOCOL = -10,/* Protocol Error */
-	SCMI_ERR_IN_USE = -11,  /* In Use Error */
-	SCMI_ERR_PARTIAL = -12, /* Partial Error */
 };
 
 static const int scmi_linux_errmap[] = {
@@ -64,8 +60,6 @@ static const int scmi_linux_errmap[] = {
 	-EIO,			/* SCMI_ERR_GENERIC */
 	-EREMOTEIO,		/* SCMI_ERR_HARDWARE */
 	-EPROTO,		/* SCMI_ERR_PROTOCOL */
-	-EPERM,			/* SCMI_ERR_IN_USE */
-	-EINVAL,		/* SCMI_ERR_PARTIAL */
 };
 
 static inline int scmi_to_linux_errno(int errno)
@@ -155,7 +149,7 @@ extern const struct bus_type scmi_bus_type;
 #define SCMI_BUS_NOTIFY_DEVICE_UNREQUEST	1
 extern struct blocking_notifier_head scmi_requested_devices_nh;
 
-struct scmi_device *scmi_device_create(struct fwnode_handle *fwnode,
+struct scmi_device *scmi_device_create(struct device_node *np,
 				       struct device *parent, int protocol,
 				       const char *name);
 void scmi_device_destroy(struct device *parent, int protocol, const char *name);
@@ -209,8 +203,7 @@ struct scmi_chan_info {
  * @poll_done: Callback to poll transfer status
  */
 struct scmi_transport_ops {
-	bool (*chan_available)(struct fwnode_handle *fwnode, int prot_id,
-			       int idx);
+	bool (*chan_available)(struct device_node *of_node, int idx);
 	int (*chan_setup)(struct scmi_chan_info *cinfo, struct device *dev,
 			  bool tx);
 	int (*chan_free)(int id, void *p, void *data);
@@ -236,7 +229,7 @@ struct scmi_transport_ops {
  *	be pending simultaneously in the system. May be overridden by the
  *	get_max_msg op.
  * @max_msg_size: Maximum size of data payload per message that can be handled.
- * @atomic_threshold: Optional system wide fwnode-configured threshold, expressed
+ * @atomic_threshold: Optional system wide DT-configured threshold, expressed
  *		      in microseconds, for atomic operations.
  *		      Only SCMI synchronous commands reported by the platform
  *		      to have an execution latency lesser-equal to the threshold
@@ -323,7 +316,6 @@ enum debug_counters {
 /**
  * struct scmi_debug_info  - Debug common info
  * @top_dentry: A reference to the top debugfs dentry
- * @protos: A reference to the top debugfs protocols subdirectory
  * @name: Name of this SCMI instance
  * @type: Type of this SCMI instance
  * @is_atomic: Flag to state if the transport of this instance is atomic
@@ -331,7 +323,6 @@ enum debug_counters {
  */
 struct scmi_debug_info {
 	struct dentry *top_dentry;
-	struct dentry *protos;
 	const char *name;
 	const char *type;
 	bool is_atomic;
@@ -471,17 +462,6 @@ struct scmi_transport_core_operations {
 	const struct scmi_message_operations *msg;
 };
 
-struct scmi_dsd_info {
-	u32 protocol_id;
-	const char *const property_name;
-};
-
-static const struct scmi_dsd_info scmi_dsd_info_list[] __maybe_unused = {
-	{ SCMI_PROTOCOL_BASE, "arm-arml0001-transport-pcc"},
-	{ SCMI_PROTOCOL_POWERCAP, "arm-arml0001-protocol-pcap"},
-	{ SCMI_PROTOCOL_TELEMETRY, "arm-arml0001-protocol-telemetry"},
-};
-
 /**
  * struct scmi_transport  - A structure representing a configured transport
  *
@@ -497,8 +477,7 @@ struct scmi_transport {
 	struct scmi_transport_core_operations **core_ops;
 };
 
-#define __DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, __of_match,       \
-					__acpi_match, __core_ops)	       \
+#define DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, __match, __core_ops)\
 static void __tag##_dev_free(void *data)				       \
 {									       \
 	struct platform_device *spdev = data;				       \
@@ -518,8 +497,6 @@ static int __tag##_probe(struct platform_device *pdev)			       \
 		return -ENOMEM;						       \
 									       \
 	device_set_of_node_from_dev(&spdev->dev, dev);			       \
-	device_set_node(&spdev->dev, dev_fwnode(dev));			       \
-	ACPI_COMPANION_SET(&spdev->dev, ACPI_COMPANION(dev));		       \
 									       \
 	strans.supplier = dev;						       \
 	memcpy(&strans.desc, &(__desc), sizeof(strans.desc));		       \
@@ -544,23 +521,13 @@ err:									       \
 static struct platform_driver __drv = {					       \
 	.driver = {							       \
 		   .name = #__tag "_transport",				       \
-		   .of_match_table = __of_match,			       \
-		   .acpi_match_table = ACPI_PTR(__acpi_match),		       \
+		   .of_match_table = __match,				       \
 		   },							       \
 	.probe = __tag##_probe,						       \
 }
 
-#define DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, __match, __core_ops)\
-	__DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, __match, NULL, __core_ops)
-
-#define DEFINE_SCMI_ACPI_TRANSPORT_DRIVER(__tag, __drv, __desc, __match, __core_ops)\
-	__DEFINE_SCMI_TRANSPORT_DRIVER(__tag, __drv, __desc, NULL, __match, __core_ops)
-
 void scmi_notification_instance_data_set(const struct scmi_handle *handle,
 					 void *priv);
 void *scmi_notification_instance_data_get(const struct scmi_handle *handle);
-int scmi_notifier_register(const struct scmi_handle *handle, u8 proto_id,
-			   u8 evt_id, const u32 *src_id,
-			   struct notifier_block *nb);
 int scmi_inflight_count(const struct scmi_handle *handle);
 #endif /* _SCMI_COMMON_H */

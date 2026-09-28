@@ -308,7 +308,6 @@ static bool acpi_property_value_ok(const union acpi_object *value)
 			case ACPI_TYPE_INTEGER:
 			case ACPI_TYPE_STRING:
 			case ACPI_TYPE_LOCAL_REFERENCE:
-			case ACPI_TYPE_PACKAGE:
 				continue;
 
 			default:
