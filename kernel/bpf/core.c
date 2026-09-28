@@ -19,6 +19,7 @@
 
 #include <uapi/linux/btf.h>
 #include <linux/filter.h>
+#include <linux/sched/signal.h>
 #include <linux/skbuff.h>
 #include <linux/static_call.h>
 #include <linux/vmalloc.h>
@@ -1128,11 +1129,6 @@ void *bpf_jit_alloc_exec(unsigned long size)
 	return execmem_alloc(EXECMEM_BPF, size);
 }
 
-void *bpf_jit_alloc_exec_rw(unsigned long size)
-{
-	return execmem_alloc_rw(EXECMEM_BPF, size);
-}
-
 void bpf_jit_free_exec(void *addr)
 {
 	execmem_free(addr);
@@ -1624,6 +1620,8 @@ struct bpf_prog *bpf_jit_blind_constants(struct bpf_verifier_env *env, struct bp
 			 * fix it up here on error.
 			 */
 			bpf_jit_prog_release_other(prog, clone);
+			if (env && fatal_signal_pending(current))
+				return ERR_PTR(-EINTR);
 			return IS_ERR(tmp) ? tmp : ERR_PTR(-ENOMEM);
 		}
 
@@ -1836,6 +1834,7 @@ bool bpf_opcode_in_insntable(u8 code)
 		[BPF_LD | BPF_IND | BPF_H] = true,
 		[BPF_LD | BPF_IND | BPF_W] = true,
 		[BPF_JMP | BPF_JA | BPF_X] = true,
+		[BPF_JMP | BPF_CALL | BPF_X] = true,
 		[BPF_JMP | BPF_JCOND] = true,
 	};
 #undef BPF_INSN_3_TBL
@@ -2641,11 +2640,14 @@ static struct bpf_prog *bpf_prog_jit_compile(struct bpf_verifier_env *env, struc
 	orig_prog = prog;
 	prog = bpf_jit_blind_constants(env, prog);
 	/*
-	 * If blinding was requested and we failed during blinding, we must fall
-	 * back to the interpreter.
+	 * Fall back to the interpreter after blinding failures, except when
+	 * the loader was killed.
 	 */
-	if (IS_ERR(prog))
+	if (IS_ERR(prog)) {
+		if (PTR_ERR(prog) == -EINTR)
+			return prog;
 		goto out_restore;
+	}
 
 	prog = bpf_int_jit_compile(env, prog);
 	if (prog->jited) {
@@ -2664,6 +2666,8 @@ out_restore:
 struct bpf_prog *__bpf_prog_select_runtime(struct bpf_verifier_env *env, struct bpf_prog *fp,
 					   int *err)
 {
+	struct bpf_prog *jit_prog;
+
 	/* In case of BPF to BPF calls, verifier did all the prep
 	 * work with regards to JITing, etc.
 	 */
@@ -2686,7 +2690,12 @@ struct bpf_prog *__bpf_prog_select_runtime(struct bpf_verifier_env *env, struct 
 		if (*err)
 			return fp;
 
-		fp = bpf_prog_jit_compile(env, fp);
+		jit_prog = bpf_prog_jit_compile(env, fp);
+		if (IS_ERR(jit_prog)) {
+			*err = PTR_ERR(jit_prog);
+			return fp;
+		}
+		fp = jit_prog;
 		bpf_prog_jit_attempt_done(fp);
 		if (!fp->jited && jit_needed) {
 			*err = -ENOTSUPP;
@@ -2787,6 +2796,11 @@ void bpf_prog_array_free_sleepable(struct bpf_prog_array *progs)
 	if (!progs || progs == &bpf_empty_prog_array)
 		return;
 	call_rcu_tasks_trace(&progs->rcu, __bpf_prog_array_free_sleepable_cb);
+}
+
+struct bpf_prog *bpf_prog_dummy(void)
+{
+	return &dummy_bpf_prog.prog;
 }
 
 int bpf_prog_array_length(struct bpf_prog_array *array)
@@ -3028,6 +3042,11 @@ void __bpf_free_used_maps(struct bpf_prog_aux *aux,
 			map->ops->map_poke_untrack(map, aux);
 		if (sleepable)
 			atomic64_dec(&map->sleepable_refcnt);
+		/*
+		 * The program that didn't load is not a user of the map. libbpf
+		 * loads the program again to get the log of the verifier.
+		 */
+		cmpxchg(&map->user, (unsigned long)aux, 0);
 		bpf_map_put(map);
 	}
 }
@@ -3287,6 +3306,111 @@ bool __weak bpf_jit_supports_kfunc_call(void)
 	return false;
 }
 
+/* Return TRUE if the JIT backend supports callx (indirect call) instruction. */
+bool __weak bpf_jit_supports_callx(void)
+{
+	return false;
+}
+
+bool __weak bpf_jit_supports_kfunc_ret_reg_pair(void)
+{
+	return false;
+}
+
+/*
+ * How this arch places a by-value kfunc argument, or NULL for one that has
+ * not opted in and so only takes an argument of a single eightbyte, which
+ * every convention places in slot order.
+ */
+const struct bpf_jit_arg_abi * __weak bpf_jit_arg_abi(void)
+{
+	return NULL;
+}
+
+u32 bpf_jit_place_args(const struct bpf_jit_arg_abi *abi,
+		       const struct btf_func_model *fm, u8 *pos_of_slot)
+{
+	u32 i, k, nslots, slot = 0, nregs_used = 0, stack_off = 0;
+	bool on_stack = false;
+
+	for (i = 0; i < fm->nr_args; i++) {
+		bool align16 = fm->arg_flags[i] & BTF_FMODEL_ALIGN16_ARG;
+		u32 pos;
+
+		nslots = btf_func_model_arg_slots(fm, i);
+
+		if (align16 && abi->even_reg_align)
+			nregs_used = round_up(nregs_used, 2);
+
+		if (!on_stack && nregs_used + nslots <= abi->nr_arg_regs) {
+			/* wholly in registers */
+			pos = nregs_used;
+			nregs_used += nslots;
+		} else if (!on_stack && abi->split_at_boundary) {
+			/* the last registers hold what fits, the stack the rest */
+			pos = nregs_used;
+			stack_off = (nregs_used + nslots - abi->nr_arg_regs) * BPF_REG_SIZE;
+			nregs_used = abi->nr_arg_regs;
+			on_stack = true;
+		} else {
+			/* wholly on the stack */
+			if (align16 && abi->even_stack_align)
+				stack_off = round_up(stack_off, 2 * BPF_REG_SIZE);
+			pos = abi->nr_arg_regs + stack_off / BPF_REG_SIZE;
+			stack_off += nslots * BPF_REG_SIZE;
+			if (!abi->backfill_after_stack)
+				on_stack = true;
+		}
+
+		for (k = 0; k < nslots; k++)
+			pos_of_slot[slot + k] = pos + k;
+		slot += nslots;
+	}
+
+	return slot;
+}
+
+u32 bpf_jit_plan_arg_moves(const struct bpf_jit_arg_abi *abi,
+			   const struct btf_func_model *fm,
+			   struct bpf_jit_arg_move *moves)
+{
+	u8 pos_of_slot[MAX_BPF_FUNC_ARG_SLOTS];
+	u32 nslots, n = 0, s, back;
+
+	nslots = bpf_jit_place_args(abi, fm, pos_of_slot);
+	back = nslots;
+
+	/*
+	 * An argument is two eightbytes at most, so it frees one register at
+	 * most and only one argument ever moves down. Its destination is
+	 * still in use, so carry it in the scratch. Only a lower slot can
+	 * take the one it leaves, so the walk reaches it first.
+	 */
+	for (s = nslots; s > 0; s--) {
+		u8 slot = s - 1, pos = pos_of_slot[slot];
+
+		if (pos == slot)
+			continue;
+
+		if (pos < slot) {
+			moves[n].dst = BPF_JIT_ARG_TMP;
+			back = slot;
+		} else {
+			moves[n].dst = pos;
+		}
+		moves[n].src = slot;
+		n++;
+	}
+
+	if (back < nslots) {
+		moves[n].dst = pos_of_slot[back];
+		moves[n].src = BPF_JIT_ARG_TMP;
+		n++;
+	}
+
+	return n;
+}
+
 bool __weak bpf_jit_supports_stack_args(void)
 {
 	return false;
@@ -3368,6 +3492,19 @@ bool __weak bpf_jit_supports_exceptions(void)
 }
 
 bool __weak bpf_jit_supports_private_stack(void)
+{
+	return false;
+}
+
+/*
+ * Return TRUE if the JIT lays out frames of up to MAX_BPF_STACK_JIT bytes.
+ * Its prologue, epilogue and tail call sequences must encode such frame
+ * sizes and a private stack must be sized from the program's depth. The
+ * budget is only granted alongside bpf_jit_supports_subprog_tailcalls(),
+ * whose tail calls land before the target sets up its own frame; see
+ * bpf_prog_stack_limit().
+ */
+bool __weak bpf_jit_supports_large_stack(void)
 {
 	return false;
 }

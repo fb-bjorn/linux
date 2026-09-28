@@ -1277,6 +1277,8 @@ __description("stack_noperfmon: reject read of invalid slots")
 __success
 __caps_unpriv(CAP_BPF)
 __failure_unpriv __msg_unpriv("invalid read from stack off -8+1 size 8")
+__msg_unpriv("Verification failed: Memory Safety: Uninitialized stack read")
+__msg_unpriv("Initialize every byte in the stack range before reading it")
 __naked void stack_noperfmon_reject_invalid_read(void)
 {
 	asm volatile ("					\
@@ -1401,6 +1403,46 @@ __naked void partial_fill_from_cleaned_pointer_spill(void)
 		      "r0 = *(u32 *)(r10 - 4);"
 		      "exit;"
 		      ::: __clobber_all);
+}
+
+SEC("raw_tp")
+__failure
+__msg("access may be outside object bounds")
+__flag(BPF_F_TEST_STATE_FREQ)
+__naked void imprecise_scalar_spill_half_dead(void)
+{
+	asm volatile (
+	/*
+	 * Fork two paths: the one explored first spills an imprecise zero,
+	 * the one explored second, an imprecise non-zero scalar.
+	 */
+	"call %[bpf_get_prandom_u32];"
+	"if r0 > 42 goto 1f;"
+	"r6 = 0;"
+	"goto 2f;"
+"1:"
+	/* causes out of bounds access on a second path. */
+	"r6 = 100500;"
+"2:"
+	/* Force a checkpoint before the spill. */
+	"goto +0;"
+	"*(u64 *)(r10 - 8) = r6;"
+	/*
+	 * Force stack cleanup, only the low half of the spill is alive,
+	 * so the dead high half is degraded to raw stack bytes.
+	 * Buggy verifier converted it to STACK_ZERO w/o proper precision propagation.
+	 */
+	"goto +0;"
+	"r7 = *(u32 *)(r10 - 4);"
+	/* Use r7 as an offset into a one-byte buffer. */
+	"r1 = %[single_byte_buf] ll;"
+	"r1 += r7;"
+	"r0 = *(u8 *)(r1 + 0);"
+	"exit;"
+:
+: __imm(bpf_get_prandom_u32),
+  __imm_addr(single_byte_buf)
+: __clobber_all);
 }
 
 /* check valid spill/fill, ptr to tp buffer */

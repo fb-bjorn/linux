@@ -1371,9 +1371,12 @@ static void do_close_execat(struct file *file)
 
 static void free_bprm(struct linux_binprm *bprm)
 {
-	if (bprm->mm) {
+	struct mm_struct *mm = bprm->mm;
+
+	if (mm) {
 		acct_arg_size(bprm, 0);
-		mmput(bprm->mm);
+		bprm->mm = NULL;
+		mmput(mm);
 	}
 	free_arg_pages(bprm);
 	if (bprm->cred) {
