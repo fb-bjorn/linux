@@ -3406,6 +3406,13 @@ static int bnxt_poll_p5(struct napi_struct *napi, int budget)
 
 			__bnxt_poll_cqs_done(bp, bnapi, DBR_TYPE_CQ_ARMALL,
 					     budget);
+			/* Report NQ progress while NAPI is still ours; busy
+			 * poll keeps NAPI and skips the arm below. Not for
+			 * netpoll (budget 0): the write would disarm an idle
+			 * NQ.
+			 */
+			if (budget && raw_cons != cpr->cp_raw_cons)
+				BNXT_DB_NQ_P5(&cpr->cp_db, raw_cons);
 			cpr->cp_raw_cons = raw_cons;
 			if (napi_complete_done(napi, work_done))
 				BNXT_DB_NQ_ARM_P5(&cpr->cp_db,
