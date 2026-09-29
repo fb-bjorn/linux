@@ -235,6 +235,18 @@ void mlx5_infer_tx_enabled(struct lag_tracker *tracker, struct mlx5_lag *ldev,
 		mlx5_infer_tx_disabled(tracker, ldev, ports, num_enabled);
 }
 
+/* The tracker is updated by the netdev notifier and when netdevs are added,
+ * under lag_lock: take a consistent snapshot of it.
+ */
+void mlx5_lag_get_tracker(struct mlx5_lag *ldev, struct lag_tracker *tracker)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&lag_lock, flags);
+	*tracker = ldev->tracker;
+	spin_unlock_irqrestore(&lag_lock, flags);
+}
+
 static void mlx5_lag_print_mapping(struct mlx5_core_dev *dev,
 				   struct mlx5_lag *ldev,
 				   struct lag_tracker *tracker,
@@ -352,6 +364,7 @@ static struct mlx5_lag *mlx5_lag_dev_alloc(struct mlx5_core_dev *dev)
 		}
 	}
 	ldev->mode = MLX5_LAG_MODE_NONE;
+	ldev->agg_speed_mbps = SPEED_UNKNOWN;
 
 	err = mlx5_lag_mp_init(ldev);
 	if (err)
@@ -755,7 +768,7 @@ static void mlx5_lag_drop_rule_setup(struct mlx5_lag *ldev,
 	 */
 	mlx5_lag_drop_rule_cleanup(ldev);
 
-	if (!ldev->tracker.has_inactive)
+	if (!tracker->has_inactive)
 		return;
 
 	mlx5_infer_tx_disabled(tracker, ldev, disabled_ports, &num_disabled);
@@ -1001,7 +1014,6 @@ static int mlx5_create_lag(struct mlx5_lag *ldev,
 			mlx5_core_err(dev0,
 				      "Failed to deactivate RoCE LAG; driver restart required\n");
 	}
-	BLOCKING_INIT_NOTIFIER_HEAD(&dev0->priv.lag_nh);
 
 	return err;
 }
@@ -1074,6 +1086,8 @@ int mlx5_deactivate_lag(struct mlx5_lag *ldev)
 
 	if (master_idx < 0)
 		return -EINVAL;
+
+	mlx5_lag_reset_vports_speed(ldev);
 
 	dev0 = mlx5_lag_pf(ldev, master_idx)->dev;
 	ldev->mode = MLX5_LAG_MODE_NONE;
@@ -1411,16 +1425,85 @@ static bool mlx5_lag_should_disable_lag(struct mlx5_lag *ldev, bool do_bond)
 	       ldev->mode != MLX5_LAG_MODE_MPESW;
 }
 
-#ifdef CONFIG_MLX5_ESWITCH
-static int
-mlx5_lag_sum_devices_speed(struct mlx5_lag *ldev, u32 *sum_speed,
-			   int (*get_speed)(struct mlx5_core_dev *, u32 *))
+/* PCIe bandwidth available to the port of @pf in Mbps, 0 if unknown, and in
+ * @link the device limiting it. Socket-Direct ports only join a LAG in
+ * switchdev mode, where all their channels are on the primary device.
+ */
+static u32 mlx5_lag_pf_pcie_bw(struct lag_func *pf, struct pci_dev **link)
 {
+	struct pci_dev *limit = NULL;
+	u32 bw;
+
+	bw = pcie_bandwidth_available(pf->dev->pdev, &limit, NULL, NULL);
+	if (link)
+		*link = bw ? limit : NULL;
+	return bw;
+}
+
+/* All the functions of a device share its PCIe link: sum the speeds of the
+ * ports behind the same PCIe bottleneck before limiting them by its bandwidth.
+ */
+struct mlx5_lag_link_speed {
+	struct pci_dev *link;
+	u32 pcie_bw;
+	u32 speed;
+};
+
+static void mlx5_lag_add_link_speed(struct mlx5_lag_link_speed *links,
+				    int *num_links, struct lag_func *pf,
+				    u32 speed)
+{
+	struct pci_dev *link;
+	u32 pcie_bw;
+	int i;
+
+	pcie_bw = mlx5_lag_pf_pcie_bw(pf, &link);
+	for (i = 0; i < *num_links; i++) {
+		if (link && links[i].link == link)
+			break;
+	}
+	if (i == *num_links) {
+		links[i].link = link;
+		links[i].pcie_bw = pcie_bw;
+		links[i].speed = 0;
+		(*num_links)++;
+	}
+	links[i].speed += speed;
+}
+
+static u32 mlx5_lag_sum_link_speeds(const struct mlx5_lag_link_speed *links,
+				    int num_links)
+{
+	u32 sum = 0;
+	int i;
+
+	for (i = 0; i < num_links; i++) {
+		if (links[i].pcie_bw)
+			sum += min(links[i].speed, links[i].pcie_bw);
+		else
+			sum += links[i].speed;
+	}
+	return sum;
+}
+
+static int mlx5_lag_get_devices_oper_speed(struct mlx5_lag *ldev,
+					   const struct lag_tracker *tracker,
+					   u32 *sum_speed)
+{
+	struct mlx5_lag_link_speed links[MLX5_MAX_PORTS];
 	struct mlx5_core_dev *pf_mdev;
 	struct lag_func *pf;
+	u32 max_tx_speed;
+	u8 vport_state;
+	int num_links = 0;
 	int pf_idx;
+	bool mpesw;
 	u32 speed;
+	u8 opmod;
 	int ret;
+
+	mpesw = ldev->mode == MLX5_LAG_MODE_MPESW;
+	opmod = MLX5_VPORT_STATE_OP_MOD_VNIC_VPORT;
 
 	*sum_speed = 0;
 	mlx5_ldev_for_each(pf_idx, 0, ldev) {
@@ -1430,37 +1513,106 @@ mlx5_lag_sum_devices_speed(struct mlx5_lag *ldev, u32 *sum_speed,
 		pf_mdev = pf->dev;
 		if (!pf_mdev)
 			continue;
+		if (mpesw) {
+			/* mlx5_query_vport_state() reports a failed query as
+			 * VPORT_STATE_DOWN, use a query that returns the error.
+			 */
+			ret = mlx5_query_vport_max_tx_speed(pf_mdev, opmod, 0,
+							    false,
+							    &max_tx_speed,
+							    &vport_state);
+			if (ret) {
+				mlx5_core_dbg(pf_mdev,
+					      "Failed to query device %s vport state (err=%d)\n",
+					      dev_name(pf_mdev->device), ret);
+				return ret;
+			}
+			if (vport_state != VPORT_STATE_UP)
+				continue;
+		} else if (!tracker->netdev_state[pf_idx].tx_enabled ||
+			   !tracker->netdev_state[pf_idx].link_up) {
+			continue;
+		}
 
-		ret = get_speed(pf_mdev, &speed);
+		ret = mlx5_port_oper_linkspeed(pf_mdev, &speed);
 		if (ret) {
 			mlx5_core_dbg(pf_mdev,
-				      "Failed to get device speed using %ps. Device %s speed is not available (err=%d)\n",
-				      get_speed, dev_name(pf_mdev->device),
-				      ret);
+				      "Failed to get device %s oper speed (err=%d)\n",
+				      dev_name(pf_mdev->device), ret);
 			return ret;
 		}
 
-		*sum_speed += speed;
+		mlx5_lag_add_link_speed(links, &num_links, pf, speed);
 	}
 
+	*sum_speed = mlx5_lag_sum_link_speeds(links, num_links);
 	return 0;
 }
 
-static int mlx5_lag_sum_devices_max_speed(struct mlx5_lag *ldev, u32 *max_speed)
+static void mlx5_lag_notify_speed_change(struct mlx5_lag *ldev)
 {
-	return mlx5_lag_sum_devices_speed(ldev, max_speed,
-					  mlx5_port_max_linkspeed);
+	struct lag_func *pf;
+	int i;
+
+	/* Each IB device listens on the chain of its own device */
+	mlx5_ldev_for_each(i, 0, ldev) {
+		pf = mlx5_lag_pf(ldev, i);
+		blocking_notifier_call_chain(&pf->dev->priv.lag_nh,
+					     MLX5_DRIVER_EVENT_LAG_SPEED_CHANGE,
+					     NULL);
+	}
 }
 
-static int mlx5_lag_sum_devices_oper_speed(struct mlx5_lag *ldev,
-					   u32 *oper_speed)
+static void mlx5_lag_set_agg_speed(struct mlx5_lag *ldev, u32 speed)
 {
-	return mlx5_lag_sum_devices_speed(ldev, oper_speed,
-					  mlx5_port_oper_linkspeed);
+	lockdep_assert_held(&ldev->lock);
+
+	if (ldev->agg_speed_mbps == speed)
+		return;
+
+	/* Read locklessly by mlx5_lag_query_aggregated_speed() */
+	WRITE_ONCE(ldev->agg_speed_mbps, speed);
+
+	/* Reported by IB for RoCE LAG and for the uplink representor in
+	 * SR-IOV LAG, where no vport max_tx_speed change reports it.
+	 */
+	if (__mlx5_lag_is_roce(ldev) || __mlx5_lag_is_sriov(ldev))
+		mlx5_lag_notify_speed_change(ldev);
 }
 
+/* Update the cached aggregated speed of the ports able to transmit: 0 if none
+ * can, SPEED_UNKNOWN if it can't be computed.
+ */
+int mlx5_lag_update_agg_speed(struct mlx5_lag *ldev)
+{
+	struct lag_tracker tracker;
+	u32 speed;
+	int err;
+
+	lockdep_assert_held(&ldev->lock);
+
+	mlx5_lag_get_tracker(ldev, &tracker);
+	err = mlx5_lag_get_devices_oper_speed(ldev, &tracker, &speed);
+	/* Don't let a previous speed be programmed or reported */
+	mlx5_lag_set_agg_speed(ldev, err ? SPEED_UNKNOWN : speed);
+	return err;
+}
+
+void mlx5_lag_reset_agg_speed(struct mlx5_lag *ldev)
+{
+	mlx5_lag_set_agg_speed(ldev, SPEED_UNKNOWN);
+}
+
+#ifdef CONFIG_MLX5_ESWITCH
+/* While the LAG sets the speed of the vports, vport->agg_max_tx_speed holds
+ * it for mlx5_esw_vport_enable() to replay: it is updated even if the vport is
+ * disabled or the firmware command fails, the firmware gets it on the next
+ * enable of the vport. Without @replay, @speed is only written to the enabled
+ * vports, a zero speed included as the firmware takes it as a reset, and
+ * nothing is left to replay.
+ */
 static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
-						u32 speed)
+						u32 speed, bool replay)
 {
 	u16 op_mod = MLX5_VPORT_STATE_OP_MOD_ESW_VPORT;
 	struct mlx5_eswitch *esw = mdev->priv.eswitch;
@@ -1482,7 +1634,7 @@ static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
 		if (vport->vport == MLX5_VPORT_UPLINK)
 			continue;
 
-		vport->agg_max_tx_speed = speed;
+		vport->agg_max_tx_speed = replay ? speed : 0;
 
 		if (!vport->enabled)
 			continue;
@@ -1497,28 +1649,82 @@ static void mlx5_lag_modify_device_vports_speed(struct mlx5_core_dev *mdev,
 	mutex_unlock(&esw->state_lock);
 }
 
+static int mlx5_lag_get_devices_max_speed(struct mlx5_lag *ldev,
+					  const struct lag_tracker *tracker,
+					  u32 *max_speed)
+{
+	struct mlx5_lag_link_speed links[MLX5_MAX_PORTS];
+	struct mlx5_core_dev *pf_mdev;
+	int num_links = 0;
+	struct lag_func *pf;
+	bool take_max;
+	u32 pcie_bw;
+	int pf_idx;
+	u32 speed;
+	int ret;
+
+	take_max = tracker->tx_type == NETDEV_LAG_TX_TYPE_ACTIVEBACKUP;
+	if (ldev->mode == MLX5_LAG_MODE_MPESW)
+		take_max = false;
+
+	*max_speed = 0;
+	mlx5_ldev_for_each(pf_idx, 0, ldev) {
+		pf = mlx5_lag_pf(ldev, pf_idx);
+		if (!pf)
+			continue;
+		pf_mdev = pf->dev;
+		if (!pf_mdev)
+			continue;
+
+		ret = mlx5_port_max_linkspeed(pf_mdev, &speed);
+		if (ret) {
+			mlx5_core_dbg(pf_mdev,
+				      "Failed to get device %s max speed (err=%d)\n",
+				      dev_name(pf_mdev->device), ret);
+			return ret;
+		}
+
+		if (take_max) {
+			pcie_bw = mlx5_lag_pf_pcie_bw(pf, NULL);
+			if (pcie_bw)
+				speed = min(speed, pcie_bw);
+			*max_speed = max(*max_speed, speed);
+		} else {
+			mlx5_lag_add_link_speed(links, &num_links, pf, speed);
+		}
+	}
+
+	if (!take_max)
+		*max_speed = mlx5_lag_sum_link_speeds(links, num_links);
+	return 0;
+}
+
 void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev)
 {
+	struct lag_tracker tracker;
 	struct mlx5_core_dev *mdev;
 	struct lag_func *pf;
 	u32 speed;
 	int pf_idx;
 
-	if (ldev->mode == MLX5_LAG_MODE_MPESW) {
-		if (mlx5_lag_sum_devices_oper_speed(ldev, &speed))
-			return;
-	} else {
-		speed = ldev->tracker.bond_speed_mbps;
-		if (speed == SPEED_UNKNOWN)
+	if (mlx5_lag_update_agg_speed(ldev))
+		return;
+
+	/* If no port can transmit, fall back to the maximum speed of the LAG:
+	 * the fastest port for active-backup, the sum of all ports otherwise.
+	 */
+	speed = ldev->agg_speed_mbps;
+	if (!speed) {
+		mlx5_lag_get_tracker(ldev, &tracker);
+		if (mlx5_lag_get_devices_max_speed(ldev, &tracker, &speed))
 			return;
 	}
 
-	/* If speed is not set, use the sum of max speeds of all PFs */
-	if (!speed && mlx5_lag_sum_devices_max_speed(ldev, &speed))
+	speed = speed / MLX5_MAX_TX_SPEED_UNIT;
+	if (!speed)
 		return;
 
-	speed = speed / MLX5_MAX_TX_SPEED_UNIT;
-
+	ldev->vports_speed_set = true;
 	mlx5_ldev_for_each(pf_idx, 0, ldev) {
 		pf = mlx5_lag_pf(ldev, pf_idx);
 		if (!pf)
@@ -1527,7 +1733,7 @@ void mlx5_lag_set_vports_agg_speed(struct mlx5_lag *ldev)
 		if (!mdev)
 			continue;
 
-		mlx5_lag_modify_device_vports_speed(mdev, speed);
+		mlx5_lag_modify_device_vports_speed(mdev, speed, true);
 	}
 }
 
@@ -1535,9 +1741,17 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 {
 	struct mlx5_core_dev *mdev;
 	struct lag_func *pf;
+	u32 pcie_bw;
 	u32 speed;
 	int pf_idx;
 	int ret;
+
+	mlx5_lag_reset_agg_speed(ldev);
+
+	/* Nothing to restore if the LAG didn't set the vports speed */
+	if (!ldev->vports_speed_set)
+		return;
+	ldev->vports_speed_set = false;
 
 	mlx5_ldev_for_each(pf_idx, 0, ldev) {
 		pf = mlx5_lag_pf(ldev, pf_idx);
@@ -1552,11 +1766,15 @@ void mlx5_lag_reset_vports_speed(struct mlx5_lag *ldev)
 			mlx5_core_dbg(mdev,
 				      "Failed to reset vports speed for device %s. Oper speed is not available (err=%d)\n",
 				      dev_name(mdev->device), ret);
-			continue;
+			speed = 0;
 		}
 
+		pcie_bw = mlx5_lag_pf_pcie_bw(pf, NULL);
+		if (pcie_bw)
+			speed = min(speed, pcie_bw);
 		speed = speed / MLX5_MAX_TX_SPEED_UNIT;
-		mlx5_lag_modify_device_vports_speed(mdev, speed);
+		/* Don't leave the LAG speed cached for replay */
+		mlx5_lag_modify_device_vports_speed(mdev, speed, false);
 	}
 }
 #endif
@@ -1582,7 +1800,7 @@ static void mlx5_do_bond(struct mlx5_lag *ldev)
 		if (mlx5_lag_is_multipath(dev0))
 			return;
 
-		tracker = ldev->tracker;
+		mlx5_lag_get_tracker(ldev, &tracker);
 
 		do_bond = tracker.is_bonded && mlx5_lag_check_prereq(ldev);
 	}
@@ -1612,6 +1830,9 @@ static void mlx5_do_bond(struct mlx5_lag *ldev)
 				return;
 			}
 
+			/* Before the IB device reporting it is published */
+			mlx5_lag_set_vports_agg_speed(ldev);
+
 			if (roce_lag) {
 				struct mlx5_core_dev *dev;
 
@@ -1635,13 +1856,10 @@ static void mlx5_do_bond(struct mlx5_lag *ldev)
 						     ndev);
 			dev_put(ndev);
 		}
-		if (!shared_fdb)
-			mlx5_lag_set_vports_agg_speed(ldev);
 	} else if (mlx5_lag_should_modify_lag(ldev, do_bond)) {
 		mlx5_modify_lag(ldev, &tracker);
 		mlx5_lag_set_vports_agg_speed(ldev);
 	} else if (mlx5_lag_should_disable_lag(ldev, do_bond)) {
-		mlx5_lag_reset_vports_speed(ldev);
 		mlx5_disable_lag(ldev);
 	}
 }
@@ -1888,13 +2106,13 @@ static void mlx5_do_bond_work(struct work_struct *work)
 }
 
 static int mlx5_handle_changeupper_event(struct mlx5_lag *ldev,
-					 struct lag_tracker *tracker,
 					 struct netdev_notifier_changeupper_info *info)
 {
 	struct net_device *upper = info->upper_dev, *ndev_tmp;
 	struct netdev_lag_upper_info *lag_upper_info = NULL;
 	bool is_bonded, is_in_lag, mode_supported;
 	bool has_inactive = 0;
+	unsigned long flags;
 	struct lag_func *pf;
 	struct slave *slave;
 	u8 bond_status = 0;
@@ -1937,12 +2155,6 @@ static int mlx5_handle_changeupper_event(struct mlx5_lag *ldev,
 	if (!(bond_status & GENMASK(ldev->ports - 1, 0)))
 		return 0;
 
-	if (lag_upper_info) {
-		tracker->tx_type = lag_upper_info->tx_type;
-		tracker->hash_type = lag_upper_info->hash_type;
-	}
-
-	tracker->has_inactive = has_inactive;
 	/* Determine bonding status:
 	 * A device is considered bonded if both its physical ports are slaves
 	 * of the same lag master, and only them.
@@ -1950,15 +2162,28 @@ static int mlx5_handle_changeupper_event(struct mlx5_lag *ldev,
 	is_in_lag = num_slaves == ldev->ports &&
 		bond_status == GENMASK(ldev->ports - 1, 0);
 
+	/* The walk above covers every netdev of the namespace, only take
+	 * lag_lock to update the tracker.
+	 */
+	spin_lock_irqsave(&lag_lock, flags);
+	if (lag_upper_info) {
+		ldev->tracker.tx_type = lag_upper_info->tx_type;
+		ldev->tracker.hash_type = lag_upper_info->hash_type;
+	}
+
+	ldev->tracker.has_inactive = has_inactive;
+
 	/* Lag mode must be activebackup or hash. */
-	mode_supported = tracker->tx_type == NETDEV_LAG_TX_TYPE_ACTIVEBACKUP ||
-			 tracker->tx_type == NETDEV_LAG_TX_TYPE_HASH;
+	mode_supported =
+		ldev->tracker.tx_type == NETDEV_LAG_TX_TYPE_ACTIVEBACKUP ||
+		ldev->tracker.tx_type == NETDEV_LAG_TX_TYPE_HASH;
 
 	is_bonded = is_in_lag && mode_supported;
-	if (tracker->is_bonded != is_bonded) {
-		tracker->is_bonded = is_bonded;
+	if (ldev->tracker.is_bonded != is_bonded) {
+		ldev->tracker.is_bonded = is_bonded;
 		changed = 1;
 	}
+	spin_unlock_irqrestore(&lag_lock, flags);
 
 	if (!is_in_lag)
 		return changed;
@@ -1974,18 +2199,14 @@ static int mlx5_handle_changeupper_event(struct mlx5_lag *ldev,
 }
 
 static int mlx5_handle_changelowerstate_event(struct mlx5_lag *ldev,
-					      struct lag_tracker *tracker,
 					      struct net_device *ndev,
 					      struct netdev_notifier_changelowerstate_info *info)
 {
 	struct netdev_lag_lower_state_info *lag_lower_info;
+	unsigned long flags;
 	int idx;
 
 	if (!netif_is_lag_port(ndev))
-		return 0;
-
-	idx = mlx5_lag_dev_get_netdev_idx(ldev, ndev);
-	if (idx < 0)
 		return 0;
 
 	/* This information is used to determine virtual to physical
@@ -1995,18 +2216,23 @@ static int mlx5_handle_changelowerstate_event(struct mlx5_lag *ldev,
 	if (!lag_lower_info)
 		return 0;
 
-	tracker->netdev_state[idx] = *lag_lower_info;
+	spin_lock_irqsave(&lag_lock, flags);
+	idx = mlx5_lag_dev_get_netdev_idx(ldev, ndev);
+	if (idx >= 0)
+		ldev->tracker.netdev_state[idx] = *lag_lower_info;
+	spin_unlock_irqrestore(&lag_lock, flags);
 
-	return 1;
+	return idx >= 0;
 }
 
 static int mlx5_handle_changeinfodata_event(struct mlx5_lag *ldev,
-					    struct lag_tracker *tracker,
 					    struct net_device *ndev)
 {
 	struct net_device *ndev_tmp;
+	unsigned long flags;
 	struct slave *slave;
 	bool has_inactive = 0;
+	int changed = 0;
 	int idx;
 
 	if (!netif_is_lag_master(ndev))
@@ -2024,48 +2250,18 @@ static int mlx5_handle_changeinfodata_event(struct mlx5_lag *ldev,
 	}
 	rcu_read_unlock();
 
-	if (tracker->has_inactive == has_inactive)
-		return 0;
+	spin_lock_irqsave(&lag_lock, flags);
+	if (ldev->tracker.has_inactive != has_inactive) {
+		ldev->tracker.has_inactive = has_inactive;
+		changed = 1;
+	}
+	spin_unlock_irqrestore(&lag_lock, flags);
 
-	tracker->has_inactive = has_inactive;
-
-	return 1;
+	return changed;
 }
 
-static void mlx5_lag_update_tracker_speed(struct lag_tracker *tracker,
-					  struct net_device *ndev)
-{
-	struct ethtool_link_ksettings lksettings;
-	struct net_device *bond_dev;
-	int err;
-
-	if (netif_is_lag_master(ndev))
-		bond_dev = ndev;
-	else
-		bond_dev = netdev_master_upper_dev_get(ndev);
-
-	if (!bond_dev) {
-		tracker->bond_speed_mbps = SPEED_UNKNOWN;
-		return;
-	}
-
-	err = __ethtool_get_link_ksettings(bond_dev, &lksettings);
-	if (err) {
-		netdev_dbg(bond_dev,
-			   "Failed to get speed for bond dev %s, err=%d\n",
-			   bond_dev->name, err);
-		tracker->bond_speed_mbps = SPEED_UNKNOWN;
-		return;
-	}
-
-	if (lksettings.base.speed == SPEED_UNKNOWN)
-		tracker->bond_speed_mbps = 0;
-	else
-		tracker->bond_speed_mbps = lksettings.base.speed;
-}
-
-/* Returns speed in Mbps. */
-int mlx5_lag_query_bond_speed(struct mlx5_core_dev *mdev, u32 *speed)
+/* Returns the speed in Mbps of the LAG ports able to transmit, 0 if none. */
+int mlx5_lag_query_aggregated_speed(struct mlx5_core_dev *mdev, u32 *speed)
 {
 	struct mlx5_lag *ldev;
 	unsigned long flags;
@@ -2078,25 +2274,24 @@ int mlx5_lag_query_bond_speed(struct mlx5_core_dev *mdev, u32 *speed)
 		goto unlock;
 	}
 
-	*speed = ldev->tracker.bond_speed_mbps;
-
-	if (*speed == SPEED_UNKNOWN) {
-		mlx5_core_dbg(mdev, "Bond speed is unknown\n");
+	*speed = READ_ONCE(ldev->agg_speed_mbps);
+	if (*speed == SPEED_UNKNOWN)
 		ret = -EINVAL;
-	}
 
 unlock:
 	spin_unlock_irqrestore(&lag_lock, flags);
+
+	if (ret == -EINVAL)
+		mlx5_core_dbg(mdev, "aggregated speed is unknown\n");
 	return ret;
 }
-EXPORT_SYMBOL_GPL(mlx5_lag_query_bond_speed);
+EXPORT_SYMBOL_GPL(mlx5_lag_query_aggregated_speed);
 
 /* this handler is always registered to netdev events */
 static int mlx5_lag_netdev_event(struct notifier_block *this,
 				 unsigned long event, void *ptr)
 {
 	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
-	struct lag_tracker tracker;
 	struct mlx5_lag *ldev;
 	int changed = 0;
 
@@ -2107,25 +2302,20 @@ static int mlx5_lag_netdev_event(struct notifier_block *this,
 
 	ldev    = container_of(this, struct mlx5_lag, nb);
 
-	tracker = ldev->tracker;
-
+	/* The handlers update the tracker under lag_lock, to serialize with
+	 * mlx5_ldev_add_netdev() and the snapshots. RTNL serializes them.
+	 */
 	switch (event) {
 	case NETDEV_CHANGEUPPER:
-		changed = mlx5_handle_changeupper_event(ldev, &tracker, ptr);
+		changed = mlx5_handle_changeupper_event(ldev, ptr);
 		break;
 	case NETDEV_CHANGELOWERSTATE:
-		changed = mlx5_handle_changelowerstate_event(ldev, &tracker,
-							     ndev, ptr);
+		changed = mlx5_handle_changelowerstate_event(ldev, ndev, ptr);
 		break;
 	case NETDEV_CHANGEINFODATA:
-		changed = mlx5_handle_changeinfodata_event(ldev, &tracker, ndev);
+		changed = mlx5_handle_changeinfodata_event(ldev, ndev);
 		break;
 	}
-
-	if (changed)
-		mlx5_lag_update_tracker_speed(&tracker, ndev);
-
-	ldev->tracker = tracker;
 
 	if (changed)
 		mlx5_queue_bond_work(ldev, 0);

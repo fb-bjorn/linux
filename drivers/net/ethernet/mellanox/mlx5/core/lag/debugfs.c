@@ -113,7 +113,10 @@ static int mapping_show(struct seq_file *file, void *priv)
 	lag_active = __mlx5_lag_is_active(ldev);
 	if (lag_active) {
 		if (test_bit(MLX5_LAG_MODE_FLAG_HASH_BASED, &ldev->mode_flags)) {
-			mlx5_infer_tx_enabled(&ldev->tracker, ldev, ports,
+			struct lag_tracker tracker;
+
+			mlx5_lag_get_tracker(ldev, &tracker);
+			mlx5_infer_tx_enabled(&tracker, ldev, ports,
 					      &num_ports);
 			hash = true;
 		} else {

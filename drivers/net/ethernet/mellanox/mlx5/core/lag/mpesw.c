@@ -72,6 +72,9 @@ static void mlx5_mpesw_restore_sd_fdb(struct mlx5_lag *ldev)
 
 	mlx5_ldev_for_each(i, 0, ldev) {
 		pf = mlx5_lag_pf(ldev, i);
+		/* A group_id of 0 would create an all-ports FW LAG */
+		if (!pf->group_id)
+			continue;
 		err = mlx5_lag_shared_fdb_create(ldev, NULL, 0, pf->group_id);
 		if (err)
 			mlx5_core_warn(pf->dev,

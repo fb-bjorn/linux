@@ -1831,6 +1831,7 @@ int mlx5_mdev_init(struct mlx5_core_dev *dev, int profile_idx)
 		goto err_frag_buf_pools_init;
 
 	INIT_LIST_HEAD(&priv->traps);
+	BLOCKING_INIT_NOTIFIER_HEAD(&priv->lag_nh);
 
 	err = mlx5_cmd_init(dev);
 	if (err) {
