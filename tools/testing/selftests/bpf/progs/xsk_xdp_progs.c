@@ -7,6 +7,7 @@
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/errno.h>
+#include <linux/pkt_cls.h>
 #include "xsk_xdp_common.h"
 
 struct {
@@ -19,6 +20,10 @@ struct {
 static unsigned int idx;
 int adjust_value = 0;
 int count = 0;
+int pass_idx = 0;
+int passed = 0;
+int pass_seen = 0;
+int pass_bad = 0;
 
 SEC("xdp.frags") int xsk_def_prog(struct xdp_md *xdp)
 {
@@ -141,6 +146,50 @@ SEC("xdp.frags") int xsk_xdp_adjust_tail(struct xdp_md *xdp)
 	}
 
 	return bpf_redirect_map(&xsk, 0, XDP_DROP);
+}
+
+/*
+ * Pass every other packet with metadata and the tail grown to the end of
+ * the frame, so the skb copy is as long as the frame allows.
+ */
+SEC("xdp.frags") int xsk_xdp_pass_full(struct xdp_md *xdp)
+{
+	__u32 *meta;
+	int i;
+
+	if (!(pass_idx++ % 2))
+		return bpf_redirect_map(&xsk, 0, XDP_DROP);
+
+	if (bpf_xdp_adjust_meta(xdp, -(int)sizeof(*meta)))
+		return XDP_DROP;
+
+	meta = (void *)(long)xdp->data_meta;
+	if ((void *)(meta + 1) > (void *)(long)xdp->data)
+		return XDP_DROP;
+	*meta = XSK_PASS_META;
+
+	/* Failed grows leave the frame as is. */
+	for (i = 11; i >= 0; i--)
+		bpf_xdp_adjust_tail(xdp, 1 << i);
+
+	passed++;
+	return XDP_PASS;
+}
+
+/* Count passed packets and those whose skb_shared_info got the UMEM marker. */
+SEC("tc") int xsk_tc_pass_check(struct __sk_buff *skb)
+{
+	__u32 *meta = (void *)(long)skb->data_meta;
+
+	if ((void *)(meta + 1) > (void *)(long)skb->data ||
+	    *meta != XSK_PASS_META)
+		return TC_ACT_OK;
+
+	pass_seen++;
+	if (skb->gso_segs == XSK_PASS_MARK)
+		pass_bad++;
+
+	return TC_ACT_OK;
 }
 
 char _license[] SEC("license") = "GPL";

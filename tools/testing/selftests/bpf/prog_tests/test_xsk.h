@@ -33,6 +33,8 @@
 
 #define MAX_SKB_FRAGS_PATH "/proc/sys/net/core/max_skb_frags"
 #define SMP_CACHE_BYTES_PATH "/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size"
+/* offsetof(struct skb_shared_info, gso_segs) */
+#define SHINFO_GSO_SEGS_OFF 6
 
 extern bool opt_verbose;
 #define print_verbose(x...) do { if (opt_verbose) ksft_print_msg(x); } while (0)
@@ -115,6 +117,7 @@ struct xsk_umem_info {
 	u32 invalid_fill_entries;
 	u32 dup_fill_entries;
 	bool unaligned_mode;
+	bool mark_tail;
 };
 
 struct set_hw_ring {
@@ -278,6 +281,7 @@ int testapp_unaligned_inv_desc_mb(struct test_spec *test);
 int testapp_xdp_drop(struct test_spec *test);
 int testapp_xdp_metadata(struct test_spec *test);
 int testapp_xdp_metadata_mb(struct test_spec *test);
+int testapp_xdp_pass_full(struct test_spec *test);
 int testapp_xdp_prog_cleanup(struct test_spec *test);
 int testapp_xdp_shared_umem(struct test_spec *test);
 
@@ -311,6 +315,7 @@ static const struct test_spec tests[] = {
 	{.name = "TX_QUEUE_CONSUMER", .test_func = testapp_tx_queue_consumer},
 	{.name = "FILL_INVALID_BATCH", .test_func = testapp_invalid_fill},
 	{.name = "FILL_DUP_BATCH", .test_func = testapp_dup_fill},
+	{.name = "XDP_PASS_FULL_FRAME", .test_func = testapp_xdp_pass_full},
 	};
 
 static const struct test_spec ci_skip_tests[] = {

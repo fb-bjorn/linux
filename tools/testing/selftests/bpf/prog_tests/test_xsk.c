@@ -1681,6 +1681,20 @@ static int xsk_populate_fill_ring(struct xsk_umem_info *umem, struct pkt_stream 
 	return 0;
 }
 
+/*
+ * Put a marker where gso_segs would sit if skb_shared_info followed each
+ * frame. A copy running past the packet data moves it into the skb.
+ */
+static void umem_mark_tail(struct xsk_umem_info *umem, void *bufs, u64 size,
+			   u32 tailroom)
+{
+	u64 off;
+
+	for (off = umem->frame_size; off <= size; off += umem->frame_size)
+		*(u16 *)(bufs + off - tailroom + SHINFO_GSO_SEGS_OFF) =
+			XSK_PASS_MARK;
+}
+
 static int thread_common_ops(struct test_spec *test, struct ifobject *ifobject)
 {
 	struct xsk_umem_info *umem = ifobject->xsk->umem;
@@ -1708,6 +1722,9 @@ static int thread_common_ops(struct test_spec *test, struct ifobject *ifobject)
 		return -errno;
 
 	umem->mmap_size = mmap_sz;
+
+	if (umem->mark_tail)
+		umem_mark_tail(umem, bufs, umem_sz, ifobject->umem_tailroom);
 
 	ret = xsk_configure_umem(ifobject, umem, bufs, umem_sz);
 	if (ret)
@@ -2686,6 +2703,83 @@ int testapp_unaligned_inv_desc_mb(struct test_spec *test)
 int testapp_xdp_metadata(struct test_spec *test)
 {
 	return testapp_xdp_metadata_copy(test);
+}
+
+/*
+ * XDP_PASS copies zero-copy frames into an skb. Frames grown to their
+ * end must reach the stack without copying UMEM tailroom into the skb's
+ * shared info.
+ */
+int testapp_xdp_pass_full(struct test_spec *test)
+{
+	struct xsk_xdp_progs *skel_rx = test->ifobj_rx->xdp_progs;
+	struct xsk_xdp_progs *skel_tx = test->ifobj_tx->xdp_progs;
+	LIBBPF_OPTS(bpf_tc_hook, hook, .attach_point = BPF_TC_INGRESS);
+	LIBBPF_OPTS(bpf_tc_opts, opts);
+	bool hook_created = true;
+	int i, ret;
+
+	if (test->mode != TEST_MODE_ZC)
+		return TEST_SKIP;
+
+	hook.ifindex = test->ifobj_rx->ifindex;
+	ret = bpf_tc_hook_create(&hook);
+	if (ret == -EEXIST)
+		hook_created = false;
+	else if (ret)
+		return TEST_FAILURE;
+
+	opts.prog_fd = bpf_program__fd(skel_rx->progs.xsk_tc_pass_check);
+	if (bpf_tc_attach(&hook, &opts)) {
+		ret = TEST_FAILURE;
+		goto out;
+	}
+
+	skel_rx->bss->pass_idx = 0;
+	skel_rx->bss->passed = 0;
+	skel_rx->bss->pass_seen = 0;
+	skel_rx->bss->pass_bad = 0;
+	test_spec_set_xdp_prog(test, skel_rx->progs.xsk_xdp_pass_full,
+			       skel_tx->progs.xsk_xdp_pass_full,
+			       skel_rx->maps.xsk, skel_tx->maps.xsk);
+	test->ifobj_rx->xsk->umem->mark_tail = true;
+
+	if (pkt_stream_receive_half(test)) {
+		ret = TEST_FAILURE;
+		goto out;
+	}
+
+	ret = testapp_validate_traffic(test);
+	if (ret)
+		goto out;
+
+	/* tc may not have seen the last passed packet yet. */
+	for (i = 0; i < SOCK_RECONF_CTR; i++) {
+		if (skel_rx->bss->pass_seen == skel_rx->bss->passed)
+			break;
+		usleep(USLEEP_MAX);
+	}
+
+	if (!skel_rx->bss->passed ||
+	    skel_rx->bss->pass_seen != skel_rx->bss->passed ||
+	    skel_rx->bss->pass_bad) {
+		ksft_print_msg("passed %d seen %d corrupted %d\n",
+			       skel_rx->bss->passed, skel_rx->bss->pass_seen,
+			       skel_rx->bss->pass_bad);
+		ret = TEST_FAILURE;
+	}
+
+out:
+	if (hook_created) {
+		hook.attach_point = BPF_TC_INGRESS | BPF_TC_EGRESS;
+		bpf_tc_hook_destroy(&hook);
+	} else {
+		opts.flags = 0;
+		opts.prog_fd = 0;
+		opts.prog_id = 0;
+		bpf_tc_detach(&hook, &opts);
+	}
+	return ret;
 }
 
 int testapp_xdp_metadata_mb(struct test_spec *test)
