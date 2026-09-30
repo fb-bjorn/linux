@@ -1919,6 +1919,22 @@ static int ffa_irq_map(u32 id)
 		irq = irq_create_of_mapping(&oirq);
 		of_node_put(gic);
 #ifdef CONFIG_ACPI
+	} else if (intid < 16) {
+		acpi_gsi_domain_disp_fn get_gsi_domain_id;
+		struct irq_fwspec fwspec = {
+			.param = { intid },
+			.param_count = 1,
+		};
+
+		get_gsi_domain_id = acpi_get_gsi_dispatcher();
+		if (!get_gsi_domain_id)
+			return -ENXIO;
+
+		fwspec.fwnode = get_gsi_domain_id(intid);
+		if (!fwspec.fwnode)
+			return -ENXIO;
+
+		irq = irq_create_fwspec_mapping(&fwspec);
 	} else {
 		irq = acpi_register_gsi(NULL, intid, ACPI_EDGE_SENSITIVE,
 					ACPI_ACTIVE_HIGH);
