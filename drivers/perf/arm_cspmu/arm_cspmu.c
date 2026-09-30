@@ -78,13 +78,12 @@ static struct acpi_apmt_node *arm_cspmu_apmt_node(struct device *dev)
 }
 
 /*
- * In CoreSight PMU architecture, all of the MMIO registers are 32-bit except
- * counter register. The counter register can be implemented as 32-bit or 64-bit
- * register depending on the value of PMCFGR.SIZE field. For 64-bit access,
- * single-copy 64-bit atomic support is implementation defined. APMT node flag
- * is used to identify if the PMU supports 64-bit single copy atomic. If 64-bit
- * single copy atomic is not supported, the driver treats the register as a pair
- * of 32-bit register.
+ * In the base CoreSight PMU architecture without the 64-bit programmers' model
+ * extension, all of the MMIO registers are 32-bit except the counter registers,
+ * which are either 32-bit or 64-bit depending on the value of PMCFGR.SIZE.
+ * It is implementation-defined whether single-copy-atomic 64-bit accesses are
+ * supported, so we rely on a firmware flag to identify that, and otherwise
+ * treat a 64-bit counter as a non-atomic pair of 32-bit registers.
  */
 
 /*
@@ -133,6 +132,28 @@ static inline u64 counter_mask(const struct arm_cspmu *cspmu)
 static inline bool use_64b_counter_reg(const struct arm_cspmu *cspmu)
 {
 	return (counter_size(cspmu) > 32);
+}
+
+/* Write to a counter or event register whose size/stride can vary */
+static void arm_cspmu_write_reg_idx(struct arm_cspmu *cspmu, u64 val, int reg, int idx)
+{
+	void __iomem *base;
+	bool dword;
+
+	if (reg <= PMEVTYPER) {
+		base = cspmu->base1;
+		dword = use_64b_counter_reg(cspmu);
+	} else {
+		base = cspmu->base0;
+		dword = cspmu->has_64bit_pmext;
+	}
+
+	if (!dword)
+		writel(val, base + reg + 4 * idx);
+	else if (!cspmu->has_atomic_dword)
+		lo_hi_writeq(val, base + reg + 8 * idx);
+	else
+		writeq(val, base + reg + 8 * idx);
 }
 
 ssize_t arm_cspmu_sysfs_event_show(struct device *dev,
@@ -198,7 +219,7 @@ arm_cspmu_get_format_attrs(const struct arm_cspmu *cspmu)
 	return attrs;
 }
 
-static u32 arm_cspmu_event_type(const struct perf_event *event)
+static u64 arm_cspmu_event_type(const struct perf_event *event)
 {
 	return event->attr.config & ARM_CSPMU_EVENT_MASK;
 }
@@ -250,38 +271,44 @@ static const char *arm_cspmu_get_name(const struct arm_cspmu *cspmu)
 	struct device *dev;
 	struct acpi_apmt_node *apmt_node;
 	u8 pmu_type;
-	char *name;
 	char acpi_hid_string[ACPI_ID_LEN] = { 0 };
-	static atomic_t pmu_idx[ACPI_APMT_NODE_TYPE_COUNT] = { 0 };
+	static atomic_t pmu_idx;
+	u32 id;
 
 	dev = cspmu->dev;
 	apmt_node = arm_cspmu_apmt_node(dev);
 	if (!apmt_node)
 		return devm_kasprintf(dev, GFP_KERNEL, PMUNAME "_%u",
-				      atomic_fetch_inc(&pmu_idx[0]));
+				      atomic_fetch_inc(&pmu_idx));
 
 	pmu_type = apmt_node->type;
-
-	if (pmu_type >= ACPI_APMT_NODE_TYPE_COUNT) {
+	switch (pmu_type) {
+	default:
 		dev_err(dev, "unsupported PMU type-%u\n", pmu_type);
 		return NULL;
-	}
-
-	if (pmu_type == ACPI_APMT_NODE_TYPE_ACPI) {
+	case ACPI_APMT_NODE_TYPE_ACPI:
 		memcpy(acpi_hid_string,
 			&apmt_node->inst_primary,
 			sizeof(apmt_node->inst_primary));
-		name = devm_kasprintf(dev, GFP_KERNEL, "%s_%s_%s_%u", PMUNAME,
+		return devm_kasprintf(dev, GFP_KERNEL, "%s_%s_%s_%u", PMUNAME,
 				      arm_cspmu_type_str[pmu_type],
 				      acpi_hid_string,
 				      apmt_node->inst_secondary);
-	} else {
-		name = devm_kasprintf(dev, GFP_KERNEL, "%s_%s_%d", PMUNAME,
-				      arm_cspmu_type_str[pmu_type],
-				      atomic_fetch_inc(&pmu_idx[pmu_type]));
-	}
+	case ACPI_APMT_NODE_TYPE_MC:
+		id = apmt_node->id;
+		break;
+	case ACPI_APMT_NODE_TYPE_SMMU:
+	case ACPI_APMT_NODE_TYPE_PCIE_ROOT:
+		id = apmt_node->inst_primary;
+		break;
+	case ACPI_APMT_NODE_TYPE_CACHE:
+		id = apmt_node->inst_secondary;
+		break;
+	};
 
-	return name;
+	return devm_kasprintf(dev, GFP_KERNEL, "%s_%s_%u", PMUNAME,
+			      arm_cspmu_type_str[pmu_type],
+			      apmt_node->id);
 }
 
 static ssize_t arm_cspmu_cpumask_show(struct device *dev,
@@ -322,6 +349,13 @@ static struct arm_cspmu_impl_match impl_match[] = {
 	{
 		.module_name	= "nvidia_cspmu",
 		.pmiidr_val	= ARM_CSPMU_IMPL_ID_NVIDIA,
+		.pmiidr_mask	= PMIIDR_IMPLEMENTER,
+		.module		= NULL,
+		.impl_init_ops	= NULL,
+	},
+	{
+		.module_name	= "arm_syspmu",
+		.pmiidr_val	= ARM_CSPMU_IMPL_ID_ARM,
 		.pmiidr_mask	= PMIIDR_IMPLEMENTER,
 		.module		= NULL,
 		.impl_init_ops	= NULL,
@@ -432,13 +466,15 @@ static int arm_cspmu_init_impl_ops(struct arm_cspmu *cspmu)
 				if (ret)
 					module_put(match->module);
 			} else {
-				WARN(1, "arm_cspmu failed to get module: %s\n",
+				dev_WARN(cspmu->dev, "Failed to get module: %s\n",
 					match->module_name);
 				ret = -EINVAL;
 			}
 		} else {
 			request_module_nowait(match->module_name);
-			ret = -EPROBE_DEFER;
+			ret = dev_err_probe(cspmu->dev, -EPROBE_DEFER,
+					    "Waiting for module %s to load\n",
+					    match->module_name);
 		}
 
 		mutex_unlock(&arm_cspmu_lock);
@@ -511,19 +547,24 @@ static int arm_cspmu_alloc_attr_groups(struct arm_cspmu *cspmu)
 	return 0;
 }
 
+static inline int arm_cspmu_pmcr(struct arm_cspmu *cspmu)
+{
+	return cspmu->has_64bit_pmext ? PMCR_64 : PMCR_32;
+}
+
 static inline void arm_cspmu_reset_counters(struct arm_cspmu *cspmu)
 {
-	writel(PMCR_C | PMCR_P, cspmu->base0 + PMCR);
+	writel(PMCR_C | PMCR_P, cspmu->base0 + arm_cspmu_pmcr(cspmu));
 }
 
 static inline void arm_cspmu_start_counters(struct arm_cspmu *cspmu)
 {
-	writel(PMCR_E, cspmu->base0 + PMCR);
+	writel(PMCR_E, cspmu->base0 + arm_cspmu_pmcr(cspmu));
 }
 
 static inline void arm_cspmu_stop_counters(struct arm_cspmu *cspmu)
 {
-	writel(0, cspmu->base0 + PMCR);
+	writel(0, cspmu->base0 + arm_cspmu_pmcr(cspmu));
 }
 
 static void arm_cspmu_enable(struct pmu *pmu)
@@ -700,21 +741,9 @@ static inline u32 counter_offset(u32 reg_sz, u32 ctr_idx)
 
 static void arm_cspmu_write_counter(struct perf_event *event, u64 val)
 {
-	u32 offset;
 	struct arm_cspmu *cspmu = to_arm_cspmu(event->pmu);
 
-	if (use_64b_counter_reg(cspmu)) {
-		offset = counter_offset(sizeof(u64), event->hw.idx);
-
-		if (cspmu->has_atomic_dword)
-			writeq(val, cspmu->base1 + offset);
-		else
-			lo_hi_writeq(val, cspmu->base1 + offset);
-	} else {
-		offset = counter_offset(sizeof(u32), event->hw.idx);
-
-		writel(lower_32_bits(val), cspmu->base1 + offset);
-	}
+	arm_cspmu_write_reg_idx(cspmu, val, PMEVCNTR_LO, event->hw.idx);
 }
 
 static u64 arm_cspmu_read_counter(struct perf_event *event)
@@ -797,28 +826,26 @@ static void arm_cspmu_event_update(struct perf_event *event)
 static inline void arm_cspmu_set_event(struct arm_cspmu *cspmu,
 					struct hw_perf_event *hwc)
 {
-	u32 offset = PMEVTYPER + (4 * hwc->idx);
-
-	writel(hwc->config, cspmu->base0 + offset);
+	arm_cspmu_write_reg_idx(cspmu, hwc->config, PMEVTYPER, hwc->idx);
 }
 
 static void arm_cspmu_set_ev_filter(struct arm_cspmu *cspmu,
 				    const struct perf_event *event)
 {
-	u32 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
-	u32 filter2 = event->attr.config2 & ARM_CSPMU_FILTER_MASK;
-	u32 offset = 4 * event->hw.idx;
+	u64 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
+	u64 filter2 = event->attr.config2 & ARM_CSPMU_FILTER_MASK;
 
-	writel(filter, cspmu->base0 + PMEVFILTR + offset);
-	writel(filter2, cspmu->base0 + PMEVFILT2R + offset);
+	arm_cspmu_write_reg_idx(cspmu, filter, PMEVFILTR, event->hw.idx);
+	arm_cspmu_write_reg_idx(cspmu, filter2, PMEVFILT2R, event->hw.idx);
 }
 
 static void arm_cspmu_set_cc_filter(struct arm_cspmu *cspmu,
 				    const struct perf_event *event)
 {
-	u32 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
+	u64 filter = event->attr.config1 & ARM_CSPMU_FILTER_MASK;
+	u32 pmccfiltr = cspmu->has_64bit_pmext ? PMCCFILTR_64 : PMCCFILTR_32;
 
-	writel(filter, cspmu->base0 + PMCCFILTR);
+	arm_cspmu_write_reg_idx(cspmu, filter, pmccfiltr, 0);
 }
 
 static void arm_cspmu_start(struct perf_event *event, int pmu_flags)
@@ -966,6 +993,29 @@ static int arm_cspmu_init_mmio(struct arm_cspmu *cspmu)
 		if (IS_ERR(cspmu->base1)) {
 			dev_err(dev, "ioremap failed for page-1 resource\n");
 			return PTR_ERR(cspmu->base1);
+		}
+	}
+
+	/*
+	 * If PMCNTEN is implemented, it implies the 64-bit programmers' model,
+	 * and vice versa.
+	 */
+	writel(~0U, cspmu->base0 + PMCNTENCLR);
+	writel(~0U, cspmu->base0 + PMCNTEN);
+	if (readl(cspmu->base0 + PMCNTENCLR)) {
+		cspmu->has_64bit_pmext = true;
+		cspmu->has_atomic_dword = true;
+		writel(0, cspmu->base0 + PMCNTEN);
+	} else {
+		u32 reg = readl(cspmu->base0 + PMDEVARCH);
+		/*
+		 * If it failed to implement the direct access extension but
+		 * still claims to be 64-bit, assume it also fails at atomicity.
+		 */
+		if (reg & ARM_CSPMU_PMDEVARCH_PRESENT) {
+			reg &= ARM_CSPMU_PMDEVARCH_ARCHPART;
+			if (reg == 0xaf4 || reg == 0xaf5)
+				cspmu->has_64bit_pmext = true;
 		}
 	}
 
@@ -1249,8 +1299,11 @@ static int arm_cspmu_device_probe(struct platform_device *pdev)
 		return ret;
 
 	ret = arm_cspmu_request_irq(cspmu);
-	if (ret)
-		return ret;
+	if (ret) {
+		if (counter_size(cspmu) < 64)
+			return ret;
+		dev_info(cspmu->dev, "Continuing without IRQ\n");
+	}
 
 	ret = arm_cspmu_get_cpus(cspmu);
 	if (ret)
