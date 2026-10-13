@@ -1560,11 +1560,89 @@ static void netmem_ref_test_tcp_devmem_recv(struct kunit *test)
 #endif
 #endif
 
+#if defined(CONFIG_PAGE_POOL) && defined(CONFIG_XDP_SOCKETS)
+#include <linux/etherdevice.h>
+#include <net/xsk_buff_pool.h>
+
+struct xdp_zc_skb_case {
+	const char *name;
+	u32 frame_size;
+	u32 frame_len;
+};
+
+static const struct xdp_zc_skb_case xdp_zc_skb_cases[] = {
+	{ "2k_chunk", SZ_2K, ETH_FRAME_LEN },
+	/* The head and skb_shared_info do not fit in a page. */
+	{ "page_chunk", PAGE_SIZE, PAGE_SIZE - XDP_PACKET_HEADROOM },
+};
+
+KUNIT_ARRAY_PARAM_DESC(xdp_zc_skb, xdp_zc_skb_cases, name);
+
+static void xdp_zc_skb_head(struct kunit *test)
+{
+	const struct xdp_zc_skb_case *c = test->param_value;
+	const u32 frame_size = c->frame_size, frame_len = c->frame_len;
+	struct xdp_rxq_info rxq = { .mem.type = MEM_TYPE_XSK_BUFF_POOL };
+	struct xsk_buff_pool *pool;
+	struct xdp_buff_xsk *xskb;
+	struct net_device *dev;
+	struct sk_buff *skb;
+	struct ethhdr *eth;
+	u8 *data;
+
+	pool = kunit_kzalloc(test, sizeof(*pool), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pool);
+	xskb = kunit_kzalloc(test, sizeof(*xskb), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, xskb);
+	data = kunit_kmalloc(test, frame_size, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	dev = alloc_etherdev(0);
+	KUNIT_ASSERT_NOT_NULL(test, dev);
+
+	INIT_LIST_HEAD(&pool->free_list);
+	INIT_LIST_HEAD(&xskb->list_node);
+	xskb->pool = pool;
+	rxq.dev = dev;
+	memset(data, 0x5a, frame_size);
+	eth = (struct ethhdr *)(data + XDP_PACKET_HEADROOM);
+	eth->h_proto = htons(ETH_P_IP);
+	xdp_init_buff(&xskb->xdp, frame_size, &rxq);
+	xdp_prepare_buff(&xskb->xdp, data, XDP_PACKET_HEADROOM,
+			 frame_len, true);
+
+	local_bh_disable();
+	skb = xdp_build_skb_from_zc(&xskb->xdp);
+	local_bh_enable();
+	if (!skb) {
+		KUNIT_FAIL(test, "Cannot copy a %u-byte XSK frame", frame_len);
+		goto free_dev;
+	}
+
+	KUNIT_EXPECT_EQ(test, skb->len, frame_len - ETH_HLEN);
+	KUNIT_EXPECT_TRUE(test, skb_tail_pointer(skb) <= skb_end_pointer(skb));
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(skb->data, eth + 1, frame_len - ETH_HLEN), 0);
+
+	/* Repair skb_shared_info if packet bytes overwrote it. */
+	if (skb_shinfo(skb)->nr_frags) {
+		memset(skb_shinfo(skb), 0, sizeof(*skb_shinfo(skb)));
+		atomic_set(&skb_shinfo(skb)->dataref, 1);
+	}
+	kfree_skb(skb);
+free_dev:
+	free_netdev(dev);
+}
+#endif
+
 static struct kunit_case net_test_cases[] = {
 	KUNIT_CASE_PARAM(gso_test_func, gso_test_gen_params),
 	KUNIT_CASE_PARAM(ip_tunnel_flags_test_run,
 			 ip_tunnel_flags_test_gen_params),
 	KUNIT_CASE(netmem_ref_test_page),
+#if defined(CONFIG_PAGE_POOL) && defined(CONFIG_XDP_SOCKETS)
+	KUNIT_CASE_PARAM(xdp_zc_skb_head, xdp_zc_skb_gen_params),
+#endif
 #ifdef CONFIG_PAGE_POOL
 	KUNIT_CASE(netmem_ref_test_pp_page),
 #endif
