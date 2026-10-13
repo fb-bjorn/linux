@@ -709,7 +709,7 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
 		}
 
 		memcpy(page_address(page) + offset, skb_frag_address(frag),
-		       LARGEST_ALIGN(len));
+		       len);
 		__skb_fill_page_desc_noacc(sinfo, i, page, offset, len);
 
 		tsize += truesize;
@@ -723,6 +723,28 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
 	return true;
 }
 
+static struct sk_buff *xdp_zc_alloc_skb(struct page_pool *pp, u32 size)
+{
+	u32 truesize = SKB_HEAD_ALIGN(size);
+	struct sk_buff *skb;
+	void *data;
+
+	/* A full XSK chunk leaves no room in a page for skb_shared_info */
+	if (unlikely(truesize > PAGE_SIZE))
+		return __alloc_skb(size, GFP_ATOMIC | __GFP_NOWARN,
+				   SKB_ALLOC_RX | SKB_ALLOC_NAPI, NUMA_NO_NODE);
+
+	data = page_pool_dev_alloc_va(pp, &truesize);
+	if (unlikely(!data))
+		return NULL;
+
+	skb = napi_build_skb(data, truesize);
+	if (unlikely(!skb))
+		page_pool_free_va(pp, data, true);
+
+	return skb;
+}
+
 /**
  * xdp_build_skb_from_zc - create an skb from XSk &xdp_buff
  * @xdp: source XSk buff
@@ -730,7 +752,8 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
  * Similar to xdp_build_skb_from_buff(), but for XSk frames. Allocate an skb
  * head, new buffer for the head, copy the data and initialize the skb fields.
  * If there are frags, allocate new buffers for them and copy.
- * Buffers are allocated from the system percpu pools to try recycling them.
+ * Buffers are allocated from the system percpu pools to try recycling them,
+ * except for a head larger than a page.
  * If new skb was built successfully, @xdp is returned to XSk pool's freelist.
  * On error, it remains untouched and the caller must take care of this.
  *
@@ -738,33 +761,26 @@ static noinline bool xdp_copy_frags_from_zc(struct sk_buff *skb,
  */
 struct sk_buff *xdp_build_skb_from_zc(struct xdp_buff *xdp)
 {
+	u32 headroom = xdp->data_meta - xdp->data_hard_start;
 	const struct xdp_rxq_info *rxq = xdp->rxq;
 	u32 len = xdp->data_end - xdp->data_meta;
-	u32 truesize = xdp->frame_sz;
 	struct sk_buff *skb = NULL;
 	struct page_pool *pp;
 	int metalen;
-	void *data;
 
 	if (!IS_ENABLED(CONFIG_PAGE_POOL))
 		return NULL;
 
 	local_lock_nested_bh(&system_page_pool.bh_lock);
 	pp = this_cpu_read(system_page_pool.pool);
-	data = page_pool_dev_alloc_va(pp, &truesize);
-	if (unlikely(!data))
+	skb = xdp_zc_alloc_skb(pp, headroom + len);
+	if (unlikely(!skb))
 		goto out;
-
-	skb = napi_build_skb(data, truesize);
-	if (unlikely(!skb)) {
-		page_pool_free_va(pp, data, true);
-		goto out;
-	}
 
 	skb_mark_for_recycle(skb);
-	skb_reserve(skb, xdp->data_meta - xdp->data_hard_start);
+	skb_reserve(skb, headroom);
 
-	memcpy(__skb_put(skb, len), xdp->data_meta, LARGEST_ALIGN(len));
+	memcpy(__skb_put(skb, len), xdp->data_meta, len);
 
 	metalen = xdp->data - xdp->data_meta;
 	if (metalen > 0) {
