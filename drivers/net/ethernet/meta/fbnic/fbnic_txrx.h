@@ -83,6 +83,7 @@ struct fbnic_pkt_buff {
 	struct xdp_buff buff;
 	ktime_t hwtstamp;
 	bool add_frag_failed;
+	struct xdp_buff_ext ext;
 };
 
 struct fbnic_queue_stats {
@@ -123,6 +124,7 @@ struct fbnic_ring {
 	union {
 		struct fbnic_pkt_buff *pkt;	/* RCQ */
 		struct fbnic_rx_buf *rx_buf;	/* BDQ */
+		netmem_ref *tx_netmem;		/* TWQ1 */
 		void **tx_buf;			/* TWQ */
 		void *buffer;			/* Generic pointer */
 	};
