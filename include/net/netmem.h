@@ -59,6 +59,7 @@ static_assert(sizeof(struct netmem_desc) <= offsetof(struct page, _refcount));
 /* net_iov */
 
 DECLARE_STATIC_KEY_FALSE(page_pool_mem_providers);
+DECLARE_STATIC_KEY_FALSE(page_pool_restricted);
 
 /*  We overload the LSB of the struct page pointer to indicate whether it's
  *  a page or net_iov.
@@ -403,6 +404,15 @@ static inline bool net_is_devmem_iov(const struct net_iov *niov)
 
 void get_net_iov(struct net_iov *niov);
 void put_net_iov(struct net_iov *niov);
+
+#if IS_ENABLED(CONFIG_PAGE_POOL)
+bool netmem_can_retain(netmem_ref netmem);
+#else
+static inline bool netmem_can_retain(netmem_ref netmem)
+{
+	return true;
+}
+#endif
 
 /**
  * get_netmem - acquire a non-page_pool reference on a netmem
