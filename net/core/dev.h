@@ -7,6 +7,7 @@
 #include <linux/rwsem.h>
 #include <linux/netdevice.h>
 #include <net/netdev_lock.h>
+#include <net/page_pool/memory_provider.h>
 
 struct net;
 struct netlink_ext_ack;
@@ -120,10 +121,12 @@ bool netif_rxq_is_leased(struct net_device *dev, unsigned int rxq_idx);
 bool netif_is_queue_leasee(const struct net_device *dev);
 
 void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
-			      const struct pp_memory_provider_params *p);
+			      const struct pp_memory_provider_params *p,
+			      enum mp_uninstall_reason reason);
+void netif_mp_retry_close(struct net_device *dev);
+void netif_mp_rearm_close(struct net_device *dev);
 
-void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq,
-			       struct netdev_rx_queue *virt_rxq);
+void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq);
 
 /* netdev management, shared between various uAPI entry points */
 struct netdev_name_node {
@@ -183,6 +186,8 @@ void netif_rx_mode_cancel_retry(struct net_device *dev);
 /* Events for the async netdev work, tracked in netdev->work_core_pending. */
 enum netdev_work_core {
 	NETDEV_WORK_RX_MODE	= BIT(0),	/* run the rx_mode update */
+	NETDEV_WORK_MP_CLOSE	= BIT(1),	/* retry provider removal */
+	NETDEV_WORK_MP_REARM	= BIT(2),	/* and reset the retry count */
 };
 
 void __netdev_work_core_sched(struct net_device *dev, unsigned long event);

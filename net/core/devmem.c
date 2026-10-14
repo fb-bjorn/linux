@@ -26,6 +26,8 @@
 
 static DEFINE_XARRAY_FLAGS(net_devmem_dmabuf_bindings, XA_FLAGS_ALLOC1);
 #define NET_DEVMEM_BINDING_LIVE XA_MARK_1
+/* bound_rxqs entry whose removal the core retries */
+#define NET_DEVMEM_RXQ_PENDING XA_MARK_1
 static DEFINE_MUTEX(net_devmem_lock);
 
 static const struct memory_provider_ops dmabuf_devmem_ops;
@@ -135,6 +137,8 @@ void net_devmem_free_dmabuf(struct net_iov *niov)
 
 void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 {
+	/* A pending removal below can clear binding->dev. */
+	struct net_device *dev = READ_ONCE(binding->dev);
 	struct netdev_rx_queue *rxq;
 	unsigned long xa_idx;
 	unsigned int rxq_idx;
@@ -156,9 +160,18 @@ void net_devmem_unbind_dmabuf(struct net_devmem_dmabuf_binding *binding)
 			.mp_ops		= &dmabuf_devmem_ops,
 		};
 
+		/* The core retries pending removals, which record the
+		 * physical queue of a lease, and only those remain once the
+		 * binding forgot its device.
+		 */
+		if (!dev || rxq->dev != dev ||
+		    xa_get_mark(&binding->bound_rxqs, xa_idx,
+				NET_DEVMEM_RXQ_PENDING))
+			continue;
+
 		rxq_idx = get_netdev_rx_queue_index(rxq);
 
-		netif_mp_close_rxq(binding->dev, rxq_idx, &mp_params);
+		netif_mp_close_rxq(dev, rxq_idx, &mp_params);
 	}
 
 	percpu_ref_kill(&binding->ref);
@@ -240,20 +253,19 @@ int net_devmem_bind_dmabuf_to_queue(struct net_device *dev, u32 rxq_idx,
 	if (binding->niov_shift != PAGE_SHIFT)
 		mp_params.rx_page_size = 1U << binding->niov_shift;
 
-	err = netif_mp_open_rxq(dev, rxq_idx, &mp_params, extack);
-	if (err)
-		return err;
-
+	/* Record the queue first, so the provider is never installed on a
+	 * queue that uninstall cannot find.
+	 */
 	rxq = __netif_get_rx_queue(dev, rxq_idx);
 	err = xa_alloc(&binding->bound_rxqs, &xa_idx, rxq, xa_limit_32b,
 		       GFP_KERNEL);
 	if (err)
-		goto err_close_rxq;
+		return err;
 
-	return 0;
+	err = netif_mp_open_rxq(dev, rxq_idx, &mp_params, extack);
+	if (err)
+		xa_erase(&binding->bound_rxqs, xa_idx);
 
-err_close_rxq:
-	netif_mp_close_rxq(dev, rxq_idx, &mp_params);
 	return err;
 }
 
@@ -604,26 +616,85 @@ static int mp_dmabuf_devmem_nl_fill(void *mp_priv, struct sk_buff *rsp,
 	return nla_put_u32(rsp, type, binding->id);
 }
 
+static bool mp_dmabuf_devmem_owned(struct net_devmem_dmabuf_binding *binding)
+{
+	struct netdev_rx_queue *rxq;
+	unsigned long xa_idx;
+
+	xa_for_each(&binding->bound_rxqs, xa_idx, rxq) {
+		if (!xa_get_mark(&binding->bound_rxqs, xa_idx,
+				 NET_DEVMEM_RXQ_PENDING))
+			return true;
+	}
+
+	return false;
+}
+
+/* Keep the binding and its mapping until the queue DMA stops. A virtual
+ * device may go first, so the binding forgets it once unbind has no queue
+ * left to remove through it.
+ */
+static void mp_dmabuf_devmem_detach(struct net_devmem_dmabuf_binding *binding,
+				    unsigned long xa_idx,
+				    struct netdev_rx_queue *rxq)
+{
+	percpu_ref_get(&binding->ref);
+	xa_store(&binding->bound_rxqs, xa_idx, rxq, GFP_KERNEL);
+	xa_set_mark(&binding->bound_rxqs, xa_idx, NET_DEVMEM_RXQ_PENDING);
+
+	if (!rxq->lease || mp_dmabuf_devmem_owned(binding))
+		return;
+
+	mutex_lock(&binding->lock);
+	WRITE_ONCE(binding->dev, NULL);
+	mutex_unlock(&binding->lock);
+}
+
 static void mp_dmabuf_devmem_uninstall(void *mp_priv,
-				       struct netdev_rx_queue *rxq)
+				       struct netdev_rx_queue *rxq,
+				       enum mp_uninstall_reason reason)
 {
 	struct net_devmem_dmabuf_binding *binding = mp_priv;
 	struct netdev_rx_queue *bound_rxq;
 	unsigned long xa_idx;
+	bool pending;
 
 	xa_for_each(&binding->bound_rxqs, xa_idx, bound_rxq) {
-		if (bound_rxq != rxq)
+		/* A leased queue is bound through its virtual device. */
+		if (bound_rxq != rxq && bound_rxq != rxq->lease)
 			continue;
 
+		pending = xa_get_mark(&binding->bound_rxqs, xa_idx,
+				      NET_DEVMEM_RXQ_PENDING);
+		if (reason == MP_UNINSTALL_LOGICAL_ONLY) {
+			if (!pending)
+				mp_dmabuf_devmem_detach(binding, xa_idx, rxq);
+			break;
+		}
+
 		xa_erase(&binding->bound_rxqs, xa_idx);
-		if (xa_empty(&binding->bound_rxqs)) {
+		/* Unmap with the device: until it goes away, buffers may
+		 * still leave through its TX, also after a close and open.
+		 */
+		if (rxq->dev->reg_state != NETREG_REGISTERED && !rxq->lease &&
+		    xa_empty(&binding->bound_rxqs)) {
+			mutex_lock(&binding->lock);
+			net_devmem_dmabuf_binding_unmap(binding);
+			mutex_unlock(&binding->lock);
+		}
+		/* A binding through a leased queue forgets its virtual
+		 * device, which goes away with the physical one.
+		 */
+		if ((bound_rxq != rxq ||
+		     bound_rxq->dev->reg_state != NETREG_REGISTERED) &&
+		    !mp_dmabuf_devmem_owned(binding)) {
 			mutex_lock(&binding->lock);
 			ASSERT_EXCLUSIVE_WRITER(binding->dev);
 			WRITE_ONCE(binding->dev, NULL);
-			if (!rxq->lease)
-				net_devmem_dmabuf_binding_unmap(binding);
 			mutex_unlock(&binding->lock);
 		}
+		if (pending)
+			net_devmem_dmabuf_binding_put(binding);
 		break;
 	}
 }

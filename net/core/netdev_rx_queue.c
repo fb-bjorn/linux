@@ -10,6 +10,17 @@
 #include "dev.h"
 #include "page_pool_priv.h"
 
+/* Attempts to remove a provider before the core waits for a device event */
+#define NETIF_MP_CLOSE_TRIES	3
+
+/* Which queue runs after netdev_rx_queue_reconfig() */
+enum netdev_rxq_state {
+	NETDEV_RXQ_NEW,		/* the new one, none if the device is down */
+	NETDEV_RXQ_OLD,		/* the old one */
+	NETDEV_RXQ_STOPPED,	/* none, the old one is stopped */
+	NETDEV_RXQ_UNCERTAIN,	/* stopping the old one failed */
+};
+
 void netdev_rx_queue_lease(struct netdev_rx_queue *rxq_dst,
 			   struct netdev_rx_queue *rxq_src)
 {
@@ -28,7 +39,7 @@ void netdev_rx_queue_unlease(struct netdev_rx_queue *rxq_dst,
 	netdev_assert_locked(rxq_dst->dev);
 	netdev_assert_locked(rxq_src->dev);
 
-	netif_rxq_cleanup_unlease(rxq_src, rxq_dst);
+	netif_rxq_cleanup_unlease(rxq_src);
 
 	WRITE_ONCE(rxq_src->lease, NULL);
 	WRITE_ONCE(rxq_dst->lease, NULL);
@@ -98,13 +109,16 @@ bool netif_rxq_has_mp(struct net_device *dev, unsigned int rxq_idx)
 static int netdev_rx_queue_reconfig(struct net_device *dev,
 				    unsigned int rxq_idx,
 				    struct netdev_queue_config *qcfg_old,
-				    struct netdev_queue_config *qcfg_new)
+				    struct netdev_queue_config *qcfg_new,
+				    enum netdev_rxq_state *state)
 {
 	struct netdev_rx_queue *rxq = __netif_get_rx_queue(dev, rxq_idx);
 	const struct netdev_queue_mgmt_ops *qops = dev->queue_mgmt_ops;
 	void *new_mem, *old_mem;
 	int err;
 
+	/* A queue of a closed device does no DMA. */
+	*state = netif_running(dev) ? NETDEV_RXQ_OLD : NETDEV_RXQ_STOPPED;
 	if (!qops || !qops->ndo_queue_stop || !qops->ndo_queue_mem_free ||
 	    !qops->ndo_queue_mem_alloc || !qops->ndo_queue_start)
 		return -EOPNOTSUPP;
@@ -131,8 +145,10 @@ static int netdev_rx_queue_reconfig(struct net_device *dev,
 
 	if (netif_running(dev)) {
 		err = qops->ndo_queue_stop(dev, old_mem, rxq_idx);
-		if (err)
+		if (err) {
+			*state = NETDEV_RXQ_UNCERTAIN;
 			goto err_free_new_queue_mem;
+		}
 
 		err = qops->ndo_queue_start(dev, qcfg_new, new_mem, rxq_idx);
 		if (err)
@@ -141,6 +157,7 @@ static int netdev_rx_queue_reconfig(struct net_device *dev,
 		swap(new_mem, old_mem);
 	}
 
+	*state = NETDEV_RXQ_NEW;
 	qops->ndo_queue_mem_free(dev, old_mem);
 
 	kvfree(old_mem);
@@ -161,6 +178,7 @@ err_start_queue:
 		     "Failed to restart old queue in error path. RX queue %d may be unhealthy.",
 		     rxq_idx);
 		qops->ndo_queue_mem_free(dev, old_mem);
+		*state = NETDEV_RXQ_STOPPED;
 	}
 
 err_free_new_queue_mem:
@@ -178,9 +196,14 @@ err_free_new_mem:
 int netdev_rx_queue_restart(struct net_device *dev, unsigned int rxq_idx)
 {
 	struct netdev_queue_config qcfg;
+	enum netdev_rxq_state state;
+	int err;
 
 	netdev_queue_config(dev, rxq_idx, &qcfg);
-	return netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg, &qcfg);
+	err = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg, &qcfg, &state);
+	netif_mp_rearm_close(dev);
+
+	return err;
 }
 EXPORT_SYMBOL_NS_GPL(netdev_rx_queue_restart, "NETDEV_INTERNAL");
 
@@ -190,6 +213,7 @@ static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 {
 	const struct netdev_queue_mgmt_ops *qops = dev->queue_mgmt_ops;
 	struct netdev_queue_config qcfg[2];
+	enum netdev_rxq_state state;
 	struct netdev_rx_queue *rxq;
 	int ret;
 
@@ -231,7 +255,11 @@ static int __netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	if (ret)
 		goto err_clear_mp;
 
-	ret = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1]);
+	/* On failure the new queue memory is freed, so the provider is not
+	 * installed. A failed ndo_queue_start() must leave its queue stopped.
+	 */
+	ret = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1],
+				       &state);
 	if (ret)
 		goto err_clear_mp;
 
@@ -270,17 +298,49 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 	}
 
 	netdev_lock(dev);
-	ret = __netif_mp_open_rxq(dev, rxq_idx, p, extack);
+	/* Unregister may have removed the providers already */
+	if (dev->reg_state != NETREG_REGISTERED)
+		ret = -ENODEV;
+	else
+		ret = __netif_mp_open_rxq(dev, rxq_idx, p, extack);
 	netdev_unlock(dev);
 	return ret;
+}
+
+static bool netif_mp_try_close(struct net_device *dev, unsigned int rxq_idx)
+{
+	struct netdev_rx_queue *rxq = __netif_get_rx_queue(dev, rxq_idx);
+	struct pp_memory_provider_params p = rxq->mp_params;
+	struct netdev_queue_config qcfg[2];
+	enum netdev_rxq_state state;
+
+	/* A driver may lower real_num_rx_queues on resume; queues past it
+	 * do not run.
+	 */
+	if (rxq_idx >= dev->real_num_rx_queues) {
+		memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+		goto uninstall;
+	}
+
+	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
+	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+	netdev_queue_config(dev, rxq_idx, &qcfg[1]);
+
+	netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1], &state);
+	if (state == NETDEV_RXQ_OLD || state == NETDEV_RXQ_UNCERTAIN) {
+		rxq->mp_params = p;
+		return false;
+	}
+
+uninstall:
+	__netif_mp_uninstall_rxq(rxq, &p, MP_UNINSTALL_DMA_STOPPED);
+	return true;
 }
 
 static void __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
 				 const struct pp_memory_provider_params *old_p)
 {
-	struct netdev_queue_config qcfg[2];
 	struct netdev_rx_queue *rxq;
-	int err;
 
 	rxq = __netif_get_rx_queue(dev, rxq_idx);
 
@@ -295,36 +355,119 @@ static void __netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
 			 rxq->mp_params.mp_priv != old_p->mp_priv))
 		return;
 
-	netdev_queue_config(dev, rxq_idx, &qcfg[0]);
-	memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
-	netdev_queue_config(dev, rxq_idx, &qcfg[1]);
+	/* The core already retries the removal. */
+	if (rxq->mp_close_pending)
+		return;
 
-	err = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg[0], &qcfg[1]);
-	WARN_ON(err && err != -ENETDOWN);
+	if (netif_mp_try_close(dev, rxq_idx))
+		return;
+
+	netdev_warn(dev, "rx queue %u still uses its memory provider, retrying\n",
+		    rxq_idx);
+	rxq->mp_close_pending = true;
+	rxq->mp_close_tries = NETIF_MP_CLOSE_TRIES;
+	__netif_mp_uninstall_rxq(rxq, old_p, MP_UNINSTALL_LOGICAL_ONLY);
+	__netdev_work_core_sched(dev, NETDEV_WORK_MP_CLOSE);
 }
 
+/**
+ * netif_mp_close_rxq - remove a memory provider from an RX queue
+ * @dev: netdev of the queue, may lease it from a physical device
+ * @rxq_idx: queue index on @dev
+ * @old_p: the provider to remove
+ *
+ * If the old queue may keep running, the provider is uninstalled with
+ * %MP_UNINSTALL_LOGICAL_ONLY, and with %MP_UNINSTALL_DMA_STOPPED once the core
+ * removed it.
+ *
+ * Context: holds the instance lock of @dev. For a leased queue, takes the
+ * instance lock of the physical device.
+ */
 void netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
 			const struct pp_memory_provider_params *old_p)
 {
-	if (WARN_ON_ONCE(rxq_idx >= dev->real_num_rx_queues))
-		return;
-	if (!netif_rxq_is_leased(dev, rxq_idx))
-		return __netif_mp_close_rxq(dev, rxq_idx, old_p);
-
-	if (!__netif_get_rx_queue_lease(&dev, &rxq_idx, NETIF_VIRT_TO_PHYS)) {
-		WARN_ON_ONCE(1);
+	if (!netif_rxq_is_leased(dev, rxq_idx)) {
+		__netif_mp_close_rxq(dev, rxq_idx, old_p);
 		return;
 	}
+
+	if (WARN_ON_ONCE(!__netif_get_rx_queue_lease(&dev, &rxq_idx,
+						     NETIF_VIRT_TO_PHYS)))
+		return;
+
 	netdev_lock(dev);
 	__netif_mp_close_rxq(dev, rxq_idx, old_p);
 	netdev_unlock(dev);
 }
 
+void netif_mp_retry_close(struct net_device *dev)
+{
+	struct netdev_rx_queue *rxq;
+	bool again = false;
+	unsigned int i;
+
+	netdev_assert_locked(dev);
+
+	for (i = 0; i < dev->num_rx_queues; i++) {
+		rxq = __netif_get_rx_queue(dev, i);
+		if (!rxq->mp_close_pending || !rxq->mp_close_tries)
+			continue;
+
+		rxq->mp_close_tries--;
+		if (netif_mp_try_close(dev, i))
+			rxq->mp_close_pending = false;
+		else if (rxq->mp_close_tries)
+			again = true;
+		else
+			netdev_warn(dev, "rx queue %u still uses its memory provider\n",
+				    i);
+	}
+
+	if (again)
+		__netdev_work_core_sched(dev, NETDEV_WORK_MP_CLOSE);
+}
+
+/* The device closed, attached or restarted a queue: retry failed removals */
+void netif_mp_rearm_close(struct net_device *dev)
+{
+	struct pp_memory_provider_params p;
+	struct netdev_rx_queue *rxq;
+	bool pending = false;
+	unsigned int i;
+
+	netdev_assert_locked_ops_compat(dev);
+
+	for (i = 0; i < dev->num_rx_queues; i++) {
+		rxq = __netif_get_rx_queue(dev, i);
+		if (!rxq->mp_close_pending)
+			continue;
+
+		/* A closed device does no DMA. Complete now, as netdev_work
+		 * skips an absent device.
+		 */
+		if (!netif_running(dev)) {
+			p = rxq->mp_params;
+			memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+			rxq->mp_close_pending = false;
+			__netif_mp_uninstall_rxq(rxq, &p,
+						 MP_UNINSTALL_DMA_STOPPED);
+			continue;
+		}
+
+		rxq->mp_close_tries = NETIF_MP_CLOSE_TRIES;
+		pending = true;
+	}
+
+	if (pending)
+		__netdev_work_core_sched(dev, NETDEV_WORK_MP_CLOSE);
+}
+
 void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
-			      const struct pp_memory_provider_params *p)
+			      const struct pp_memory_provider_params *p,
+			      enum mp_uninstall_reason reason)
 {
 	if (p->mp_ops && p->mp_ops->uninstall)
-		p->mp_ops->uninstall(p->mp_priv, rxq);
+		p->mp_ops->uninstall(p->mp_priv, rxq, reason);
 }
 
 /* Clean up memory provider state when a queue lease is torn down. If
@@ -334,9 +477,9 @@ void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
  * the lease redirection. The extra __netif_mp_close_rxq is needed
  * since the physical queue can outlive the virtual queue in the lease
  * case, so it needs to be reconfigured to clear the memory provider.
+ * The physical queue may keep the provider until its DMA stops.
  */
-void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq,
-			       struct netdev_rx_queue *virt_rxq)
+void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq)
 {
 	unsigned int rxq_idx = get_netdev_rx_queue_index(phys_rxq);
 	struct pp_memory_provider_params p = phys_rxq->mp_params;
@@ -345,5 +488,4 @@ void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq,
 		return;
 
 	__netif_mp_close_rxq(phys_rxq->dev, rxq_idx, &p);
-	__netif_mp_uninstall_rxq(virt_rxq, &p);
 }

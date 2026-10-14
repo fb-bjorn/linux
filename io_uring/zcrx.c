@@ -645,8 +645,13 @@ static void io_close_queue(struct io_zcrx_ifq *ifq)
 		if (ifq->if_rxq != -1)
 			netif_mp_close_rxq(netdev, ifq->if_rxq, &p);
 
-		scoped_guard(mutex, &ifq->pp_lock)
-			io_zcrx_unmap_areas(ifq);
+		/* The core retries a failed removal, and the queue keeps the
+		 * areas until its DMA stops.
+		 */
+		scoped_guard(mutex, &ifq->pp_lock) {
+			if (!ifq->queue_pending)
+				io_zcrx_unmap_areas(ifq);
+		}
 		netdev_unlock(netdev);
 		netdev_put(netdev, &netdev_tracker);
 	}
@@ -1457,17 +1462,32 @@ static int io_pp_nl_fill(void *mp_priv, struct sk_buff *rsp,
 	return 0;
 }
 
-static void io_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq)
+static void io_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq,
+			    enum mp_uninstall_reason reason)
 {
-	struct pp_memory_provider_params *p = &rxq->mp_params;
 	struct io_zcrx_ifq *ifq = mp_priv;
+	bool pending;
 
-	guard(mutex)(&ifq->pp_lock);
-	io_zcrx_unmap_areas(ifq);
-	io_zcrx_drop_netdev(ifq);
+	scoped_guard(mutex, &ifq->pp_lock) {
+		pending = ifq->queue_pending;
+		if (reason == MP_UNINSTALL_LOGICAL_ONLY) {
+			/* Hold the ifq and its DMA device until the queue DMA
+			 * stops, but not a netdev that may be going away.
+			 */
+			if (!pending)
+				refcount_inc(&ifq->refs);
+			ifq->queue_pending = true;
+			io_zcrx_drop_netdev(ifq);
+			return;
+		}
 
-	p->mp_ops = NULL;
-	p->mp_priv = NULL;
+		io_zcrx_unmap_areas(ifq);
+		io_zcrx_drop_netdev(ifq);
+		ifq->queue_pending = false;
+	}
+
+	if (pending)
+		io_put_zcrx_ifq(ifq);
 }
 
 static const struct memory_provider_ops io_uring_pp_zc_ops = {
