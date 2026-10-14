@@ -1635,6 +1635,448 @@ free_dev:
 }
 #endif
 
+/* page_pool requires provider ops in core kernel rodata. */
+#if IS_BUILTIN(CONFIG_NET_TEST) && defined(CONFIG_PAGE_POOL)
+#include <kunit/device.h>
+#include <linux/dma-mapping.h>
+#include <linux/etherdevice.h>
+#include <net/xdp.h>
+#include "dev.h"
+#include "page_pool_priv.h"
+
+/* A page-backed memory provider without MP_CAP_RETAIN */
+static netmem_ref xdp_copy_mp_alloc(struct page_pool *pool, gfp_t gfp)
+{
+	struct page *page = alloc_page(gfp);
+	netmem_ref netmem;
+	dma_addr_t dma;
+
+	if (!page)
+		return 0;
+
+	dma = dma_map_page(pool->p.dev, page, 0, PAGE_SIZE, pool->p.dma_dir);
+	if (dma_mapping_error(pool->p.dev, dma)) {
+		put_page(page);
+		return 0;
+	}
+
+	netmem = page_to_netmem(page);
+	page_pool_set_dma_addr_netmem(netmem, dma);
+	page_pool_set_pp_info(pool, netmem);
+	pool->pages_state_hold_cnt++;
+	return netmem;
+}
+
+static bool xdp_copy_mp_release(struct page_pool *pool, netmem_ref netmem)
+{
+	dma_unmap_page(pool->p.dev, page_pool_get_dma_addr_netmem(netmem),
+		       PAGE_SIZE, pool->p.dma_dir);
+	page_pool_set_dma_addr_netmem(netmem, 0);
+	return true;
+}
+
+static int xdp_copy_mp_init(struct page_pool *pool)
+{
+	return 0;
+}
+
+static void xdp_copy_mp_destroy(struct page_pool *pool)
+{
+}
+
+static int xdp_copy_mp_nl_fill(void *mp_priv, struct sk_buff *rsp,
+			       struct netdev_rx_queue *rxq)
+{
+	return 0;
+}
+
+static const struct memory_provider_ops xdp_copy_mp_ops = {
+	.alloc_netmems	= xdp_copy_mp_alloc,
+	.release_netmem	= xdp_copy_mp_release,
+	.init		= xdp_copy_mp_init,
+	.destroy	= xdp_copy_mp_destroy,
+	.nl_fill	= xdp_copy_mp_nl_fill,
+	.caps		= MP_CAP_READABLE,
+};
+
+struct xdp_copy_ctx {
+	struct device *dev;		/* DMA device of the pools */
+	struct net_device *netdev;
+	struct page_pool *mp_pool;	/* restricted provider pool */
+	struct page_pool *pp;		/* ordinary page pool */
+	struct xdp_rxq_info rxq;
+	struct xdp_buff_ext ext;
+	struct xdp_buff xdp;
+	struct bpf_net_context bpf_net_ctx;
+};
+
+static void xdp_copy_fini(void *data)
+{
+	struct xdp_copy_ctx *ctx = data;
+
+	page_pool_destroy(ctx->pp);
+	page_pool_destroy(ctx->mp_pool);
+	/* A failed test may leave a buffer in flight. The restricted pool
+	 * then stays linked to the netdev and uses the DMA device, so leak
+	 * both with it.
+	 */
+	if (hlist_empty(&ctx->netdev->page_pools))
+		free_netdev(ctx->netdev);
+	else
+		get_device(ctx->dev);
+}
+
+static void xdp_copy_init(struct kunit *test, struct xdp_copy_ctx *ctx)
+{
+	struct page_pool_params pp_params = {
+		.flags = PP_FLAG_DMA_MAP | PP_FLAG_DMA_SYNC_DEV |
+			 PP_FLAG_MEM_PROVIDER,
+		.pool_size = 64,
+		.nid = NUMA_NO_NODE,
+		.dma_dir = DMA_BIDIRECTIONAL,
+		.max_len = PAGE_SIZE,
+	};
+	struct netdev_rx_queue *rxq;
+	struct page_pool *pool;
+	struct device *dev;
+	int err;
+
+	dev = kunit_device_register(test, "xdp-copy");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	ctx->dev = dev;
+	KUNIT_ASSERT_EQ(test, dma_coerce_mask_and_coherent(dev,
+							   DMA_BIT_MASK(64)),
+			0);
+
+	ctx->netdev = alloc_etherdev(0);
+	KUNIT_ASSERT_NOT_NULL(test, ctx->netdev);
+	/* Also on a failed assertion, see xdp_copy_fini() */
+	err = kunit_add_action_or_reset(test, xdp_copy_fini, ctx);
+	KUNIT_ASSERT_EQ(test, err, 0);
+	rxq = __netif_get_rx_queue(ctx->netdev, 0);
+	rxq->mp_params.mp_ops = &xdp_copy_mp_ops;
+	rxq->mp_params.mp_priv = ctx;
+
+	pp_params.dev = dev;
+	pp_params.netdev = ctx->netdev;
+	netdev_lock(ctx->netdev);
+	pool = page_pool_create(&pp_params);
+	netdev_unlock(ctx->netdev);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pool);
+	ctx->mp_pool = pool;
+	KUNIT_ASSERT_PTR_EQ(test, ctx->mp_pool->mp_ops, &xdp_copy_mp_ops);
+
+	pp_params.flags = PP_FLAG_DMA_MAP;
+	pp_params.netdev = NULL;
+	pool = page_pool_create(&pp_params);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pool);
+	ctx->pp = pool;
+
+	ctx->rxq.dev = ctx->netdev;
+	ctx->rxq.mem.type = MEM_TYPE_PAGE_POOL;
+}
+
+/* Fill @len bytes of @netmem at @off with a pattern based on @seed. */
+static void *xdp_copy_fill(netmem_ref netmem, u32 off, u32 len, u8 seed)
+{
+	u8 *data = (u8 *)netmem_address(netmem) + off;
+	u32 i;
+
+	for (i = 0; i < len; i++)
+		data[i] = seed + i;
+
+	return data;
+}
+
+static void eth_hdr_set_proto(u8 *data)
+{
+	((struct ethhdr *)data)->h_proto = htons(ETH_P_IP);
+}
+
+/* The pool gives @netmem back first if it was returned to the pool once. */
+static void xdp_copy_expect_returned(struct kunit *test,
+				     struct page_pool *pool,
+				     netmem_ref netmem)
+{
+	netmem_ref first, second;
+
+	first = page_pool_alloc_netmems(pool, GFP_KERNEL);
+	second = page_pool_alloc_netmems(pool, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, first, netmem);
+	KUNIT_EXPECT_NE(test, second, netmem);
+	if (first)
+		page_pool_put_full_netmem(pool, first, false);
+	if (second)
+		page_pool_put_full_netmem(pool, second, false);
+}
+
+/* Compare the skb, from after its Ethernet header, with @expect. */
+static void xdp_copy_expect_skb(struct kunit *test, struct sk_buff *skb,
+				const u8 *expect, u32 len)
+{
+	u8 *buf;
+
+	KUNIT_ASSERT_EQ(test, skb->len, len - ETH_HLEN);
+	buf = kunit_kmalloc(test, skb->len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	KUNIT_ASSERT_EQ(test, skb_copy_bits(skb, 0, buf, skb->len), 0);
+	KUNIT_EXPECT_EQ(test, memcmp(buf, expect + ETH_HLEN, skb->len), 0);
+}
+
+static struct sk_buff *xdp_copy_build_skb(struct xdp_copy_ctx *ctx)
+{
+	struct bpf_net_context *bpf_net_ctx;
+	struct sk_buff *skb;
+
+	local_bh_disable();
+	bpf_net_ctx = bpf_net_ctx_set(&ctx->bpf_net_ctx);
+	skb = xdp_build_skb_from_buff(&ctx->xdp);
+	bpf_net_ctx_clear(bpf_net_ctx);
+	local_bh_enable();
+
+	return skb;
+}
+
+/* XDP_PASS copies a restricted head, with and without metadata support. */
+static void xdp_copy_test_head(struct kunit *test)
+{
+	const u32 len = ETH_FRAME_LEN, metalen = 8;
+	struct xdp_copy_ctx *ctx;
+	struct sk_buff *skb;
+	netmem_ref netmem;
+	int meta_valid;
+	u8 *data;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	xdp_copy_init(test, ctx);
+
+	for (meta_valid = 0; meta_valid < 2; meta_valid++) {
+		netmem = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+		KUNIT_ASSERT_NE(test, netmem, 0);
+		data = xdp_copy_fill(netmem, XDP_PACKET_HEADROOM, len, 1);
+		eth_hdr_set_proto(data);
+
+		xdp_init_buff_netmem(&ctx->xdp, PAGE_SIZE, &ctx->rxq, netmem,
+				     &ctx->ext);
+		KUNIT_EXPECT_TRUE(test, ctx->xdp.flags & XDP_FLAGS_EXT);
+		xdp_prepare_buff(&ctx->xdp, netmem_address(netmem),
+				 XDP_PACKET_HEADROOM, len, meta_valid);
+		if (meta_valid) {
+			memset(data - metalen, 0x5a, metalen);
+			ctx->xdp.data_meta = data - metalen;
+		}
+
+		skb = xdp_copy_build_skb(ctx);
+		KUNIT_ASSERT_NOT_NULL(test, skb);
+		KUNIT_EXPECT_NE(test, virt_to_netmem(skb->head), netmem);
+		KUNIT_EXPECT_EQ(test, skb_metadata_len(skb),
+				meta_valid ? metalen : 0);
+		xdp_copy_expect_skb(test, skb, data, len);
+		kfree_skb(skb);
+
+		xdp_copy_expect_returned(test, ctx->mp_pool, netmem);
+	}
+}
+
+/* Build a packet from @head and one fragment from @frag. */
+static u8 *xdp_copy_prepare(struct kunit *test, struct xdp_copy_ctx *ctx,
+			    netmem_ref head, netmem_ref frag, u32 hlen,
+			    u32 flen)
+{
+	u8 *expect, *data;
+
+	expect = kunit_kmalloc(test, hlen + flen, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, expect);
+
+	data = xdp_copy_fill(head, XDP_PACKET_HEADROOM, hlen, 7);
+	eth_hdr_set_proto(data);
+	memcpy(expect, data, hlen);
+	memcpy(expect + hlen, xdp_copy_fill(frag, 64, flen, 3), flen);
+
+	xdp_init_buff_netmem(&ctx->xdp, PAGE_SIZE, &ctx->rxq, head,
+			     &ctx->ext);
+	xdp_prepare_buff(&ctx->xdp, netmem_address(head), XDP_PACKET_HEADROOM,
+			 hlen, true);
+	KUNIT_ASSERT_TRUE(test, xdp_buff_add_frag(&ctx->xdp, frag, 64, flen,
+						  PAGE_SIZE));
+	return expect;
+}
+
+/* A restricted head or fragment makes XDP_PASS copy the whole packet and
+ * return each source buffer to its own pool.
+ */
+static void xdp_copy_test_mixed(struct kunit *test)
+{
+	const u32 hlen = 256, flen = 1000;
+	struct page_pool *head_pool, *frag_pool;
+	netmem_ref head, frag, copy;
+	struct xdp_copy_ctx *ctx;
+	struct sk_buff *skb;
+	int restricted_head;
+	u8 *expect;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	xdp_copy_init(test, ctx);
+
+	for (restricted_head = 0; restricted_head < 2; restricted_head++) {
+		head_pool = restricted_head ? ctx->mp_pool : ctx->pp;
+		frag_pool = restricted_head ? ctx->pp : ctx->mp_pool;
+		head = page_pool_alloc_netmems(head_pool, GFP_KERNEL);
+		frag = page_pool_alloc_netmems(frag_pool, GFP_KERNEL);
+		KUNIT_ASSERT_NE(test, head, 0);
+		KUNIT_ASSERT_NE(test, frag, 0);
+
+		expect = xdp_copy_prepare(test, ctx, head, frag, hlen, flen);
+		KUNIT_EXPECT_TRUE(test, xdp_buff_needs_copy(&ctx->xdp));
+
+		skb = xdp_copy_build_skb(ctx);
+		KUNIT_ASSERT_NOT_NULL(test, skb);
+		KUNIT_EXPECT_NE(test, virt_to_netmem(skb->head), head);
+		KUNIT_ASSERT_EQ(test, skb_shinfo(skb)->nr_frags, 1);
+		copy = skb_frag_netmem(&skb_shinfo(skb)->frags[0]);
+		KUNIT_EXPECT_NE(test, copy, frag);
+		xdp_copy_expect_skb(test, skb, expect, hlen + flen);
+		kfree_skb(skb);
+
+		xdp_copy_expect_returned(test, head_pool, head);
+		xdp_copy_expect_returned(test, frag_pool, frag);
+	}
+}
+
+/* Converting to a frame copies the fragments too. A plain copy leaves the
+ * source with the caller.
+ */
+static void xdp_copy_test_frame(struct kunit *test)
+{
+	const u32 hlen = 300, flen = 2000;
+	netmem_ref head, frag, first, second;
+	struct bpf_net_context *bpf_net_ctx;
+	struct skb_shared_info *sinfo;
+	struct xdp_copy_ctx *ctx;
+	struct xdp_frame *xdpf;
+	u8 *expect;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	xdp_copy_init(test, ctx);
+
+	head = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+	frag = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, head, 0);
+	KUNIT_ASSERT_NE(test, frag, 0);
+	expect = xdp_copy_prepare(test, ctx, head, frag, hlen, flen);
+
+	xdpf = xdp_copy_buff_to_frame(&ctx->xdp);
+	KUNIT_ASSERT_NOT_NULL(test, xdpf);
+	xdp_return_frame(xdpf);
+
+	local_bh_disable();
+	bpf_net_ctx = bpf_net_ctx_set(&ctx->bpf_net_ctx);
+	xdpf = xdp_convert_buff_to_frame(&ctx->xdp);
+	bpf_net_ctx_clear(bpf_net_ctx);
+	local_bh_enable();
+	KUNIT_ASSERT_NOT_NULL(test, xdpf);
+
+	KUNIT_EXPECT_EQ(test, (u32)xdpf->mem_type, MEM_TYPE_PAGE_ORDER0);
+	KUNIT_EXPECT_EQ(test, xdpf->flags & XDP_FLAGS_EXT, 0);
+	KUNIT_EXPECT_EQ(test, xdpf->len, hlen);
+	KUNIT_EXPECT_EQ(test, memcmp(xdpf->data, expect, hlen), 0);
+	KUNIT_ASSERT_TRUE(test, xdp_frame_has_frags(xdpf));
+	sinfo = xdp_get_shared_info_from_frame(xdpf);
+	KUNIT_ASSERT_EQ(test, sinfo->nr_frags, 1);
+	KUNIT_EXPECT_EQ(test, skb_frag_size(&sinfo->frags[0]), flen);
+	KUNIT_EXPECT_EQ(test, memcmp(skb_frag_address(&sinfo->frags[0]),
+				     expect + hlen, flen), 0);
+	xdp_return_frame(xdpf);
+
+	/* The frame copy kept the source, the conversion returned it. */
+	first = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+	second = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, first, head);
+	KUNIT_EXPECT_EQ(test, second, frag);
+	page_pool_put_full_netmem(ctx->mp_pool, first, false);
+	page_pool_put_full_netmem(ctx->mp_pool, second, false);
+}
+
+/* A failed copy leaves the source with the caller. */
+static void xdp_copy_test_big(struct kunit *test)
+{
+	const u32 headroom = XDP_PACKET_HEADROOM, len = PAGE_SIZE - headroom;
+	struct bpf_net_context *bpf_net_ctx;
+	struct xdp_copy_ctx *ctx;
+	struct xdp_frame *xdpf;
+	struct sk_buff *skb;
+	netmem_ref netmem;
+	u8 *data;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	xdp_copy_init(test, ctx);
+
+	netmem = page_pool_alloc_netmems(ctx->mp_pool, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, netmem, 0);
+
+	/* The copied head does not fit in a page with skb_shared_info. */
+	data = xdp_copy_fill(netmem, headroom, len, 9);
+	eth_hdr_set_proto(data);
+	xdp_init_buff_netmem(&ctx->xdp, PAGE_SIZE, &ctx->rxq, netmem,
+			     &ctx->ext);
+	xdp_prepare_buff(&ctx->xdp, netmem_address(netmem), headroom, len,
+			 true);
+
+	/* A frame copy must fit in a page; on failure the caller keeps it. */
+	local_bh_disable();
+	bpf_net_ctx = bpf_net_ctx_set(&ctx->bpf_net_ctx);
+	xdpf = xdp_convert_buff_to_frame(&ctx->xdp);
+	bpf_net_ctx_clear(bpf_net_ctx);
+	local_bh_enable();
+	KUNIT_EXPECT_NULL(test, xdpf);
+	KUNIT_EXPECT_EQ(test,
+			atomic_long_read(netmem_get_pp_ref_count_ref(netmem)),
+			1);
+
+	skb = xdp_copy_build_skb(ctx);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 0);
+	xdp_copy_expect_skb(test, skb, data, len);
+	kfree_skb(skb);
+
+	xdp_copy_expect_returned(test, ctx->mp_pool, netmem);
+}
+
+/* Ordinary page pool buffers are not copied. */
+static void xdp_copy_test_none(struct kunit *test)
+{
+	const u32 hlen = 256, flen = 500;
+	struct xdp_copy_ctx *ctx;
+	netmem_ref head, frag;
+	struct sk_buff *skb;
+	u8 *expect;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	xdp_copy_init(test, ctx);
+
+	head = page_pool_alloc_netmems(ctx->pp, GFP_KERNEL);
+	frag = page_pool_alloc_netmems(ctx->pp, GFP_KERNEL);
+	KUNIT_ASSERT_NE(test, head, 0);
+	KUNIT_ASSERT_NE(test, frag, 0);
+	expect = xdp_copy_prepare(test, ctx, head, frag, hlen, flen);
+	KUNIT_EXPECT_FALSE(test, ctx->xdp.flags & XDP_FLAGS_EXT);
+	KUNIT_EXPECT_FALSE(test, xdp_buff_needs_copy(&ctx->xdp));
+
+	skb = xdp_copy_build_skb(ctx);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	KUNIT_EXPECT_EQ(test, virt_to_netmem(skb->head), head);
+	KUNIT_EXPECT_EQ(test, skb_frag_netmem(&skb_shinfo(skb)->frags[0]),
+			frag);
+	xdp_copy_expect_skb(test, skb, expect, hlen + flen);
+	kfree_skb(skb);
+}
+#endif
+
 static struct kunit_case net_test_cases[] = {
 	KUNIT_CASE_PARAM(gso_test_func, gso_test_gen_params),
 	KUNIT_CASE_PARAM(ip_tunnel_flags_test_run,
@@ -1645,6 +2087,13 @@ static struct kunit_case net_test_cases[] = {
 #endif
 #ifdef CONFIG_PAGE_POOL
 	KUNIT_CASE(netmem_ref_test_pp_page),
+#endif
+#if IS_BUILTIN(CONFIG_NET_TEST) && defined(CONFIG_PAGE_POOL)
+	KUNIT_CASE(xdp_copy_test_head),
+	KUNIT_CASE(xdp_copy_test_mixed),
+	KUNIT_CASE(xdp_copy_test_frame),
+	KUNIT_CASE(xdp_copy_test_big),
+	KUNIT_CASE(xdp_copy_test_none),
 #endif
 #if defined(CONFIG_PAGE_POOL) && defined(CONFIG_NET_DEVMEM)
 	KUNIT_CASE(netmem_ref_test_net_iov),
