@@ -120,7 +120,7 @@ struct xsk_buff_pool *xsk_get_pool_from_qid(struct net_device *dev,
 }
 EXPORT_SYMBOL(xsk_get_pool_from_qid);
 
-static void __xsk_clear_pool_at_qid(struct net_device *dev, u16 queue_id)
+void __xsk_clear_pool_at_qid(struct net_device *dev, u16 queue_id)
 {
 	if (queue_id < dev->num_rx_queues)
 		dev->_rx[queue_id].pool = NULL;
@@ -1732,8 +1732,9 @@ static int xsk_bind(struct socket *sock, struct sockaddr_unsized *addr, int addr
 			 * utilizes
 			 */
 			if (xs->tx && !xs->pool->tx_descs) {
-				err = xp_alloc_tx_descs(xs->pool, xs,
-							dev->xdp_zc_max_segs);
+				u32 segs = xs->pool->xdp_zc_max_segs;
+
+				err = xp_alloc_tx_descs(xs->pool, xs, segs);
 				if (err) {
 					xp_put_pool(xs->pool);
 					xs->pool = NULL;
