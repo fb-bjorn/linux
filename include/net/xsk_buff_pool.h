@@ -34,13 +34,20 @@ struct xdp_buff_xsk {
 #define XSK_CHECK_PRIV_TYPE(t) BUILD_BUG_ON(sizeof(t) > offsetofend(struct xdp_buff_xsk, cb))
 #define XSK_TX_COMPL_FITS(t) BUILD_BUG_ON(sizeof(struct xsk_tx_metadata_compl) > sizeof(t))
 
+/* One DMA mapping of a UMEM, shared by the buffer pools that use the same
+ * netdev, DMA device and attributes. For a leased queue, the netdev is the
+ * physical one.
+ */
 struct xsk_dma_map {
 	dma_addr_t *dma_pages;
 	struct device *dev;
 	struct net_device *netdev;
+	struct xdp_umem *umem;
+	unsigned long attrs;
 	refcount_t users;
-	struct list_head list; /* Protected by the RTNL_LOCK */
+	struct list_head list; /* Protected by xsk_dma_lock */
 	u32 dma_pages_cnt;
+	u32 orphans; /* users of destroyed pools, protected by xsk_dma_lock */
 };
 
 struct xsk_buff_pool {
@@ -52,6 +59,7 @@ struct xsk_buff_pool {
 	spinlock_t xsk_tx_list_lock;
 	refcount_t users;
 	struct xdp_umem *umem;
+	struct xsk_dma_map *dma_map;
 	struct work_struct work;
 	/* Protects generic receive in shared and non-shared umem mode. */
 	spinlock_t rx_lock;

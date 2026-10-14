@@ -2,6 +2,7 @@
 
 #include <linux/netdevice.h>
 #include <net/netdev_lock.h>
+#include <net/netdev_rx_queue.h>
 #include <net/page_pool/memory_provider.h>
 #include <net/xsk_buff_pool.h>
 #include <net/xdp_sock.h>
@@ -12,6 +13,12 @@
 #include "xsk.h"
 
 #define ETH_PAD_LEN (ETH_HLEN + 2 * VLAN_HLEN  + ETH_FCS_LEN)
+
+/* All UMEM DMA mappings. Pools share one when the UMEM, the netdev that
+ * does the DMA, the DMA device and the attributes match.
+ */
+static LIST_HEAD(xsk_dma_maps);
+static DEFINE_MUTEX(xsk_dma_lock);
 
 void xp_add_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs)
 {
@@ -33,10 +40,15 @@ void xp_del_xsk(struct xsk_buff_pool *pool, struct xdp_sock *xs)
 	spin_unlock(&pool->xsk_tx_list_lock);
 }
 
+static void xp_dma_orphan(struct xsk_buff_pool *pool);
+
 void xp_destroy(struct xsk_buff_pool *pool)
 {
 	if (!pool)
 		return;
+
+	if (pool->dma_map)
+		xp_dma_orphan(pool);
 
 	kvfree(pool->tx_descs);
 	kvfree(pool->heads);
@@ -307,6 +319,7 @@ static void xp_release_deferred(struct work_struct *work)
 {
 	struct xsk_buff_pool *pool = container_of(work, struct xsk_buff_pool,
 						  work);
+	struct xdp_umem *umem = pool->umem;
 
 	rtnl_lock();
 	xp_clear_dev(pool);
@@ -322,8 +335,9 @@ static void xp_release_deferred(struct work_struct *work)
 		pool->cq = NULL;
 	}
 
-	xdp_put_umem(pool->umem, false);
+	/* Count a kept mapping as orphaned first, see xp_dma_umem_gone(). */
 	xp_destroy(pool);
+	xdp_put_umem(umem, false);
 }
 
 void xp_get_pool(struct xsk_buff_pool *pool)
@@ -345,20 +359,27 @@ bool xp_put_pool(struct xsk_buff_pool *pool)
 	return false;
 }
 
-static struct xsk_dma_map *xp_find_dma_map(struct xsk_buff_pool *pool)
+static struct xsk_dma_map *xp_find_dma_map(struct xdp_umem *umem,
+					   struct net_device *netdev,
+					   struct device *dev,
+					   unsigned long attrs)
 {
 	struct xsk_dma_map *dma_map;
 
-	list_for_each_entry(dma_map, &pool->umem->xsk_dma_list, list) {
-		if (dma_map->netdev == pool->netdev)
+	lockdep_assert_held(&xsk_dma_lock);
+
+	list_for_each_entry(dma_map, &xsk_dma_maps, list) {
+		if (dma_map->umem == umem && dma_map->netdev == netdev &&
+		    dma_map->dev == dev && dma_map->attrs == attrs)
 			return dma_map;
 	}
 
 	return NULL;
 }
 
-static struct xsk_dma_map *xp_create_dma_map(struct device *dev, struct net_device *netdev,
-					     u32 nr_pages, struct xdp_umem *umem)
+static struct xsk_dma_map *
+xp_create_dma_map(struct device *dev, struct net_device *netdev, u32 nr_pages,
+		  struct xdp_umem *umem, unsigned long attrs)
 {
 	struct xsk_dma_map *dma_map;
 
@@ -373,10 +394,12 @@ static struct xsk_dma_map *xp_create_dma_map(struct device *dev, struct net_devi
 	}
 
 	dma_map->netdev = netdev;
-	dma_map->dev = dev;
+	dma_map->dev = get_device(dev);
+	dma_map->umem = umem;
+	dma_map->attrs = attrs;
 	dma_map->dma_pages_cnt = nr_pages;
 	refcount_set(&dma_map->users, 1);
-	list_add(&dma_map->list, &umem->xsk_dma_list);
+	list_add(&dma_map->list, &xsk_dma_maps);
 	return dma_map;
 }
 
@@ -384,6 +407,7 @@ static void xp_destroy_dma_map(struct xsk_dma_map *dma_map)
 {
 	list_del(&dma_map->list);
 	kvfree(dma_map->dma_pages);
+	put_device(dma_map->dev);
 	kfree(dma_map);
 }
 
@@ -407,26 +431,68 @@ static void __xp_dma_unmap(struct xsk_dma_map *dma_map, unsigned long attrs)
 
 void xp_dma_unmap(struct xsk_buff_pool *pool, unsigned long attrs)
 {
-	struct xsk_dma_map *dma_map;
+	struct xsk_dma_map *dma_map = pool->dma_map;
 
 	if (!pool->dma_pages)
 		return;
 
-	dma_map = xp_find_dma_map(pool);
-	if (!dma_map) {
-		WARN(1, "Could not find dma_map for device");
-		return;
-	}
-
+	mutex_lock(&xsk_dma_lock);
 	if (refcount_dec_and_test(&dma_map->users))
 		__xp_dma_unmap(dma_map, attrs);
+	mutex_unlock(&xsk_dma_lock);
 
 	kvfree(pool->dma_pages);
 	pool->dma_pages = NULL;
 	pool->dma_pages_cnt = 0;
+	pool->dma_map = NULL;
 	pool->dev = NULL;
 }
 EXPORT_SYMBOL(xp_dma_unmap);
+
+/* A driver may fail to set up or tear down zero copy after it mapped the
+ * UMEM, and leave its queue running. The pool keeps its reference, so the
+ * pages stay mapped, as before, and a bind with the same UMEM shares the
+ * mapping.
+ */
+static void xp_dma_orphan(struct xsk_buff_pool *pool)
+{
+	mutex_lock(&xsk_dma_lock);
+	pool->dma_map->orphans++;
+	mutex_unlock(&xsk_dma_lock);
+
+	kvfree(pool->dma_pages);
+	pool->dma_pages = NULL;
+	pool->dma_map = NULL;
+}
+
+/**
+ * xp_dma_umem_gone - forget the mappings that destroyed pools kept for a UMEM
+ * @umem: UMEM being freed
+ *
+ * The pages stay mapped. A later UMEM at the same address finds nothing.
+ */
+void xp_dma_umem_gone(struct xdp_umem *umem)
+{
+	struct xsk_dma_map *dma_map, *tmp;
+
+	mutex_lock(&xsk_dma_lock);
+	list_for_each_entry_safe(dma_map, tmp, &xsk_dma_maps, list) {
+		if (dma_map->umem != umem)
+			continue;
+
+		/* Every pool released the UMEM, so only orphans are left. A
+		 * saturated count leaks the mapping, but not its key.
+		 */
+		if (WARN_ON_ONCE(refcount_read(&dma_map->users) !=
+				 dma_map->orphans)) {
+			list_del_init(&dma_map->list);
+			continue;
+		}
+
+		xp_destroy_dma_map(dma_map);
+	}
+	mutex_unlock(&xsk_dma_lock);
+}
 
 static void xp_check_dma_contiguity(struct xsk_dma_map *dma_map)
 {
@@ -460,6 +526,7 @@ static int xp_init_dma_info(struct xsk_buff_pool *pool, struct xsk_dma_map *dma_
 		return -ENOMEM;
 
 	pool->dev = dma_map->dev;
+	pool->dma_map = dma_map;
 	pool->dma_pages_cnt = dma_map->dma_pages_cnt;
 	memcpy(pool->dma_pages, dma_map->dma_pages,
 	       pool->dma_pages_cnt * sizeof(*pool->dma_pages));
@@ -467,15 +534,16 @@ static int xp_init_dma_info(struct xsk_buff_pool *pool, struct xsk_dma_map *dma_
 	return 0;
 }
 
-int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
-	       unsigned long attrs, struct page **pages, u32 nr_pages)
+static int __xp_dma_map(struct xsk_buff_pool *pool, struct net_device *netdev,
+			struct device *dev, unsigned long attrs,
+			struct page **pages, u32 nr_pages)
 {
 	struct xsk_dma_map *dma_map;
 	dma_addr_t dma;
 	int err;
 	u32 i;
 
-	dma_map = xp_find_dma_map(pool);
+	dma_map = xp_find_dma_map(pool->umem, netdev, dev, attrs);
 	if (dma_map) {
 		err = xp_init_dma_info(pool, dma_map);
 		if (err)
@@ -485,7 +553,7 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 		return 0;
 	}
 
-	dma_map = xp_create_dma_map(dev, pool->netdev, nr_pages, pool->umem);
+	dma_map = xp_create_dma_map(dev, netdev, nr_pages, pool->umem, attrs);
 	if (!dma_map)
 		return -ENOMEM;
 
@@ -509,6 +577,24 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 	}
 
 	return 0;
+}
+
+int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
+	       unsigned long attrs, struct page **pages, u32 nr_pages)
+{
+	struct net_device *netdev = pool->netdev;
+	unsigned int qid = pool->queue_id;
+	int err;
+
+	/* The netdev of a leased queue does not do its DMA. */
+	if (qid < netdev->real_num_rx_queues)
+		__netif_get_rx_queue_lease(&netdev, &qid, NETIF_VIRT_TO_PHYS);
+
+	mutex_lock(&xsk_dma_lock);
+	err = __xp_dma_map(pool, netdev, dev, attrs, pages, nr_pages);
+	mutex_unlock(&xsk_dma_lock);
+
+	return err;
 }
 EXPORT_SYMBOL(xp_dma_map);
 
