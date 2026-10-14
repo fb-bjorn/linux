@@ -11,6 +11,11 @@
  * A page pool takes chunks from the reuse stack first, then from the FILL
  * ring. A chunk returns to userspace through the socket RX ring. Several page
  * pools of one queue can share the provider while the queue is replaced.
+ *
+ * The chunks are few. When a refill finds none, the provider is starved, and
+ * the next release schedules the NAPI of the queue. With XDP_USE_NEED_WAKEUP
+ * the RX flag stays set, and userspace wakes the queue after it posts FILL
+ * entries; otherwise NAPI keeps polling the FILL ring.
  */
 
 #include <linux/sizes.h>
@@ -45,10 +50,13 @@ struct xsk_pp {
 	/* Physical device, held while the provider is installed */
 	struct net_device *netdev;
 	netdevice_tracker dev_tracker;
+	/* Queue of netdev to wake, cleared before netdev is put */
+	struct netdev_rx_queue __rcu *rxq;
 	/* Removal state, see xsk_pp_uninstall() */
 	bool dma_stopped;
 	bool owns_pool;
 	struct work_struct release_work;
+	bool starved;
 	u8 *state;
 	u32 reuse_cnt;
 	u32 reuse[];
@@ -254,11 +262,32 @@ static netmem_ref xsk_pp_alloc_netmems(struct page_pool *pool, gfp_t gfp)
 	return netmems[n - 1];
 }
 
+/* Schedule the NAPI of the queue. Return false if the queue does not run. */
+static bool xsk_pp_wake(struct xsk_pp *pp)
+{
+	struct netdev_rx_queue *rxq;
+	bool running = false;
+
+	rcu_read_lock();
+	rxq = rcu_dereference(pp->rxq);
+	if (rxq)
+		running = netif_mp_wake(rxq);
+	rcu_read_unlock();
+
+	return running;
+}
+
+int xsk_pp_wakeup(struct xsk_pp *pp)
+{
+	return xsk_pp_wake(pp) ? 0 : -ENETDOWN;
+}
+
 static bool xsk_pp_release_netmem(struct page_pool *pool, netmem_ref netmem)
 {
 	struct net_iov *niov = netmem_to_net_iov(netmem);
 	struct xsk_pp *pp = pool->mp_priv;
 	u32 idx = net_iov_idx(niov);
+	bool starved;
 
 	spin_lock_bh(&pp->lock);
 	net_mp_niov_clear_page_pool(niov);
@@ -268,9 +297,48 @@ static bool xsk_pp_release_netmem(struct page_pool *pool, netmem_ref netmem)
 		pp->state[idx] = XSK_PP_REUSE;
 		pp->reuse[pp->reuse_cnt++] = idx;
 	}
+	starved = pp->starved;
+	WRITE_ONCE(pp->starved, false);
 	spin_unlock_bh(&pp->lock);
 
+	/* A late release by an old page pool may be the only one. */
+	if (starved)
+		xsk_pp_wake(pp);
+
 	return false;
+}
+
+/* Without XDP_USE_NEED_WAKEUP, NAPI polls the FILL ring while it is empty. */
+static bool xsk_pp_refill_done(struct page_pool *pool, enum pp_refill state)
+{
+	struct xsk_pp *pp = pool->mp_priv;
+	struct xsk_buff_pool *xp = pp->pool;
+	bool wait = xp->uses_need_wakeup;
+	bool more;
+
+	if (state == PP_REFILL_FULL && !READ_ONCE(pp->starved))
+		return true;
+
+	spin_lock_bh(&pp->lock);
+	if (!pp->fq) {
+		spin_unlock_bh(&pp->lock);
+		return true;
+	}
+
+	if (state == PP_REFILL_FULL) {
+		WRITE_ONCE(pp->starved, false);
+		spin_unlock_bh(&pp->lock);
+		return true;
+	}
+
+	/* With need_wakeup, the RX flag stays set, so userspace wakes the
+	 * queue after it posts FILL entries.
+	 */
+	more = pp->reuse_cnt || xskq_cons_nb_entries(pp->fq, 1);
+	WRITE_ONCE(pp->starved, !more);
+	spin_unlock_bh(&pp->lock);
+
+	return !more && wait;
 }
 
 static int xsk_pp_nl_fill(void *mp_priv, struct sk_buff *rsp,
@@ -290,6 +358,7 @@ static void xsk_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq,
 	struct xsk_pp *pp = mp_priv;
 	bool owns;
 
+	RCU_INIT_POINTER(pp->rxq, NULL);
 	if (reason == MP_UNINSTALL_LOGICAL_ONLY) {
 		spin_lock_bh(&pp->lock);
 		pp->fq = NULL;
@@ -299,7 +368,7 @@ static void xsk_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq,
 
 	__xsk_clear_pool_at_qid(rxq->dev, get_netdev_rx_queue_index(rxq));
 	/* Recycles may still sync chunks for the device, see
-	 * page_pool_scrub().
+	 * page_pool_scrub(), and wakeups may still use its queue.
 	 */
 	synchronize_net();
 	xp_dma_unmap(pp->pool, XSK_PP_DMA_ATTR);
@@ -323,6 +392,7 @@ const struct memory_provider_ops xsk_pp_ops = {
 	.release_netmem	= xsk_pp_release_netmem,
 	.nl_fill	= xsk_pp_nl_fill,
 	.uninstall	= xsk_pp_uninstall,
+	.refill_done	= xsk_pp_refill_done,
 	.caps		= MP_CAP_READABLE,
 };
 
@@ -596,6 +666,7 @@ int xsk_pp_bind(struct xsk_buff_pool *pool, struct net_device *dev,
 
 	netdev_hold(phys, &pp->dev_tracker, GFP_KERNEL);
 	pp->netdev = phys;
+	rcu_assign_pointer(pp->rxq, __netif_get_rx_queue(phys, phys_qid));
 	mp.mp_priv = pp;
 	mp.rx_page_size = pool->chunk_size;
 	mp.rx_headroom = xsk_pool_get_headroom(pool);
@@ -606,10 +677,17 @@ int xsk_pp_bind(struct xsk_buff_pool *pool, struct net_device *dev,
 		/* A max_mtu of zero means no limit */
 		if (phys->max_mtu)
 			pool->tx_max_frame = phys->max_mtu + ETH_HLEN;
+		/* A wakeup flag cleared and set by the kernel could miss a
+		 * FILL entry posted meanwhile, see xsk_pp_refill_done().
+		 */
+		if (pool->uses_need_wakeup)
+			xsk_set_rx_need_wakeup(pool);
 		return 0;
 	}
 
 	/* The queue stopped, or never ran with the provider. */
+	RCU_INIT_POINTER(pp->rxq, NULL);
+	synchronize_net();
 	netdev_put(phys, &pp->dev_tracker);
 	pp->netdev = NULL;
 	xp_dma_unmap(pool, XSK_PP_DMA_ATTR);

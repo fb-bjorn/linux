@@ -940,43 +940,129 @@ static void fbnic_bd_prep(struct fbnic_ring *bdq, u16 id, netmem_ref netmem)
 	} while (--i);
 }
 
+/* Post one buffer at @tail. Return false if the page pool has none. */
+static bool fbnic_fill_bdq_one(struct fbnic_ring *bdq, unsigned int *tail)
+{
+	netmem_ref netmem;
+
+	netmem = page_pool_dev_alloc_netmems(bdq->page_pool);
+	if (!netmem) {
+		u64_stats_update_begin(&bdq->stats.syncp);
+		bdq->stats.bdq.alloc_failed++;
+		u64_stats_update_end(&bdq->stats.syncp);
+
+		return false;
+	}
+
+	fbnic_page_pool_init(bdq, *tail, netmem);
+	fbnic_bd_prep(bdq, *tail, netmem);
+
+	*tail = (*tail + 1) & bdq->size_mask;
+	return true;
+}
+
+static void fbnic_fill_bdq_done(struct fbnic_ring *bdq, unsigned int tail)
+{
+	if (bdq->tail == tail)
+		return;
+
+	bdq->tail = tail;
+
+	/* Force DMA writes to flush before writing to tail */
+	dma_wmb();
+
+	writel(tail * fbnic_bd_page_count(bdq), bdq->doorbell);
+}
+
+static enum pp_refill fbnic_bdq_state(struct fbnic_ring *bdq)
+{
+	return fbnic_desc_unused(bdq) ? PP_REFILL_PARTIAL : PP_REFILL_FULL;
+}
+
+/* Post buffers until the ring is full or its page pool has none. */
 static void fbnic_fill_bdq(struct fbnic_ring *bdq)
 {
 	unsigned int count = fbnic_desc_unused(bdq);
-	unsigned int i = bdq->tail;
+	unsigned int tail = bdq->tail;
 
-	if (!count)
-		return;
+	while (count-- && fbnic_fill_bdq_one(bdq, &tail))
+		;
 
-	do {
-		netmem_ref netmem;
+	fbnic_fill_bdq_done(bdq, tail);
+}
 
-		netmem = page_pool_dev_alloc_netmems(bdq->page_pool);
-		if (!netmem) {
-			u64_stats_update_begin(&bdq->stats.syncp);
-			bdq->stats.bdq.alloc_failed++;
-			u64_stats_update_end(&bdq->stats.syncp);
+/* Buffers each ring of a shared page pool gets first */
+#define FBNIC_SHARED_BDQ_MIN	NAPI_POLL_WEIGHT
 
-			break;
+/* Does the next buffer of a page pool shared by both rings go to the header
+ * ring? Every packet takes a header buffer, and a long one payload buffers.
+ * Until both rings hold FBNIC_SHARED_BDQ_MIN buffers, the ring with fewer gets
+ * it, the header ring on a tie, so a pool with few buffers leaves some in
+ * each ring. After that, a buffer goes to the ring with the smaller share of
+ * its capacity posted: a ring that uses more buffers, like the payload ring
+ * with jumbo frames, gets more.
+ */
+static bool fbnic_hpq_takes_next(const struct fbnic_ring *hpq,
+				 unsigned int hpq_cnt,
+				 const struct fbnic_ring *ppq,
+				 unsigned int ppq_cnt)
+{
+	u64 hpq_posted = hpq->size_mask - hpq_cnt;
+	u64 ppq_posted = ppq->size_mask - ppq_cnt;
+
+	if (!hpq_cnt)
+		return false;
+	if (!ppq_cnt)
+		return true;
+	if (min(hpq_posted, ppq_posted) < FBNIC_SHARED_BDQ_MIN)
+		return hpq_posted <= ppq_posted;
+
+	return hpq_posted * ppq->size_mask <= ppq_posted * hpq->size_mask;
+}
+
+static void fbnic_fill_shared_bdqs(struct fbnic_ring *hpq,
+				   struct fbnic_ring *ppq)
+{
+	unsigned int hpq_cnt = fbnic_desc_unused(hpq);
+	unsigned int ppq_cnt = fbnic_desc_unused(ppq);
+	unsigned int hpq_tail = hpq->tail;
+	unsigned int ppq_tail = ppq->tail;
+	bool more = true;
+
+	while (more && (hpq_cnt || ppq_cnt)) {
+		if (fbnic_hpq_takes_next(hpq, hpq_cnt, ppq, ppq_cnt)) {
+			more = fbnic_fill_bdq_one(hpq, &hpq_tail);
+			hpq_cnt -= more;
+		} else {
+			more = fbnic_fill_bdq_one(ppq, &ppq_tail);
+			ppq_cnt -= more;
 		}
-
-		fbnic_page_pool_init(bdq, i, netmem);
-		fbnic_bd_prep(bdq, i, netmem);
-
-		i++;
-		i &= bdq->size_mask;
-
-		count--;
-	} while (count);
-
-	if (bdq->tail != i) {
-		bdq->tail = i;
-
-		/* Force DMA writes to flush before writing to tail */
-		dma_wmb();
-
-		writel(i * fbnic_bd_page_count(bdq), bdq->doorbell);
 	}
+
+	fbnic_fill_bdq_done(hpq, hpq_tail);
+	fbnic_fill_bdq_done(ppq, ppq_tail);
+}
+
+/* Fill the header and payload rings. Return false to retry soon. */
+static bool fbnic_fill_bdqs(struct fbnic_q_triad *qt)
+{
+	struct fbnic_ring *hpq = &qt->sub0, *ppq = &qt->sub1;
+	enum pp_refill state;
+	bool done;
+
+	if (hpq->page_pool == ppq->page_pool) {
+		fbnic_fill_shared_bdqs(hpq, ppq);
+		state = fbnic_bdq_state(hpq);
+		if (state == PP_REFILL_FULL)
+			state = fbnic_bdq_state(ppq);
+		return page_pool_refill_done(hpq->page_pool, state);
+	}
+
+	fbnic_fill_bdq(hpq);
+	fbnic_fill_bdq(ppq);
+	done = page_pool_refill_done(hpq->page_pool, fbnic_bdq_state(hpq));
+	done &= page_pool_refill_done(ppq->page_pool, fbnic_bdq_state(ppq));
+	return done;
 }
 
 static unsigned int fbnic_hdr_pg_start(unsigned int pg_off,
@@ -1338,6 +1424,7 @@ static int fbnic_clean_rcq(struct fbnic_napi_vector *nv,
 	__le64 *raw_rcd, done;
 	bool redirect = false;
 	u32 head = rcq->head;
+	bool filled;
 
 	done = (head & (rcq->size_mask + 1)) ? cpu_to_le64(FBNIC_RCD_DONE) : 0;
 	raw_rcd = &rcq->desc[head & rcq->size_mask];
@@ -1450,11 +1537,10 @@ next_dont_count:
 	/* Unmap and free processed buffers */
 	if (head0 >= 0)
 		fbnic_clean_bdq(&qt->sub0, head0, budget);
-	fbnic_fill_bdq(&qt->sub0);
-
 	if (head1 >= 0)
 		fbnic_clean_bdq(&qt->sub1, head1, budget);
-	fbnic_fill_bdq(&qt->sub1);
+	/* Netpoll polls with IRQs off and no budget, and receives nothing */
+	filled = !budget || fbnic_fill_bdqs(qt);
 
 	/* Record the current head/tail of the queue */
 	if (rcq->head != head) {
@@ -1462,7 +1548,8 @@ next_dont_count:
 		writel(head & rcq->size_mask, rcq->doorbell);
 	}
 
-	return packets;
+	/* A full budget makes NAPI poll again and retry the refill. */
+	return filled ? packets : budget;
 }
 
 static void fbnic_nv_irq_disable(struct fbnic_napi_vector *nv)
@@ -2639,9 +2726,10 @@ static void fbnic_nv_fill(struct fbnic_napi_vector *nv)
 	for (j = 0, t = nv->txt_count; j < nv->rxt_count; j++, t++) {
 		struct fbnic_q_triad *qt = &nv->qt[t];
 
-		/* Populate the header and payload BDQs */
-		fbnic_fill_bdq(&qt->sub0);
-		fbnic_fill_bdq(&qt->sub1);
+		/* Populate the header and payload BDQs. NAPI runs after the
+		 * start, see __fbnic_nv_restart(), and retries a short refill.
+		 */
+		fbnic_fill_bdqs(qt);
 	}
 }
 

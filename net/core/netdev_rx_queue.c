@@ -128,6 +128,101 @@ bool netif_all_mps_have_cap(struct net_device *dev, u32 cap)
 	return true;
 }
 
+/**
+ * netif_mp_wake - schedule the NAPI that refills a memory provider queue
+ * @rxq: physical RX queue of the provider
+ *
+ * Call this when buffers become available to a queue that waits for them,
+ * or when userspace asks for a wakeup. The caller keeps the device of @rxq
+ * alive. Context: process or softirq.
+ *
+ * Return: false if the queue does not run.
+ */
+bool netif_mp_wake(struct netdev_rx_queue *rxq)
+{
+	struct napi_struct *napi;
+	bool running = false;
+
+	rcu_read_lock();
+	napi = rcu_dereference(rxq->mp_napi);
+	if (napi) {
+		/* local_bh_enable() runs a NET_RX softirq raised here */
+		local_bh_disable();
+		napi_schedule(napi);
+		local_bh_enable();
+		running = true;
+	}
+	rcu_read_unlock();
+
+	return running;
+}
+
+/* Point provider wakeups at the NAPI of the running queue. Once set, schedule
+ * NAPI: a refill while the queue started may have found no buffers, and
+ * wakeups until now found no NAPI.
+ */
+void netif_mp_update_napi(struct netdev_rx_queue *rxq)
+{
+	const struct memory_provider_ops *ops = rxq->mp_params.mp_ops;
+	struct napi_struct *napi = NULL;
+
+	if (rxq->mp_armed && ops && ops->refill_done)
+		napi = rxq->napi;
+	if (rcu_access_pointer(rxq->mp_napi) == napi)
+		return;
+
+	rcu_assign_pointer(rxq->mp_napi, napi);
+	if (napi)
+		netif_mp_wake(rxq);
+}
+
+/* The queue runs with its current configuration. */
+static void netif_mp_arm_napi(struct netdev_rx_queue *rxq)
+{
+	rxq->mp_armed = true;
+	netif_mp_update_napi(rxq);
+}
+
+/* The queue stops. Its NAPI stays valid until netif_napi_del(). */
+static void netif_mp_disarm_napi(struct netdev_rx_queue *rxq)
+{
+	rxq->mp_armed = false;
+	RCU_INIT_POINTER(rxq->mp_napi, NULL);
+}
+
+void netif_mp_arm_dev(struct net_device *dev)
+{
+	unsigned int i;
+
+	for (i = 0; i < dev->real_num_rx_queues; i++)
+		netif_mp_arm_napi(__netif_get_rx_queue(dev, i));
+}
+
+void netif_mp_disarm_dev(struct net_device *dev)
+{
+	unsigned int i;
+
+	for (i = 0; i < dev->num_rx_queues; i++)
+		netif_mp_disarm_napi(&dev->_rx[i]);
+}
+
+/* The grace period of netif_napi_del() covers wakeups that found @napi. */
+void netif_mp_napi_del(struct napi_struct *napi)
+{
+	struct net_device *dev = napi->dev;
+	unsigned int i;
+
+	/* Only a registered device publishes NAPIs. free_netdev() frees the
+	 * queues before it deletes the remaining NAPIs.
+	 */
+	if (dev->reg_state != NETREG_REGISTERED)
+		return;
+
+	for (i = 0; i < dev->num_rx_queues; i++)
+		if (rcu_access_pointer(dev->_rx[i].mp_napi) == napi)
+			RCU_INIT_POINTER(dev->_rx[i].mp_napi, NULL);
+}
+
 static int netdev_rx_queue_reconfig(struct net_device *dev,
 				    unsigned int rxq_idx,
 				    struct netdev_queue_config *qcfg_old,
@@ -167,6 +262,7 @@ static int netdev_rx_queue_reconfig(struct net_device *dev,
 		goto err_free_new_queue_mem;
 
 	if (netif_running(dev)) {
+		netif_mp_disarm_napi(rxq);
 		err = qops->ndo_queue_stop(dev, old_mem, rxq_idx);
 		if (err) {
 			*state = NETDEV_RXQ_UNCERTAIN;
@@ -176,6 +272,7 @@ static int netdev_rx_queue_reconfig(struct net_device *dev,
 		err = qops->ndo_queue_start(dev, qcfg_new, new_mem, rxq_idx);
 		if (err)
 			goto err_start_queue;
+		netif_mp_arm_napi(rxq);
 	} else {
 		swap(new_mem, old_mem);
 	}
@@ -224,6 +321,10 @@ int netdev_rx_queue_restart(struct net_device *dev, unsigned int rxq_idx)
 
 	netdev_queue_config(dev, rxq_idx, &qcfg);
 	err = netdev_rx_queue_reconfig(dev, rxq_idx, &qcfg, &qcfg, &state);
+	/* The old queue may run again, with the same provider. */
+	if (err && (state == NETDEV_RXQ_OLD || state == NETDEV_RXQ_UNCERTAIN) &&
+	    netif_running(dev))
+		netif_mp_arm_napi(__netif_get_rx_queue(dev, rxq_idx));
 	netif_mp_rearm_close(dev);
 
 	return err;

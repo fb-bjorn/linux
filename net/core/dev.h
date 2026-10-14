@@ -129,6 +129,10 @@ void __netif_mp_uninstall_rxq(struct netdev_rx_queue *rxq,
 			      enum mp_uninstall_reason reason);
 void netif_mp_retry_close(struct net_device *dev);
 void netif_mp_rearm_close(struct net_device *dev);
+void netif_mp_update_napi(struct netdev_rx_queue *rxq);
+void netif_mp_arm_dev(struct net_device *dev);
+void netif_mp_disarm_dev(struct net_device *dev);
+void netif_mp_napi_del(struct napi_struct *napi);
 
 void netif_rxq_cleanup_unlease(struct netdev_rx_queue *phys_rxq);
 
