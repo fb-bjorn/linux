@@ -39,9 +39,11 @@ struct xsk_pp {
 	bool dma_need_sync;
 	struct net_device *netdev;
 	netdevice_tracker dev_tracker;
+	struct netdev_rx_queue __rcu *rxq;
 	bool dma_stopped;
 	bool owns_pool;
 	struct work_struct release_work;
+	bool starved;
 	u8 *state;
 	u32 reuse_cnt;
 	u32 reuse[];
@@ -232,11 +234,31 @@ static netmem_ref xsk_pp_alloc_netmems(struct page_pool *pool, gfp_t gfp)
 	return netmems[n - 1];
 }
 
+static bool xsk_pp_wake(struct xsk_pp *pp)
+{
+	struct netdev_rx_queue *rxq;
+	bool running = false;
+
+	rcu_read_lock();
+	rxq = rcu_dereference(pp->rxq);
+	if (rxq)
+		running = netif_mp_wake(rxq);
+	rcu_read_unlock();
+
+	return running;
+}
+
+int xsk_pp_wakeup(struct xsk_pp *pp)
+{
+	return xsk_pp_wake(pp) ? 0 : -ENETDOWN;
+}
+
 static bool xsk_pp_release_netmem(struct page_pool *pool, netmem_ref netmem)
 {
 	struct net_iov *niov = netmem_to_net_iov(netmem);
 	struct xsk_pp *pp = pool->mp_priv;
 	u32 idx = net_iov_idx(niov);
+	bool starved;
 
 	spin_lock_bh(&pp->lock);
 	net_mp_niov_clear_page_pool(niov);
@@ -245,9 +267,45 @@ static bool xsk_pp_release_netmem(struct page_pool *pool, netmem_ref netmem)
 		pp->state[idx] = XSK_PP_REUSE;
 		pp->reuse[pp->reuse_cnt++] = idx;
 	}
+	starved = pp->starved;
+	WRITE_ONCE(pp->starved, false);
 	spin_unlock_bh(&pp->lock);
 
+	/* A starved queue may wait for this release */
+	if (starved)
+		xsk_pp_wake(pp);
+
 	return false;
+}
+
+static bool xsk_pp_refill_done(struct page_pool *pool, enum pp_refill state)
+{
+	struct xsk_pp *pp = pool->mp_priv;
+	struct xsk_buff_pool *xp = pp->pool;
+	bool wait = xp->uses_need_wakeup;
+	bool more;
+
+	if (state == PP_REFILL_FULL && !READ_ONCE(pp->starved))
+		return true;
+
+	spin_lock_bh(&pp->lock);
+	if (!pp->fq) {
+		spin_unlock_bh(&pp->lock);
+		return true;
+	}
+
+	if (state == PP_REFILL_FULL) {
+		WRITE_ONCE(pp->starved, false);
+		spin_unlock_bh(&pp->lock);
+		return true;
+	}
+
+	/* With need_wakeup, userspace wakes the queue after it posts FILL */
+	more = pp->reuse_cnt || xskq_cons_nb_entries(pp->fq, 1);
+	WRITE_ONCE(pp->starved, !more);
+	spin_unlock_bh(&pp->lock);
+
+	return !more && wait;
 }
 
 static int xsk_pp_nl_fill(void *mp_priv, struct sk_buff *rsp,
@@ -263,6 +321,7 @@ static void xsk_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq,
 	struct xsk_pp *pp = mp_priv;
 	bool owns;
 
+	RCU_INIT_POINTER(pp->rxq, NULL);
 	if (reason == MP_UNINSTALL_LOGICAL_ONLY) {
 		spin_lock_bh(&pp->lock);
 		pp->fq = NULL;
@@ -271,7 +330,7 @@ static void xsk_pp_uninstall(void *mp_priv, struct netdev_rx_queue *rxq,
 	}
 
 	__xsk_clear_pool_at_qid(rxq->dev, get_netdev_rx_queue_index(rxq));
-	/* Wait for recycles that sync chunks */
+	/* Wait for recycles that sync chunks, and for wakeups */
 	synchronize_net();
 	xp_dma_unmap(pp->pool, XSK_PP_DMA_ATTR);
 	netdev_put(pp->netdev, &pp->dev_tracker);
@@ -294,6 +353,7 @@ const struct memory_provider_ops xsk_pp_ops = {
 	.release_netmem	= xsk_pp_release_netmem,
 	.nl_fill	= xsk_pp_nl_fill,
 	.uninstall	= xsk_pp_uninstall,
+	.refill_done	= xsk_pp_refill_done,
 	.caps		= MP_CAP_READABLE,
 };
 
@@ -527,6 +587,7 @@ int xsk_pp_bind(struct xsk_buff_pool *pool, struct net_device *dev,
 
 	netdev_hold(phys, &pp->dev_tracker, GFP_KERNEL);
 	pp->netdev = phys;
+	rcu_assign_pointer(pp->rxq, __netif_get_rx_queue(phys, phys_qid));
 	mp.mp_priv = pp;
 	mp.rx_page_size = pool->chunk_size;
 	mp.rx_headroom = xsk_pool_get_headroom(pool);
@@ -537,9 +598,14 @@ int xsk_pp_bind(struct xsk_buff_pool *pool, struct net_device *dev,
 		/* A max_mtu of zero means no limit */
 		if (phys->max_mtu)
 			pool->tx_max_frame = phys->max_mtu + VLAN_ETH_HLEN;
+		/* See xsk_pp_refill_done() */
+		if (pool->uses_need_wakeup)
+			xsk_set_rx_need_wakeup(pool);
 		return 0;
 	}
 
+	RCU_INIT_POINTER(pp->rxq, NULL);
+	synchronize_net();
 	netdev_put(phys, &pp->dev_tracker);
 	pp->netdev = NULL;
 	xp_dma_unmap(pool, XSK_PP_DMA_ATTR);
