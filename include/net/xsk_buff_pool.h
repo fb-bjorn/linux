@@ -11,6 +11,7 @@
 #include <net/xdp.h>
 
 struct xsk_buff_pool;
+struct xsk_pp;
 struct xdp_rxq_info;
 struct xsk_cb_desc;
 struct xsk_queue;
@@ -60,6 +61,8 @@ struct xsk_buff_pool {
 	refcount_t users;
 	struct xdp_umem *umem;
 	struct xsk_dma_map *dma_map;
+	/* page pool memory provider, see net/xdp/xsk_pp.c */
+	struct xsk_pp *pp;
 	struct work_struct work;
 	/* Protects generic receive in shared and non-shared umem mode. */
 	spinlock_t rx_lock;
@@ -90,6 +93,8 @@ struct xsk_buff_pool {
 	u32 reclaim_descs;
 	u32 tx_zc_pending_descs;
 	u32 xdp_zc_max_segs;
+	/* largest TX frame of a page pool provider queue, or 0 */
+	u32 tx_max_frame;
 	u8 tx_metadata_len; /* inherited from umem */
 	u8 cached_need_wakeup;
 	bool uses_need_wakeup;

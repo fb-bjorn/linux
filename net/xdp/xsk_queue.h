@@ -239,7 +239,9 @@ static inline bool xskq_cons_is_valid_desc(struct xsk_queue *q,
 					   struct xdp_desc *d,
 					   struct xsk_buff_pool *pool)
 {
-	if (!xp_validate_desc(pool, d)) {
+	/* A page pool provider queue sends frames as they are. */
+	if (!xp_validate_desc(pool, d) ||
+	    unlikely(pool->tx_max_frame && d->len > pool->tx_max_frame)) {
 		q->invalid_descs++;
 		return false;
 	}
@@ -282,7 +284,7 @@ xskq_cons_read_desc_batch(struct xdp_sock *xs, struct xsk_buff_pool *pool,
 	u32 cached_cons, nb_entries = 0;
 	struct xsk_tx_batch batch = {};
 	struct xsk_queue *q = xs->tx;
-	u32 nr_frags = 0;
+	u32 nr_frags = 0, len = 0;
 
 	cached_cons = q->cached_cons;
 
@@ -297,6 +299,14 @@ xskq_cons_read_desc_batch(struct xdp_sock *xs, struct xsk_buff_pool *pool,
 		if (unlikely(!parsed.valid))
 			drain = true;
 
+		/* As for one descriptor, the whole frame must fit. */
+		len += descs[nb_entries].len;
+		if (unlikely(pool->tx_max_frame && len > pool->tx_max_frame &&
+			     !drain)) {
+			q->invalid_descs++;
+			drain = true;
+		}
+
 		nr_frags++;
 		nb_entries++;
 
@@ -310,6 +320,7 @@ xskq_cons_read_desc_batch(struct xdp_sock *xs, struct xsk_buff_pool *pool,
 
 			batch.tx_descs += nr_frags;
 			nr_frags = 0;
+			len = 0;
 			continue;
 		}
 

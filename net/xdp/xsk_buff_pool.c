@@ -50,6 +50,8 @@ void xp_destroy(struct xsk_buff_pool *pool)
 	if (pool->dma_map)
 		xp_dma_orphan(pool);
 
+	if (pool->pp)
+		xsk_pp_put(pool->pp);
 	kvfree(pool->tx_descs);
 	kvfree(pool->heads);
 	kvfree(pool);
@@ -222,6 +224,15 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 		/* For copy-mode, we are done. */
 		return 0;
 
+	if (xsk_pp_supported(netdev, queue_id)) {
+		err = xsk_pp_bind(pool, netdev, queue_id);
+		if (err)
+			goto err_unreg_pool;
+
+		pool->umem->zc = true;
+		return 0;
+	}
+
 	if ((netdev->xdp_features & NETDEV_XDP_ACT_XSK) != NETDEV_XDP_ACT_XSK) {
 		err = -EOPNOTSUPP;
 		goto err_unreg_pool;
@@ -274,7 +285,8 @@ int xp_assign_dev(struct xsk_buff_pool *pool,
 err_unreg_xsk:
 	xp_disable_drv_zc(pool);
 err_unreg_pool:
-	if (!force_zc)
+	/* An old page pool may still own chunks of a failed provider. */
+	if (!force_zc && !pool->pp)
 		err = 0; /* fallback to copy mode */
 	if (err) {
 		xsk_clear_pool_at_qid(netdev, queue_id);
@@ -308,22 +320,26 @@ void xp_clear_dev(struct xsk_buff_pool *pool)
 		return;
 
 	netdev_lock_ops(netdev);
-	xp_disable_drv_zc(pool);
-	xsk_clear_pool_at_qid(pool->netdev, pool->queue_id);
+	if (pool->pp) {
+		struct pp_memory_provider_params mp = {
+			.mp_ops = &xsk_pp_ops,
+			.mp_priv = pool->pp,
+		};
+
+		/* The provider uninstall frees the queue. */
+		netif_mp_close_rxq(netdev, pool->queue_id, &mp);
+	} else {
+		xp_disable_drv_zc(pool);
+		xsk_clear_pool_at_qid(pool->netdev, pool->queue_id);
+	}
 	pool->netdev = NULL;
 	netdev_unlock_ops(netdev);
 	dev_put(netdev);
 }
 
-static void xp_release_deferred(struct work_struct *work)
+void xp_release_storage(struct xsk_buff_pool *pool)
 {
-	struct xsk_buff_pool *pool = container_of(work, struct xsk_buff_pool,
-						  work);
 	struct xdp_umem *umem = pool->umem;
-
-	rtnl_lock();
-	xp_clear_dev(pool);
-	rtnl_unlock();
 
 	if (pool->fq) {
 		xskq_destroy(pool->fq);
@@ -338,6 +354,22 @@ static void xp_release_deferred(struct work_struct *work)
 	/* Count a kept mapping as orphaned first, see xp_dma_umem_gone(). */
 	xp_destroy(pool);
 	xdp_put_umem(umem, false);
+}
+
+static void xp_release_deferred(struct work_struct *work)
+{
+	struct xsk_buff_pool *pool = container_of(work, struct xsk_buff_pool,
+						  work);
+
+	rtnl_lock();
+	xp_clear_dev(pool);
+	rtnl_unlock();
+
+	/* A queue that may still DMA to the UMEM keeps the pool. */
+	if (pool->pp && xsk_pp_keep_pool(pool->pp))
+		return;
+
+	xp_release_storage(pool);
 }
 
 void xp_get_pool(struct xsk_buff_pool *pool)
@@ -597,6 +629,20 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 	return err;
 }
 EXPORT_SYMBOL(xp_dma_map);
+
+/* Map the UMEM for @netdev, which does the DMA for the queue of @pool. */
+int xp_dma_map_dev(struct xsk_buff_pool *pool, struct net_device *netdev,
+		   struct device *dev, unsigned long attrs)
+{
+	int err;
+
+	mutex_lock(&xsk_dma_lock);
+	err = __xp_dma_map(pool, netdev, dev, attrs, pool->umem->pgs,
+			   pool->umem->npgs);
+	mutex_unlock(&xsk_dma_lock);
+
+	return err;
+}
 
 static bool xp_addr_crosses_non_contig_pg(struct xsk_buff_pool *pool,
 					  u64 addr)

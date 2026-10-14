@@ -216,7 +216,8 @@ EXPORT_SYMBOL(netmem_can_retain);
 
 /* See PP_FLAG_MEM_PROVIDER for the selection rules. */
 static int page_pool_select_mp(struct page_pool *pool,
-			       const struct pp_memory_provider_params *mpp)
+			       const struct pp_memory_provider_params *mpp,
+			       u32 rxq_mp_gen)
 {
 	const struct memory_provider_ops *ops = mpp->mp_ops;
 	unsigned int flags = pool->slow.flags;
@@ -235,6 +236,7 @@ static int page_pool_select_mp(struct page_pool *pool,
 
 	pool->mp_priv = mpp->mp_priv;
 	pool->mp_ops = ops;
+	pool->mp_gen = rxq_mp_gen;
 	return 0;
 }
 
@@ -327,7 +329,7 @@ static int page_pool_init(struct page_pool *pool,
 		netdev_assert_locked(pool->slow.netdev);
 		rxq = __netif_get_rx_queue(pool->slow.netdev,
 					   pool->slow.queue_idx);
-		err = page_pool_select_mp(pool, &rxq->mp_params);
+		err = page_pool_select_mp(pool, &rxq->mp_params, rxq->mp_gen);
 		if (err)
 			goto free_ptr_ring;
 	}
