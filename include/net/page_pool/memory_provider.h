@@ -9,6 +9,20 @@ struct netdev_rx_queue;
 struct netlink_ext_ack;
 struct sk_buff;
 
+/**
+ * enum mp_caps - memory provider capabilities
+ * @MP_CAP_READABLE: The CPU can access provider memory. It may back header
+ *	page pools, and XDP programs may run on it.
+ * @MP_CAP_FRAG: Page pool fragments may split provider buffers.
+ * @MP_CAP_RETAIN: The stack may keep page pool references to provider
+ *	buffers after the RX poll, for example in an skb or an xdp_frame.
+ */
+enum mp_caps {
+	MP_CAP_READABLE		= BIT(0),
+	MP_CAP_FRAG		= BIT(1),
+	MP_CAP_RETAIN		= BIT(2),
+};
+
 struct memory_provider_ops {
 	netmem_ref (*alloc_netmems)(struct page_pool *pool, gfp_t gfp);
 	bool (*release_netmem)(struct page_pool *pool, netmem_ref netmem);
@@ -17,6 +31,7 @@ struct memory_provider_ops {
 	int (*nl_fill)(void *mp_priv, struct sk_buff *rsp,
 		       struct netdev_rx_queue *rxq);
 	void (*uninstall)(void *mp_priv, struct netdev_rx_queue *rxq);
+	u32 caps;
 };
 
 bool net_mp_niov_set_dma_addr(struct net_iov *niov, dma_addr_t addr);
@@ -28,6 +43,7 @@ int netif_mp_open_rxq(struct net_device *dev, unsigned int rxq_idx,
 		      struct netlink_ext_ack *extack);
 void netif_mp_close_rxq(struct net_device *dev, unsigned int rxq_idx,
 			const struct pp_memory_provider_params *old_p);
+bool netif_all_mps_have_cap(struct net_device *dev, u32 cap);
 
 /**
   * net_mp_netmem_place_in_cache() - give a netmem to a page pool
