@@ -74,8 +74,8 @@ enum net_iov_type {
  * generally for non-pages memory that doesn't have its corresponding
  * struct page and needs to be explicitly allocated through slab.
  *
- * net_iovs are allocated and used by networking code, and the size of
- * the chunk is PAGE_SIZE.
+ * net_iovs are allocated and used by networking code. Their area sets the
+ * size of a chunk, see net_iov_area.niov_shift.
  *
  * This memory can be any form of non-struct paged memory.  Examples
  * include imported dmabuf memory and imported io_uring memory.  See
@@ -102,6 +102,8 @@ struct net_iov_area {
 	/* Array of net_iovs for this area. */
 	struct net_iov *niovs;
 	size_t num_niovs;
+	/* Each net_iov covers 1 << niov_shift bytes. */
+	unsigned int niov_shift;
 };
 
 static inline struct net_iov_area *net_iov_owner(const struct net_iov *niov)
