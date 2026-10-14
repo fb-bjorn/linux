@@ -250,8 +250,8 @@ int net_devmem_bind_dmabuf_to_queue(struct net_device *dev, u32 rxq_idx,
 	u32 xa_idx;
 	int err;
 
-	if (binding->niov_shift != PAGE_SHIFT)
-		mp_params.rx_page_size = 1U << binding->niov_shift;
+	if (binding->area.niov_shift != PAGE_SHIFT)
+		mp_params.rx_page_size = 1U << binding->area.niov_shift;
 
 	/* Record the queue first, so the provider is never installed on a
 	 * queue that uninstall cannot find.
@@ -308,7 +308,7 @@ net_devmem_bind_dmabuf(struct net_device *dev, void *vdev,
 	binding->vdev = vdev;
 	write_pnet(&binding->net, sock_net(nl_sk));
 	binding->uid = sk_uid(nl_sk);
-	binding->niov_shift = niov_shift;
+	binding->area.niov_shift = niov_shift;
 	xa_init_flags(&binding->bound_rxqs, XA_FLAGS_ALLOC);
 
 	err = percpu_ref_init(&binding->ref,
@@ -552,7 +552,7 @@ int mp_dmabuf_devmem_init(struct page_pool *pool)
 	pool->dma_sync = false;
 	pool->dma_sync_for_cpu = false;
 
-	if (pool->p.order != binding->niov_shift - PAGE_SHIFT)
+	if (pool->p.order != binding->area.niov_shift - PAGE_SHIFT)
 		return -E2BIG;
 
 	net_devmem_dmabuf_binding_get(binding);

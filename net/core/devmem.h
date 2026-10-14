@@ -79,8 +79,6 @@ struct net_devmem_dmabuf_binding {
 	 */
 	struct net_iov **tx_vec;
 
-	unsigned int niov_shift;
-
 	struct work_struct unbind_w;
 };
 
@@ -118,7 +116,7 @@ static inline unsigned long net_iov_virtual_addr(const struct net_iov *niov)
 	struct net_devmem_dmabuf_binding *binding =
 		net_devmem_iov_binding(niov);
 
-	return (unsigned long)net_iov_idx(niov) << binding->niov_shift;
+	return (unsigned long)net_iov_idx(niov) << binding->area.niov_shift;
 }
 
 static inline bool
