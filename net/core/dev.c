@@ -1838,6 +1838,7 @@ static void __dev_close_many(struct list_head *head)
 		netif_rx_mode_cancel_retry(dev);
 		netif_set_up(dev, false);
 		netpoll_poll_enable(dev);
+		netif_mp_rearm_close(dev);
 	}
 }
 
@@ -3584,6 +3585,11 @@ void netif_device_attach(struct net_device *dev)
 		netif_tx_wake_all_queues(dev);
 		netdev_watchdog_up(dev);
 	}
+
+	/* netdev_work skips an absent device, retry provider removals. */
+	if (netdev_need_ops_lock(dev) &&
+	    READ_ONCE(dev->reg_state) == NETREG_REGISTERED)
+		__netdev_work_core_sched(dev, NETDEV_WORK_MP_REARM);
 }
 EXPORT_SYMBOL(netif_device_attach);
 
@@ -12497,14 +12503,21 @@ void unregister_netdevice_queue(struct net_device *dev, struct list_head *head)
 }
 EXPORT_SYMBOL(unregister_netdevice_queue);
 
+/* ndo_stop stopped all DMA of @dev, including queues whose provider removal
+ * was pending. A driver may have lowered real_num_rx_queues without the core
+ * checks, on resume for example, so look at all queues.
+ */
 static void dev_memory_provider_uninstall(struct net_device *dev)
 {
 	unsigned int i;
 
-	for (i = 0; i < dev->real_num_rx_queues; i++) {
+	for (i = 0; i < dev->num_rx_queues; i++) {
 		struct netdev_rx_queue *rxq = &dev->_rx[i];
+		struct pp_memory_provider_params p = rxq->mp_params;
 
-		__netif_mp_uninstall_rxq(rxq, &rxq->mp_params);
+		memset(&rxq->mp_params, 0, sizeof(rxq->mp_params));
+		rxq->mp_close_pending = false;
+		__netif_mp_uninstall_rxq(rxq, &p, MP_UNINSTALL_DMA_STOPPED);
 	}
 }
 

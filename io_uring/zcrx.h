@@ -71,6 +71,8 @@ struct io_zcrx_ifq {
 	spinlock_t			alloc_lock ____cacheline_aligned_in_smp;
 
 	u32				if_rxq;
+	/* the queue may still DMA after removal, protected by ->pp_lock */
+	bool				queue_pending;
 	struct device			*dev;
 	struct net_device		*netdev;
 	netdevice_tracker		netdev_tracker;

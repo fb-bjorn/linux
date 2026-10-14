@@ -23,6 +23,18 @@ enum mp_caps {
 	MP_CAP_RETAIN		= BIT(2),
 };
 
+/**
+ * enum mp_uninstall_reason - why a queue stops using its memory provider
+ * @MP_UNINSTALL_LOGICAL_ONLY: users and virtual devices lose the queue, but
+ *	the physical queue may still DMA to provider memory. Keep the memory
+ *	mapped, and hold a reference until a later %MP_UNINSTALL_DMA_STOPPED.
+ * @MP_UNINSTALL_DMA_STOPPED: the queue no longer DMAs to provider memory.
+ */
+enum mp_uninstall_reason {
+	MP_UNINSTALL_LOGICAL_ONLY,
+	MP_UNINSTALL_DMA_STOPPED,
+};
+
 struct memory_provider_ops {
 	netmem_ref (*alloc_netmems)(struct page_pool *pool, gfp_t gfp);
 	bool (*release_netmem)(struct page_pool *pool, netmem_ref netmem);
@@ -30,7 +42,8 @@ struct memory_provider_ops {
 	void (*destroy)(struct page_pool *pool);
 	int (*nl_fill)(void *mp_priv, struct sk_buff *rsp,
 		       struct netdev_rx_queue *rxq);
-	void (*uninstall)(void *mp_priv, struct netdev_rx_queue *rxq);
+	void (*uninstall)(void *mp_priv, struct netdev_rx_queue *rxq,
+			  enum mp_uninstall_reason reason);
 	u32 caps;
 };
 

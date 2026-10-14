@@ -122,6 +122,10 @@ static void netdev_work_run(struct net_device *dev, unsigned long events,
 
 	if (core & NETDEV_WORK_RX_MODE)
 		netif_rx_mode_run(dev);
+	if (core & NETDEV_WORK_MP_REARM)
+		netif_mp_rearm_close(dev);
+	if (core & NETDEV_WORK_MP_CLOSE)
+		netif_mp_retry_close(dev);
 	if (events && dev->netdev_ops->ndo_work)
 		dev->netdev_ops->ndo_work(dev, events);
 }

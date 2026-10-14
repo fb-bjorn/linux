@@ -39,6 +39,12 @@ struct netdev_rx_queue {
 	 */
 	struct netdev_rx_queue		*lease;
 	netdevice_tracker		lease_tracker;
+
+	/* Removing mp_params failed while the queue kept running. The core
+	 * retries mp_close_tries times before it waits for a device event.
+	 */
+	bool				mp_close_pending;
+	u8				mp_close_tries;
 } ____cacheline_aligned_in_smp;
 
 /*
