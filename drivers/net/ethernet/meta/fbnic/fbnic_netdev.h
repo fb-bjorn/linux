@@ -74,6 +74,8 @@ struct fbnic_net {
 	/* Time stamping filter config */
 	struct kernel_hwtstamp_config hwtstamp_config;
 
+	/* Link up and queue starts write RDE_CTL0 under rde_lock */
+	spinlock_t rde_lock;
 	bool tx_pause;
 };
 

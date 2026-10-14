@@ -761,8 +761,15 @@ static void fbnic_page_pool_init(struct fbnic_ring *ring, unsigned int idx,
 {
 	struct fbnic_rx_buf *rx_buf = &ring->rx_buf[idx];
 
-	page_pool_fragment_netmem(netmem, FBNIC_PAGECNT_BIAS_MAX);
-	rx_buf->pagecnt_bias = FBNIC_PAGECNT_BIAS_MAX;
+	/* A pool that cannot split buffers gives one reference. The packet
+	 * takes it, and the buffer may be recycled before its BDQ entry is
+	 * cleaned.
+	 */
+	rx_buf->pagecnt_bias = 1;
+	if (page_pool_supports_frag(ring->page_pool)) {
+		page_pool_fragment_netmem(netmem, FBNIC_PAGECNT_BIAS_MAX);
+		rx_buf->pagecnt_bias = FBNIC_PAGECNT_BIAS_MAX;
+	}
 	rx_buf->netmem = netmem;
 }
 
@@ -792,7 +799,8 @@ static void fbnic_page_pool_drain(struct fbnic_ring *ring, unsigned int idx,
 	struct fbnic_rx_buf *rx_buf = &ring->rx_buf[idx];
 	netmem_ref netmem = rx_buf->netmem;
 
-	if (!page_pool_unref_netmem(netmem, rx_buf->pagecnt_bias))
+	if (rx_buf->pagecnt_bias &&
+	    !page_pool_unref_netmem(netmem, rx_buf->pagecnt_bias))
 		page_pool_put_unrefed_netmem(ring->page_pool, netmem, -1,
 					     !!budget);
 
@@ -993,6 +1001,22 @@ static unsigned int fbnic_hdr_pg_end(unsigned int pg_off, unsigned int len)
 	return ALIGN(pg_off, 128) - FBNIC_RX_HROOM;
 }
 
+/* Buffers that the device may split start with a bias above one. A whole
+ * buffer starts with a bias of one and must take a single descriptor: @ok
+ * tells whether this descriptor shows that.
+ */
+static bool fbnic_bd_one_desc(struct fbnic_napi_vector *nv,
+			      const struct fbnic_ring *bdq, u64 rcd, bool ok)
+{
+	long bias = bdq->rx_buf[fbnic_rcd_bd_idx(bdq, rcd)].pagecnt_bias;
+
+	if (likely(bias > 1 || (bias == 1 && ok)))
+		return true;
+
+	netdev_err_once(nv->napi.dev, "Bad descriptor for a whole RX buffer\n");
+	return false;
+}
+
 static void fbnic_pkt_prepare(struct fbnic_napi_vector *nv, u64 rcd,
 			      struct fbnic_pkt_buff *pkt,
 			      struct fbnic_q_triad *qt)
@@ -1006,6 +1030,17 @@ static void fbnic_pkt_prepare(struct fbnic_napi_vector *nv, u64 rcd,
 
 	/* data_hard_start should always be NULL when this is called */
 	WARN_ON_ONCE(pkt->buff.data_hard_start);
+
+	/* MAX_HDR leaves no room for a second header in a whole buffer, so
+	 * the device closes it, with PAGE_FIN, after the first.
+	 */
+	pkt->add_frag_failed = false;
+	if (unlikely(!fbnic_bd_one_desc(nv, &qt->sub0, rcd,
+					FIELD_GET(FBNIC_RCD_AL_PAGE_FIN,
+						  rcd)))) {
+		pkt->add_frag_failed = true;
+		return;
+	}
 
 	netmem = fbnic_page_pool_get_head(qt, hdr_pg_idx);
 
@@ -1031,7 +1066,6 @@ static void fbnic_pkt_prepare(struct fbnic_napi_vector *nv, u64 rcd,
 			 len - FBNIC_RX_PAD, true);
 
 	pkt->hwtstamp = 0;
-	pkt->add_frag_failed = false;
 }
 
 static void fbnic_add_rx_frag(struct fbnic_napi_vector *nv, u64 rcd,
@@ -1045,7 +1079,19 @@ static void fbnic_add_rx_frag(struct fbnic_napi_vector *nv, u64 rcd,
 	netmem_ref netmem;
 	bool added;
 
+	if (unlikely(!fbnic_bd_one_desc(nv, &qt->sub1, rcd, !pg_off))) {
+		pkt->add_frag_failed = true;
+		return;
+	}
+
 	netmem = fbnic_page_pool_get_data(qt, pg_idx);
+
+	/* Without a header buffer, the packet is dropped. */
+	if (unlikely(!pkt->buff.data_hard_start)) {
+		page_pool_put_full_netmem(qt->sub1.page_pool, netmem, true);
+		pkt->add_frag_failed = true;
+		return;
+	}
 
 	truesize = FIELD_GET(FBNIC_RCD_AL_PAGE_FIN, rcd) ?
 		   FBNIC_BD_PAGE_SIZE - pg_off :
@@ -1608,6 +1654,15 @@ void fbnic_free_napi_vectors(struct fbnic_net *fbn)
 			fbnic_free_napi_vector(fbn, fbn->napi[i]);
 }
 
+/* A whole header buffer holds one header. Let it take all the space after
+ * the headroom, so the device never fits a second header behind it.
+ */
+static u32 fbnic_whole_hdr_max(u32 hroom)
+{
+	return FBNIC_BD_PAGE_SIZE - ALIGN(hroom, FBNIC_RX_HDR_ALIGN) -
+	       FBNIC_RX_TROOM - FBNIC_RX_PAD;
+}
+
 static int
 fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 			  unsigned int rxq_idx, u32 rx_page_size)
@@ -1644,6 +1699,9 @@ fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 		return PTR_ERR(pp);
 
 	qt->sub0.page_pool = pp;
+	qt->hdr_max = 0;
+	if (!page_pool_supports_frag(pp))
+		qt->hdr_max = fbnic_whole_hdr_max(FBNIC_RX_HROOM);
 	if (netif_rxq_has_unreadable_mp(fbn->netdev, rxq_idx)) {
 		pp_params.order = get_order(rx_page_size);
 		pp_params.max_len = rx_page_size;
@@ -2672,6 +2730,14 @@ write_ctl:
 	fbnic_ring_wr32(hpq, FBNIC_QUEUE_BDQ_CTL, bdq_ctl);
 }
 
+static u32 fbnic_drop_mode(struct fbnic_net *fbn, bool tx_pause)
+{
+	if (!tx_pause && fbn->num_rx_queues > 1)
+		return FBNIC_QUEUE_RDE_CTL0_DROP_IMMEDIATE;
+
+	return FBNIC_QUEUE_RDE_CTL0_DROP_NEVER;
+}
+
 static void fbnic_config_drop_mode_rcq(struct fbnic_napi_vector *nv,
 				       struct fbnic_ring *rcq, bool tx_pause,
 				       bool hdr_split)
@@ -2679,10 +2745,7 @@ static void fbnic_config_drop_mode_rcq(struct fbnic_napi_vector *nv,
 	struct fbnic_net *fbn = netdev_priv(nv->napi.dev);
 	u32 drop_mode, rcq_ctl;
 
-	if (!tx_pause && fbn->num_rx_queues > 1)
-		drop_mode = FBNIC_QUEUE_RDE_CTL0_DROP_IMMEDIATE;
-	else
-		drop_mode = FBNIC_QUEUE_RDE_CTL0_DROP_NEVER;
+	drop_mode = fbnic_drop_mode(fbn, tx_pause);
 
 	/* Specify packet layout */
 	rcq_ctl = FIELD_PREP(FBNIC_QUEUE_RDE_CTL0_DROP_MODE_MASK, drop_mode) |
@@ -2693,22 +2756,39 @@ static void fbnic_config_drop_mode_rcq(struct fbnic_napi_vector *nv,
 	fbnic_ring_wr32(rcq, FBNIC_QUEUE_RDE_CTL0, rcq_ctl);
 }
 
+static u32 fbnic_rcq_hds_thresh(const struct fbnic_net *fbn,
+				const struct fbnic_ring *rcq)
+{
+	const struct fbnic_q_triad *qt;
+
+	qt = container_of_const(rcq, struct fbnic_q_triad, cmpl);
+	return qt->hdr_max ? : fbn->hds_thresh;
+}
+
+/* Set the drop mode of all RX queues. A queue start may write the rest of
+ * the register at the same time, from the new queue; keep that part.
+ */
 void fbnic_config_drop_mode(struct fbnic_net *fbn, bool txp)
 {
-	bool hds;
+	struct fbnic_ring *rcq;
+	u32 drop_mode, rcq_ctl;
 	int i, t;
 
-	hds = fbn->hds_thresh < FBNIC_HDR_BYTES_MIN;
-
+	spin_lock(&fbn->rde_lock);
+	fbn->tx_pause = txp;
+	drop_mode = fbnic_drop_mode(fbn, txp);
 	for (i = 0; i < fbn->num_napi; i++) {
 		struct fbnic_napi_vector *nv = fbn->napi[i];
 
 		for (t = 0; t < nv->rxt_count; t++) {
-			struct fbnic_q_triad *qt = &nv->qt[nv->txt_count + t];
-
-			fbnic_config_drop_mode_rcq(nv, &qt->cmpl, txp, hds);
+			rcq = &nv->qt[nv->txt_count + t].cmpl;
+			rcq_ctl = fbnic_ring_rd32(rcq, FBNIC_QUEUE_RDE_CTL0);
+			FIELD_MODIFY(FBNIC_QUEUE_RDE_CTL0_DROP_MODE_MASK,
+				     &rcq_ctl, drop_mode);
+			fbnic_ring_wr32(rcq, FBNIC_QUEUE_RDE_CTL0, rcq_ctl);
 		}
 	}
+	spin_unlock(&fbn->rde_lock);
 }
 
 static void fbnic_config_rim_threshold(struct fbnic_ring *rcq, u16 nv_idx, u32 rx_desc)
@@ -2771,26 +2851,42 @@ void fbnic_config_rx_frames(struct fbnic_napi_vector *nv)
 static void fbnic_enable_rcq(struct fbnic_napi_vector *nv,
 			     struct fbnic_ring *rcq)
 {
+	struct fbnic_q_triad *qt = container_of_const(rcq, struct fbnic_q_triad,
+						     cmpl);
 	struct fbnic_net *fbn = netdev_priv(nv->napi.dev);
+	u32 payld_pg_cl = FBNIC_RX_PAYLD_PG_CL;
+	u32 payld_off = FBNIC_RX_PAYLD_OFFSET;
 	u32 log_size = fls(rcq->size_mask);
 	u32 rcq_ctl = 0;
 	bool hdr_split;
 	u32 hds_thresh;
 
+	/* PAYLD_OFF aligns each payload to 128 << n bytes, and PAYLD_PG_CL
+	 * closes a buffer with less than 128 << n bytes left. At 4 KiB each
+	 * payload starts in a fresh whole buffer, which the device then
+	 * closes, even if it does not report PAGE_FIN for a partial buffer.
+	 */
+	if (!page_pool_supports_frag(qt->sub1.page_pool)) {
+		payld_off = ilog2(FBNIC_BD_PAGE_SIZE / FBNIC_RX_PAYLD_ALIGN);
+		payld_pg_cl = payld_off;
+	}
+
 	/* Force lower bound on MAX_HEADER_BYTES. Below this, all frames should
 	 * be split at L4. It would also result in the frames being split at
 	 * L2/L3 depending on the frame size.
 	 */
-	hdr_split = fbn->hds_thresh < FBNIC_HDR_BYTES_MIN;
+	hds_thresh = fbnic_rcq_hds_thresh(fbn, rcq);
+	hdr_split = hds_thresh < FBNIC_HDR_BYTES_MIN;
+	spin_lock(&fbn->rde_lock);
 	fbnic_config_drop_mode_rcq(nv, rcq, fbn->tx_pause, hdr_split);
+	spin_unlock(&fbn->rde_lock);
 
-	hds_thresh = max(fbn->hds_thresh, FBNIC_HDR_BYTES_MIN);
+	hds_thresh = max(hds_thresh, FBNIC_HDR_BYTES_MIN);
 	rcq_ctl |= FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_PADLEN_MASK, FBNIC_RX_PAD) |
 		   FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_MAX_HDR_MASK, hds_thresh) |
-		   FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_PAYLD_OFF_MASK,
-			      FBNIC_RX_PAYLD_OFFSET) |
+		   FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_PAYLD_OFF_MASK, payld_off) |
 		   FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_PAYLD_PG_CL_MASK,
-			      FBNIC_RX_PAYLD_PG_CL);
+			      payld_pg_cl);
 	fbnic_ring_wr32(rcq, FBNIC_QUEUE_RDE_CTL1, rcq_ctl);
 
 	/* Reset head/tail */

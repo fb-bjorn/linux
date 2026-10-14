@@ -784,6 +784,7 @@ struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 	/* Initialize the hds_thresh */
 	netdev->cfg->hds_thresh = FBNIC_HDS_THRESH_DEFAULT;
 	fbn->hds_thresh = FBNIC_HDS_THRESH_DEFAULT;
+	spin_lock_init(&fbn->rde_lock);
 
 	default_queues = netif_get_num_default_rss_queues();
 	if (default_queues > fbd->max_num_queues)
