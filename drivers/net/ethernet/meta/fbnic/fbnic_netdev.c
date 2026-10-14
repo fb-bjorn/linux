@@ -5,6 +5,7 @@
 #include <linux/ipv6.h>
 #include <linux/types.h>
 #include <net/netdev_queues.h>
+#include <net/xdp_sock_drv.h>
 
 #include "fbnic.h"
 #include "fbnic_netdev.h"
@@ -276,6 +277,7 @@ static int fbnic_set_mac(struct net_device *netdev, void *p)
 static int fbnic_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct fbnic_net *fbn = netdev_priv(dev);
+	int err;
 
 	if (fbnic_check_split_frames(fbn->xdp_prog, new_mtu, fbn->hds_thresh)) {
 		dev_err(&dev->dev,
@@ -284,6 +286,10 @@ static int fbnic_change_mtu(struct net_device *dev, int new_mtu)
 
 		return -EINVAL;
 	}
+
+	err = xsk_validate_dev(dev, new_mtu, NULL, XDP_MODE_DRV, NULL);
+	if (err)
+		return err;
 
 	WRITE_ONCE(dev->mtu, new_mtu);
 
@@ -538,6 +544,20 @@ static int fbnic_bpf(struct net_device *netdev, struct netdev_bpf *bpf)
 {
 	struct bpf_prog *prog = bpf->prog, *prev_prog;
 	struct fbnic_net *fbn = netdev_priv(netdev);
+	const struct xsk_rx_check *check;
+
+	if (bpf->command == XDP_VALIDATE_XSK_POOL) {
+		check = bpf->xsk_check.check;
+		/* A closed device may have fewer queues at the next open */
+		if (check->queue_id >= fbn->num_rx_queues) {
+			NL_SET_ERR_MSG_MOD(bpf->xsk_check.extack,
+					   "RX queue is not configured");
+			return -EOPNOTSUPP;
+		}
+
+		prog = check->prog ? : READ_ONCE(fbn->xdp_prog);
+		return fbnic_xsk_validate(check, prog, bpf->xsk_check.extack);
+	}
 
 	if (bpf->command != XDP_SETUP_PROG)
 		return -EINVAL;
@@ -826,6 +846,11 @@ struct net_device *fbnic_netdev_alloc(struct fbnic_dev *fbd)
 	netdev->xdp_features = NETDEV_XDP_ACT_BASIC |
 			       NETDEV_XDP_ACT_REDIRECT |
 			       NETDEV_XDP_ACT_RX_SG;
+	/* AF_XDP chunks are page pool buffers of one device page */
+	if (IS_ENABLED(CONFIG_PAGE_SIZE_4KB)) {
+		netdev->xdp_features |= NETDEV_XDP_ACT_XSK_ZEROCOPY;
+		netdev->xdp_zc_max_segs = FBNIC_MAX_RX_BUFS;
+	}
 
 	netdev->min_mtu = IPV6_MIN_MTU;
 	netdev->max_mtu = FBNIC_MAX_JUMBO_FRAME_SIZE - ETH_HLEN;

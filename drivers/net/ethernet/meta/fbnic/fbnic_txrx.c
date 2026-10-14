@@ -44,6 +44,9 @@ struct fbnic_xmit_cb {
 
 #define FBNIC_XMIT_NOUNMAP	((void *)1)
 
+/* AF_XDP TX descriptors per pool and poll */
+#define FBNIC_XSK_TX_BUDGET	64
+
 u32 __iomem *fbnic_ring_csr_base(const struct fbnic_ring *ring)
 {
 	unsigned long csr_base = (unsigned long)ring->doorbell;
@@ -658,22 +661,46 @@ static void fbnic_clean_twq0(struct fbnic_napi_vector *nv, int napi_budget,
 	}
 }
 
+/* Completed AF_XDP TX descriptors of one pool, not yet reported */
+struct fbnic_xsk_done {
+	struct xsk_buff_pool *pool;
+	u32 descs;
+};
+
+static void fbnic_xsk_done_flush(struct fbnic_xsk_done *done)
+{
+	if (done->descs)
+		xsk_tx_completed(done->pool, done->descs);
+	done->descs = 0;
+}
+
+static void fbnic_xsk_done_add(struct fbnic_xsk_done *done,
+			       struct xsk_buff_pool *pool)
+{
+	if (done->pool != pool) {
+		fbnic_xsk_done_flush(done);
+		done->pool = pool;
+	}
+	done->descs++;
+}
+
 static void fbnic_clean_twq1(struct fbnic_napi_vector *nv, bool pp_allow_direct,
 			     struct fbnic_ring *ring, bool discard,
 			     unsigned int hw_head)
 {
 	u64 total_bytes = 0, total_packets = 0;
+	struct fbnic_xsk_done done = {};
 	unsigned int head = ring->head;
 
 	while (hw_head != head) {
-		netmem_ref netmem;
+		struct fbnic_xdp_tx_buf *buf;
 		u64 twd;
 
 		if (unlikely(!(ring->desc[head] & FBNIC_TWD_TYPE(AL))))
 			goto next_desc;
 
 		twd = le64_to_cpu(ring->desc[head]);
-		netmem = ring->tx_netmem[head];
+		buf = &ring->xdp_buf[head];
 
 		/* TYPE_AL is 2, TYPE_LAST_AL is 3. So this trick gives
 		 * us one increment per packet, with no branches.
@@ -682,12 +709,17 @@ static void fbnic_clean_twq1(struct fbnic_napi_vector *nv, bool pp_allow_direct,
 				 FBNIC_TWD_TYPE_AL;
 		total_bytes += FIELD_GET(FBNIC_TWD_LEN_MASK, twd);
 
-		page_pool_put_netmem(netmem_get_pp(netmem), netmem, -1,
-				     pp_allow_direct);
+		if (buf->xsk)
+			fbnic_xsk_done_add(&done, buf->xsk);
+		else
+			page_pool_put_netmem(netmem_get_pp(buf->netmem),
+					     buf->netmem, -1, pp_allow_direct);
 next_desc:
 		head++;
 		head &= ring->size_mask;
 	}
+
+	fbnic_xsk_done_flush(&done);
 
 	if (!total_bytes)
 		return;
@@ -1286,7 +1318,8 @@ static long fbnic_pkt_tx(struct fbnic_napi_vector *nv,
 						 DMA_BIDIRECTIONAL);
 		dma += offset;
 
-		ring->tx_netmem[tail] = netmem;
+		ring->xdp_buf[tail].netmem = netmem;
+		ring->xdp_buf[tail].xsk = NULL;
 
 		twd = &ring->desc[tail];
 		*twd = cpu_to_le64(FIELD_PREP(FBNIC_TWD_ADDR_MASK, dma) |
@@ -1569,6 +1602,82 @@ static void fbnic_nv_irq_rearm(struct fbnic_napi_vector *nv)
 		   FBNIC_INTR_CQ_REARM_INTR_UNMASK);
 }
 
+/* Send AF_XDP TX descriptors of @pool. Return false to poll again. */
+static bool fbnic_xsk_tx_pool(struct fbnic_ring *ring,
+			      struct xsk_buff_pool *pool)
+{
+	unsigned int budget, tail = ring->tail;
+	struct xdp_desc *desc;
+	u32 i, count = 0;
+	dma_addr_t dma;
+	u64 type;
+
+	/* Userspace wakes the ring for every batch, as for ice. A flag
+	 * cleared while descriptors are in flight could miss the last one.
+	 */
+	if (xsk_uses_need_wakeup(pool))
+		xsk_set_tx_need_wakeup(pool);
+
+	budget = min3(fbnic_desc_unused(ring), FBNIC_XSK_TX_BUDGET,
+		      pool->tx_descs_nentries);
+	if (budget)
+		count = xsk_tx_peek_release_desc_batch(pool, budget);
+
+	for (i = 0; i < count; i++) {
+		desc = &pool->tx_descs[i];
+		dma = xsk_buff_raw_get_dma(pool, desc->addr);
+		xsk_buff_raw_dma_sync_for_device(pool, dma, desc->len);
+
+		ring->xdp_buf[tail].netmem = 0;
+		ring->xdp_buf[tail].xsk = pool;
+
+		type = xsk_is_eop_desc(desc) ? FBNIC_TWD_TYPE_LAST_AL :
+					       FBNIC_TWD_TYPE_AL;
+		ring->desc[tail] =
+			cpu_to_le64(FIELD_PREP(FBNIC_TWD_ADDR_MASK, dma) |
+				    FIELD_PREP(FBNIC_TWD_LEN_MASK, desc->len) |
+				    FIELD_PREP(FBNIC_TWD_TYPE_MASK, type));
+
+		tail++;
+		tail &= ring->size_mask;
+	}
+	ring->tail = tail;
+
+	/* The batch stops before a packet that does not fit the budget */
+	return !count || budget - count >= pool->xdp_zc_max_segs;
+}
+
+/* Socket TX shares the XDP TX ring of the vector. Its descriptors wait in
+ * the socket TX ring, while XDP_TX drops frames that do not fit. So send
+ * them after RX, and start with another RX queue on each poll.
+ */
+static bool fbnic_xsk_tx(struct fbnic_napi_vector *nv)
+{
+	struct fbnic_ring *ring = &nv->qt[0].sub1;
+	unsigned int tail = ring->tail;
+	struct xsk_buff_pool *pool;
+	unsigned int i, t;
+	bool done = true;
+
+	for (i = 0; i < nv->rxt_count; i++) {
+		t = (nv->xsk_tx_next + i) % nv->rxt_count;
+		pool = nv->qt[nv->txt_count + t].xsk_pool;
+		if (pool && !fbnic_xsk_tx_pool(ring, pool))
+			done = false;
+	}
+	if (nv->rxt_count)
+		nv->xsk_tx_next = (nv->xsk_tx_next + 1) % nv->rxt_count;
+
+	if (tail != ring->tail) {
+		/* Force DMA writes to flush before writing to tail */
+		dma_wmb();
+
+		writel(ring->tail, ring->doorbell);
+	}
+
+	return done;
+}
+
 static int fbnic_poll(struct napi_struct *napi, int budget)
 {
 	struct fbnic_napi_vector *nv = container_of(napi,
@@ -1581,6 +1690,9 @@ static int fbnic_poll(struct napi_struct *napi, int budget)
 
 	for (j = 0; j < nv->rxt_count; j++, i++)
 		work_done += fbnic_clean_rcq(nv, &nv->qt[i], budget);
+
+	if (budget && !fbnic_xsk_tx(nv))
+		work_done = budget;
 
 	if (work_done >= budget)
 		return budget;
@@ -1757,6 +1869,52 @@ static u32 fbnic_whole_hdr_max(u32 hroom)
 	       FBNIC_RX_TROOM - FBNIC_RX_PAD;
 }
 
+/**
+ * fbnic_xsk_validate - check AF_XDP page pool zero copy on an RX queue
+ * @check: AF_XDP setup of the queue
+ * @prog: XDP program, or NULL
+ * @extack: netlink extended ack
+ *
+ * Return: 0 if the queue can receive into the AF_XDP chunks, or an error.
+ */
+int fbnic_xsk_validate(const struct xsk_rx_check *check,
+		       struct bpf_prog *prog, struct netlink_ext_ack *extack)
+{
+	if (check->buf_size != FBNIC_BD_PAGE_SIZE) {
+		NL_SET_ERR_MSG_MOD(extack, "AF_XDP chunks must be 4 KiB");
+		return -EOPNOTSUPP;
+	}
+	if (check->headroom > FBNIC_RX_HROOM_MAX ||
+	    !IS_ALIGNED(check->headroom, FBNIC_RX_HDR_ALIGN)) {
+		NL_SET_ERR_MSG_MOD(extack, "AF_XDP headroom is not supported");
+		return -EOPNOTSUPP;
+	}
+
+	/* Frames longer than the header buffer continue in payload buffers,
+	 * which start at offset 0 and so have no room for UMEM headroom or
+	 * TX metadata. The device also takes frames longer than the MTU.
+	 */
+	if (check->sg && (check->headroom != XDP_PACKET_HEADROOM ||
+			  check->tx_metadata_len)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "XDP_USE_SG needs no UMEM headroom or TX metadata");
+		return -EOPNOTSUPP;
+	}
+
+	/* Frames of the MTU, with two VLAN tags, fit one header buffer */
+	if (check->mtu + ETH_HLEN + 2 * VLAN_HLEN <=
+	    fbnic_whole_hdr_max(check->headroom))
+		return 0;
+
+	if (!check->sg || (prog && !prog->aux->xdp_has_frags)) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "MTU needs XDP_USE_SG, and frags in an XDP program");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
 static int
 fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 			  unsigned int rxq_idx,
@@ -1790,6 +1948,7 @@ fbnic_alloc_qt_page_pools(struct fbnic_net *fbn, struct fbnic_q_triad *qt,
 	 * for a socket that takes several buffers per packet.
 	 */
 	xsk = xsk_rxq_pool(fbn->netdev, rxq_idx);
+	qt->xsk_pool = xsk;
 	if (xsk) {
 		pp_params.flags |= PP_FLAG_MEM_PROVIDER;
 		pp_params.rx_roles = PP_RX_ROLE_HEAD;
@@ -1958,7 +2117,8 @@ static int fbnic_alloc_napi_vector(struct fbnic_dev *fbd, struct fbnic_net *fbn,
 		if (xdp_count > 0) {
 			unsigned int xdp_idx = FBNIC_MAX_TXQS + rxq_idx;
 
-			fbnic_ring_init(&qt->sub1, db, xdp_idx, flags);
+			fbnic_ring_init(&qt->sub1, db, xdp_idx,
+					flags | FBNIC_RING_F_XDP);
 			fbn->tx[xdp_idx] = &qt->sub1;
 			xdp_count--;
 		} else {
@@ -2104,6 +2264,9 @@ static int fbnic_alloc_tx_ring_desc(struct fbnic_net *fbn,
 static int fbnic_alloc_tx_ring_buffer(struct fbnic_ring *txr)
 {
 	size_t size = array_size(sizeof(*txr->tx_buf), txr->size_mask + 1);
+
+	if (txr->flags & FBNIC_RING_F_XDP)
+		size = array_size(sizeof(*txr->xdp_buf), txr->size_mask + 1);
 
 	txr->tx_buf = kvzalloc(size, GFP_KERNEL | __GFP_NOWARN);
 
@@ -2627,6 +2790,15 @@ int fbnic_wait_all_queues_idle(struct fbnic_dev *fbd, bool may_fail)
 	return err;
 }
 
+/* Hardware queue of @qt, from the CSRs of its completion ring */
+static unsigned int fbnic_qt_hw_idx(const struct fbnic_dev *fbd,
+				    const struct fbnic_q_triad *qt)
+{
+	u32 __iomem *csr0 = &fbd->uc_addr0[FBNIC_QUEUE(0)];
+
+	return (fbnic_ring_csr_base(&qt->cmpl) - csr0) / FBNIC_QUEUE_STRIDE;
+}
+
 static int
 fbnic_wait_queue_idle(struct fbnic_net *fbn, bool rx, unsigned int idx)
 {
@@ -2681,6 +2853,7 @@ static void fbnic_nv_flush(struct fbnic_napi_vector *nv)
 
 		/* Reset completion queue descriptor ring */
 		memset(qt->cmpl.desc, 0, qt->cmpl.size);
+		qt->cmpl.deferred_head = -1;
 
 		/* Nothing else to do if Tx queue is disabled */
 		if (qt->sub0.flags & FBNIC_RING_F_DISABLED)
@@ -3338,9 +3511,13 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 		netif_stop_subqueue(dev, nv->qt[i].sub0.q_idx);
 	fbnic_nv_disable(fbn, nv);
 
+	/* sub0.q_idx is 0 for RX triads, and for the XDP TX triad of a
+	 * vector without TX queues.
+	 */
 	for (t = 0; t < nv->txt_count + nv->rxt_count; t++) {
-		err = fbnic_wait_queue_idle(fbn, t >= nv->txt_count,
-					    nv->qt[t].sub0.q_idx);
+		unsigned int hw_idx = fbnic_qt_hw_idx(fbn->fbd, &nv->qt[t]);
+
+		err = fbnic_wait_queue_idle(fbn, t >= nv->txt_count, hw_idx);
 		if (err)
 			goto err_restart;
 	}
@@ -3369,4 +3546,5 @@ const struct netdev_queue_mgmt_ops fbnic_queue_mgmt_ops = {
 	.ndo_default_qcfg	= fbnic_default_qcfg,
 	.ndo_validate_qcfg	= fbnic_validate_qcfg,
 	.supported_params	= QCFG_RX_PAGE_SIZE | QCFG_RX_HEADROOM,
+	.xsk_page_pool		= true,
 };

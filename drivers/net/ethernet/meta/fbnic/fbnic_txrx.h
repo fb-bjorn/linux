@@ -14,7 +14,11 @@
 
 #include "fbnic_csr.h"
 
+struct bpf_prog;
 struct fbnic_net;
+struct netlink_ext_ack;
+struct xsk_buff_pool;
+struct xsk_rx_check;
 
 /* Guarantee we have space needed for storing the buffer
  * To store the buffer we need:
@@ -36,6 +40,8 @@ struct fbnic_net;
  */
 #define FBNIC_MAX_RX_PKT_DESC	7
 #define FBNIC_RX_DESC_MIN	roundup_pow_of_two(FBNIC_MAX_RX_PKT_DESC * 2)
+/* Header and payload buffers of the worst case packet */
+#define FBNIC_MAX_RX_BUFS	(FBNIC_MAX_RX_PKT_DESC - 2)
 
 #define FBNIC_MAX_TXQS			128u
 #define FBNIC_MAX_RXQS			128u
@@ -76,6 +82,7 @@ struct fbnic_net;
 #define FBNIC_RING_F_DISABLED		BIT(0)
 #define FBNIC_RING_F_CTX		BIT(1)
 #define FBNIC_RING_F_STATS		BIT(2)	/* Ring's stats may be used */
+#define FBNIC_RING_F_XDP		BIT(3)	/* XDP TX ring */
 
 #define FBNIC_HDS_THRESH_MAX \
 	(4096 - FBNIC_RX_HROOM - FBNIC_RX_TROOM - FBNIC_RX_PAD)
@@ -123,12 +130,18 @@ struct fbnic_rx_buf {
 	long pagecnt_bias;
 };
 
+/* XDP TX ring entry: an XDP_TX buffer, or an AF_XDP TX descriptor */
+struct fbnic_xdp_tx_buf {
+	netmem_ref netmem;
+	struct xsk_buff_pool *xsk;
+};
+
 struct fbnic_ring {
 	/* Pointer to buffer specific info */
 	union {
 		struct fbnic_pkt_buff *pkt;	/* RCQ */
 		struct fbnic_rx_buf *rx_buf;	/* BDQ */
-		netmem_ref *tx_netmem;		/* TWQ1 */
+		struct fbnic_xdp_tx_buf *xdp_buf; /* TWQ1 */
 		void **tx_buf;			/* TWQ */
 		void *buffer;			/* Generic pointer */
 	};
@@ -171,6 +184,7 @@ struct fbnic_q_triad {
 	u16 hdr_max;	/* Header bytes for whole header buffers, or 0 */
 	u16 rx_hroom;	/* Headroom before the first header in a buffer */
 	u16 rx_frame_off; /* Offset of the frame in a header buffer */
+	struct xsk_buff_pool *xsk_pool;	/* AF_XDP pool of an RX queue */
 };
 
 struct fbnic_napi_vector {
@@ -182,6 +196,7 @@ struct fbnic_napi_vector {
 	u16 v_idx;
 	u8 txt_count;
 	u8 rxt_count;
+	u8 xsk_tx_next;		/* RX queue that sends socket TX first */
 
 	struct fbnic_q_triad qt[];
 };
@@ -207,6 +222,8 @@ void fbnic_aggregate_ring_tx_counters(struct fbnic_net *fbn,
 void fbnic_aggregate_ring_xdp_counters(struct fbnic_net *fbn,
 				       struct fbnic_ring *xdpr);
 
+int fbnic_xsk_validate(const struct xsk_rx_check *check,
+		       struct bpf_prog *prog, struct netlink_ext_ack *extack);
 int fbnic_alloc_napi_vectors(struct fbnic_net *fbn);
 void fbnic_free_napi_vectors(struct fbnic_net *fbn);
 int fbnic_alloc_resources(struct fbnic_net *fbn);
