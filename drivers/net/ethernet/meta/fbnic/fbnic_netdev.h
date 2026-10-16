@@ -74,6 +74,8 @@ struct fbnic_net {
 	/* Time stamping filter config */
 	struct kernel_hwtstamp_config hwtstamp_config;
 
+	/* Orders link up against queue starts and the vector swap */
+	spinlock_t rde_lock;
 	bool tx_pause;
 };
 

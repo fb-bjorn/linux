@@ -2672,6 +2672,8 @@ static void fbnic_config_drop_mode_rcq(struct fbnic_napi_vector *nv,
 	struct fbnic_net *fbn = netdev_priv(nv->napi.dev);
 	u32 drop_mode, rcq_ctl;
 
+	lockdep_assert_held(&fbn->rde_lock);
+
 	if (!tx_pause && fbn->num_rx_queues > 1)
 		drop_mode = FBNIC_QUEUE_RDE_CTL0_DROP_IMMEDIATE;
 	else
@@ -2691,8 +2693,9 @@ void fbnic_config_drop_mode(struct fbnic_net *fbn, bool txp)
 	bool hds;
 	int i, t;
 
+	spin_lock(&fbn->rde_lock);
 	hds = fbn->hds_thresh < FBNIC_HDR_BYTES_MIN;
-
+	fbn->tx_pause = txp;
 	for (i = 0; i < fbn->num_napi; i++) {
 		struct fbnic_napi_vector *nv = fbn->napi[i];
 
@@ -2702,6 +2705,7 @@ void fbnic_config_drop_mode(struct fbnic_net *fbn, bool txp)
 			fbnic_config_drop_mode_rcq(nv, &qt->cmpl, txp, hds);
 		}
 	}
+	spin_unlock(&fbn->rde_lock);
 }
 
 static void fbnic_config_rim_threshold(struct fbnic_ring *rcq, u16 nv_idx, u32 rx_desc)
@@ -2775,7 +2779,9 @@ static void fbnic_enable_rcq(struct fbnic_napi_vector *nv,
 	 * L2/L3 depending on the frame size.
 	 */
 	hdr_split = fbn->hds_thresh < FBNIC_HDR_BYTES_MIN;
+	spin_lock(&fbn->rde_lock);
 	fbnic_config_drop_mode_rcq(nv, rcq, fbn->tx_pause, hdr_split);
+	spin_unlock(&fbn->rde_lock);
 
 	hds_thresh = max(fbn->hds_thresh, FBNIC_HDR_BYTES_MIN);
 	rcq_ctl |= FIELD_PREP(FBNIC_QUEUE_RDE_CTL1_PADLEN_MASK, FBNIC_RX_PAD) |

@@ -221,10 +221,13 @@ static void fbnic_clone_swap(struct fbnic_net *orig,
 	for (i = 0; i < orig->num_napi; i++)
 		fbnic_aggregate_vector_counters(orig, orig->napi[i]);
 
+	/* Link up walks the vectors, see fbnic_config_drop_mode() */
+	spin_lock(&orig->rde_lock);
 	fbnic_clone_swap_cfg(orig, clone);
 
 	for (i = 0; i < ARRAY_SIZE(orig->napi); i++)
 		swap(clone->napi[i], orig->napi[i]);
+	spin_unlock(&orig->rde_lock);
 	for (i = 0; i < ARRAY_SIZE(orig->tx); i++)
 		swap(clone->tx[i], orig->tx[i]);
 	for (i = 0; i < ARRAY_SIZE(orig->rx); i++)
