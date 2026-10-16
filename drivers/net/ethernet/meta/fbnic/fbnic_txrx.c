@@ -2493,6 +2493,7 @@ static void fbnic_nv_flush(struct fbnic_napi_vector *nv)
 
 		/* Reset completion queue descriptor ring */
 		memset(qt->cmpl.desc, 0, qt->cmpl.size);
+		qt->cmpl.deferred_head = -1;
 
 		/* Nothing else to do if Tx queue is disabled */
 		if (qt->sub0.flags & FBNIC_RING_F_DISABLED)
