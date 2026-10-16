@@ -2431,6 +2431,14 @@ int fbnic_wait_all_queues_idle(struct fbnic_dev *fbd, bool may_fail)
 	return err;
 }
 
+static unsigned int fbnic_qt_hw_idx(const struct fbnic_dev *fbd,
+				    const struct fbnic_q_triad *qt)
+{
+	u32 __iomem *csr0 = &fbd->uc_addr0[FBNIC_QUEUE(0)];
+
+	return (fbnic_ring_csr_base(&qt->cmpl) - csr0) / FBNIC_QUEUE_STRIDE;
+}
+
 static int
 fbnic_wait_queue_idle(struct fbnic_net *fbn, bool rx, unsigned int idx)
 {
@@ -3089,9 +3097,13 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 		netif_stop_subqueue(dev, nv->qt[i].sub0.q_idx);
 	fbnic_nv_disable(fbn, nv);
 
+	/* sub0.q_idx is 0 for RX triads, and for the XDP TX triad of a
+	 * vector without TX queues.
+	 */
 	for (t = 0; t < nv->txt_count + nv->rxt_count; t++) {
-		err = fbnic_wait_queue_idle(fbn, t >= nv->txt_count,
-					    nv->qt[t].sub0.q_idx);
+		unsigned int hw_idx = fbnic_qt_hw_idx(fbn->fbd, &nv->qt[t]);
+
+		err = fbnic_wait_queue_idle(fbn, t >= nv->txt_count, hw_idx);
 		if (err)
 			goto err_restart;
 	}
