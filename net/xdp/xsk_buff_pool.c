@@ -344,12 +344,13 @@ bool xp_put_pool(struct xsk_buff_pool *pool)
 	return false;
 }
 
-static struct xsk_dma_map *xp_find_dma_map(struct xsk_buff_pool *pool)
+static struct xsk_dma_map *xp_find_dma_map(struct xsk_buff_pool *pool,
+					   struct device *dev)
 {
 	struct xsk_dma_map *dma_map;
 
 	list_for_each_entry(dma_map, &pool->umem->xsk_dma_list, list) {
-		if (dma_map->netdev == pool->netdev)
+		if (dma_map->netdev == pool->netdev && dma_map->dev == dev)
 			return dma_map;
 	}
 
@@ -411,7 +412,7 @@ void xp_dma_unmap(struct xsk_buff_pool *pool, unsigned long attrs)
 	if (!pool->dma_pages)
 		return;
 
-	dma_map = xp_find_dma_map(pool);
+	dma_map = xp_find_dma_map(pool, pool->dev);
 	if (!dma_map) {
 		WARN(1, "Could not find dma_map for device");
 		return;
@@ -474,7 +475,7 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 	int err;
 	u32 i;
 
-	dma_map = xp_find_dma_map(pool);
+	dma_map = xp_find_dma_map(pool, dev);
 	if (dma_map) {
 		err = xp_init_dma_info(pool, dma_map);
 		if (err)
