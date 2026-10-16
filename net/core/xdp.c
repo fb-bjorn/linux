@@ -575,7 +575,7 @@ EXPORT_SYMBOL_GPL(xdp_attachment_setup);
 
 struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 {
-	unsigned int metasize, totsize;
+	unsigned int metasize, totsize, headroom;
 	void *addr, *data_to_copy;
 	struct xdp_frame *xdpf;
 	struct page *page;
@@ -588,6 +588,11 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 	if (sizeof(*xdpf) + totsize > SKB_WITH_OVERHEAD(PAGE_SIZE))
 		return NULL;
 
+	/* Leave room for targets that push headers */
+	headroom = min(XDP_PACKET_HEADROOM,
+		       ALIGN_DOWN(SKB_WITH_OVERHEAD(PAGE_SIZE) - totsize,
+				  sizeof(long)));
+
 	page = dev_alloc_page();
 	if (!page)
 		return NULL;
@@ -596,13 +601,13 @@ struct xdp_frame *xdp_convert_zc_to_xdp_frame(struct xdp_buff *xdp)
 	xdpf = addr;
 	memset(xdpf, 0, sizeof(*xdpf));
 
-	addr += sizeof(*xdpf);
+	addr += headroom;
 	data_to_copy = metasize ? xdp->data_meta : xdp->data;
 	memcpy(addr, data_to_copy, totsize);
 
 	xdpf->data = addr + metasize;
 	xdpf->len = totsize - metasize;
-	xdpf->headroom = metasize;
+	xdpf->headroom = headroom - sizeof(*xdpf) + metasize;
 	xdpf->metasize = metasize;
 	xdpf->frame_sz = PAGE_SIZE;
 	xdpf->mem_type = MEM_TYPE_PAGE_ORDER0;
