@@ -3051,8 +3051,11 @@ static void __fbnic_nv_restart(struct fbnic_net *fbn,
 	fbnic_wr32(fbd, FBNIC_INTR_SET(nv->v_idx / 32), BIT(nv->v_idx % 32));
 	fbnic_wrfl(fbd);
 
-	for (i = 0; i < nv->txt_count; i++)
+	for (i = 0; i < nv->txt_count; i++) {
+		if (nv->qt[i].sub0.flags & FBNIC_RING_F_DISABLED)
+			continue;
 		netif_wake_subqueue(fbn->netdev, nv->qt[i].sub0.q_idx);
+	}
 	fbnic_dbg_nv_init(nv);
 }
 
@@ -3093,8 +3096,11 @@ static int fbnic_queue_stop(struct net_device *dev, void *qmem, int idx)
 	napi_disable_locked(&nv->napi);
 	fbnic_nv_irq_disable(nv);
 
-	for (i = 0; i < nv->txt_count; i++)
+	for (i = 0; i < nv->txt_count; i++) {
+		if (nv->qt[i].sub0.flags & FBNIC_RING_F_DISABLED)
+			continue;
 		netif_stop_subqueue(dev, nv->qt[i].sub0.q_idx);
+	}
 	fbnic_nv_disable(fbn, nv);
 
 	/* sub0.q_idx is 0 for RX triads, and for the XDP TX triad of a
