@@ -12495,11 +12495,14 @@ void unregister_netdevice_queue(struct net_device *dev, struct list_head *head)
 }
 EXPORT_SYMBOL(unregister_netdevice_queue);
 
+/* A driver may have lowered real_num_rx_queues without the core checks,
+ * on resume for example, so look at all queues.
+ */
 static void dev_memory_provider_uninstall(struct net_device *dev)
 {
 	unsigned int i;
 
-	for (i = 0; i < dev->real_num_rx_queues; i++) {
+	for (i = 0; i < dev->num_rx_queues; i++) {
 		struct netdev_rx_queue *rxq = &dev->_rx[i];
 
 		__netif_mp_uninstall_rxq(rxq, &rxq->mp_params);
